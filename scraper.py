@@ -25,9 +25,6 @@ HEADERS = {
     )
 }
 
-# Garanti sitesindeki beklenen kolon başlıkları
-BEKLENEN_BASLIKLAR = ["masraf", "asgari tutar", "asgari oran", "azami tutar", "azami oran", "açıklama"]
-
 
 @dataclass
 class UcretSatiri:
@@ -57,15 +54,30 @@ def _normalize(val: str) -> str:
     return val.strip().replace("\xa0", " ").replace("\u200b", "").strip()
 
 
-def _is_header_row(cells) -> bool:
-    """Bir satırın başlık satırı olup olmadığını kontrol et."""
-    texts = [_normalize(c.get_text()).lower() for c in cells]
-    # Eğer hücreler th ise kesinlikle başlık
-    if all(c.name == "th" for c in cells):
-        return True
-    # td olsa bile içerik olarak başlık kelimelerini içeriyorsa başlık say
-    matches = sum(1 for t in texts if any(b in t for b in BEKLENEN_BASLIKLAR))
-    return matches >= 2
+def _debug_tables(soup):
+    """Tüm tabloları ve ilk 3 satırını yazdır - debug için."""
+    tables = soup.find_all("table")
+    print(f"\n=== TOPLAM {len(tables)} TABLO BULUNDU ===", file=sys.stderr)
+    for t_idx, table in enumerate(tables[:5]):  # ilk 5 tabloyu göster
+        rows = table.find_all("tr")
+        print(f"\n--- Tablo {t_idx+1} ({len(rows)} satır) ---", file=sys.stderr)
+        for r_idx, row in enumerate(rows[:4]):  # her tablodan ilk 4 satır
+            cells = row.find_all(["th", "td"])
+            values = [f"[{c.name}]'{_normalize(c.get_text(strip=True))}'" for c in cells]
+            print(f"  Satır {r_idx+1}: {values}", file=sys.stderr)
+
+
+def _find_category_title(table) -> str:
+    el = table.parent
+    depth = 0
+    while el is not None and depth < 8:
+        for sibling in el.find_all_previous(["h1", "h2", "h3", "h4", "h5", "button"], limit=3):
+            text = _normalize(sibling.get_text())
+            if len(text) > 5 and text not in ["Müşteri Ol", "Ara", "Kapat"]:
+                return text
+        el = el.parent
+        depth += 1
+    return "Genel"
 
 
 def _extract_rows_from_table(table, kategori: str) -> List[UcretSatiri]:
@@ -74,46 +86,43 @@ def _extract_rows_from_table(table, kategori: str) -> List[UcretSatiri]:
     if not rows:
         return satirlar
 
-    # Başlık satırını bul ve kolon indekslerini belirle
-    col_masraf = 0
-    col_asgari_tutar = 1
-    col_asgari_oran = 2
-    col_azami_tutar = 3
-    col_azami_oran = 4
-    col_aciklama = 5
-    header_found = False
-    data_start_idx = 0
+    # İlk satırı başlık olarak kabul et (th veya td olsun)
+    header_cells = rows[0].find_all(["th", "td"])
+    header_texts = [_normalize(c.get_text(strip=True)).lower() for c in header_cells]
 
-    for i, row in enumerate(rows):
-        cells = row.find_all(["th", "td"])
-        if not cells:
-            continue
+    print(f"  [debug] Kategori: {kategori}", file=sys.stderr)
+    print(f"  [debug] Başlık satırı ({len(header_texts)} kolon): {header_texts}", file=sys.stderr)
 
-        if _is_header_row(cells):
-            header_found = True
-            data_start_idx = i + 1
-            # Kolon eşleştirmesi yap
-            for j, cell in enumerate(cells):
-                text = _normalize(cell.get_text()).lower()
-                if "masraf" in text:
-                    col_masraf = j
-                elif "asgari" in text and "tutar" in text:
-                    col_asgari_tutar = j
-                elif "asgari" in text and "oran" in text:
-                    col_asgari_oran = j
-                elif "azami" in text and "tutar" in text:
-                    col_azami_tutar = j
-                elif "azami" in text and "oran" in text:
-                    col_azami_oran = j
-                elif "açıklama" in text or "aciklama" in text:
-                    col_aciklama = j
-            break
+    # Kolon indexlerini başlık metnine göre bul
+    def find_col(keywords):
+        for i, h in enumerate(header_texts):
+            if all(k in h for k in keywords):
+                return i
+        return -1
 
-    if not header_found:
-        data_start_idx = 0
+    col_masraf    = find_col(["masraf"])
+    col_asg_tutar = find_col(["asgari", "tutar"])
+    col_asg_oran  = find_col(["asgari", "oran"])
+    col_azm_tutar = find_col(["azami", "tutar"])
+    col_azm_oran  = find_col(["azami", "oran"])
+    col_aciklama  = find_col(["açıklama"]) if find_col(["açıklama"]) >= 0 else find_col(["aciklama"])
 
-    # Veri satırlarını oku
-    for row in rows[data_start_idx:]:
+    print(f"  [debug] Kolon indexleri: masraf={col_masraf}, asg_tutar={col_asg_tutar}, "
+          f"asg_oran={col_asg_oran}, azm_tutar={col_azm_tutar}, azm_oran={col_azm_oran}, "
+          f"aciklama={col_aciklama}", file=sys.stderr)
+
+    # Başlık bulunamadıysa varsayılan index kullan
+    if col_masraf == -1:
+        print(f"  [UYARI] 'masraf' başlığı bulunamadı! Varsayılan sıra kullanılıyor.", file=sys.stderr)
+        col_masraf    = 0
+        col_asg_tutar = 1
+        col_asg_oran  = 2
+        col_azm_tutar = 3
+        col_azm_oran  = 4
+        col_aciklama  = 5
+
+    # Veri satırlarını oku (başlık satırını atla)
+    for row in rows[1:]:
         cells = row.find_all("td")
         if not cells or len(cells) < 2:
             continue
@@ -121,14 +130,10 @@ def _extract_rows_from_table(table, kategori: str) -> List[UcretSatiri]:
         values = [_normalize(c.get_text(strip=True)) for c in cells]
 
         def get(idx):
-            return values[idx] if idx < len(values) else ""
+            return values[idx] if 0 <= idx < len(values) else ""
 
         masraf = get(col_masraf)
         if not masraf:
-            continue
-
-        # Başlık satırı veri satırı olarak gelmiş olabilir, atla
-        if any(b in masraf.lower() for b in BEKLENEN_BASLIKLAR):
             continue
 
         raw_aciklama = get(col_aciklama)
@@ -138,34 +143,16 @@ def _extract_rows_from_table(table, kategori: str) -> List[UcretSatiri]:
             UcretSatiri(
                 kategori=kategori,
                 masraf=masraf,
-                asgari_tutar=get(col_asgari_tutar),
-                asgari_oran=get(col_asgari_oran),
-                azami_tutar=get(col_azami_tutar),
-                azami_oran=get(col_azami_oran),
+                asgari_tutar=get(col_asg_tutar),
+                asgari_oran=get(col_asg_oran),
+                azami_tutar=get(col_azm_tutar),
+                azami_oran=get(col_azm_oran),
                 aciklama=temiz_aciklama,
                 site_guncelleme_tarihi=site_tarihi,
             )
         )
 
     return satirlar
-
-
-def _find_category_title(table) -> str:
-    """Tablonun ait olduğu kategori başlığını bul."""
-    # Tablonun parent'larında accordion button veya heading ara
-    el = table.parent
-    depth = 0
-    while el is not None and depth < 8:
-        # Önce kardeş elementlerde ara (previous sibling)
-        for sibling in el.find_all_previous(["h1", "h2", "h3", "h4", "h5", "button"], limit=3):
-            text = _normalize(sibling.get_text())
-            # Çok kısa veya gereksiz metinleri atla
-            if len(text) > 5 and text not in ["Müşteri Ol", "Ara", "Kapat"]:
-                return text
-        el = el.parent
-        depth += 1
-
-    return "Genel"
 
 
 def _scrape_with_playwright(url: str = GARANTI_URL) -> List[UcretSatiri]:
@@ -182,7 +169,6 @@ def _scrape_with_playwright(url: str = GARANTI_URL) -> List[UcretSatiri]:
             page = browser.new_page(user_agent=HEADERS["User-Agent"])
             page.goto(url, timeout=60000, wait_until="networkidle")
 
-            # Tüm kapalı accordion'ları aç
             for selector in [
                 "button[aria-expanded='false']",
                 ".accordion-button.collapsed",
@@ -206,6 +192,7 @@ def _scrape_with_playwright(url: str = GARANTI_URL) -> List[UcretSatiri]:
             browser.close()
 
     soup = BeautifulSoup(html, "lxml")
+    _debug_tables(soup)  # DEBUG ÇIKTISI
     tables = soup.find_all("table")
 
     if not tables:
@@ -227,6 +214,7 @@ def _scrape_with_requests(url: str = GARANTI_URL) -> Optional[List[UcretSatiri]]
         raise ScraperError(f"Sayfaya erişilemedi: {exc}") from exc
 
     soup = BeautifulSoup(response.text, "lxml")
+    _debug_tables(soup)  # DEBUG ÇIKTISI
     tables = soup.find_all("table")
 
     if not tables:
@@ -244,7 +232,6 @@ def _scrape_with_requests(url: str = GARANTI_URL) -> Optional[List[UcretSatiri]]
 def scrape_garanti_bbva(url: str = GARANTI_URL) -> List[UcretSatiri]:
     print(f"[scraper] {url} adresinden veri çekiliyor...", file=sys.stderr)
 
-    # Playwright ile dene (accordion'lar açılsın)
     print("[scraper] Playwright deneniyor...", file=sys.stderr)
     try:
         satirlar = _scrape_with_playwright(url)
@@ -254,7 +241,6 @@ def scrape_garanti_bbva(url: str = GARANTI_URL) -> List[UcretSatiri]:
     except Exception as exc:
         print(f"[scraper] Playwright başarısız: {exc}", file=sys.stderr)
 
-    # Fallback: requests
     print("[scraper] requests ile deneniyor...", file=sys.stderr)
     satirlar = _scrape_with_requests(url)
     if satirlar:
@@ -266,6 +252,6 @@ def scrape_garanti_bbva(url: str = GARANTI_URL) -> List[UcretSatiri]:
 
 if __name__ == "__main__":
     veriler = scrape_garanti_bbva()
-    for v in veriler[:10]:
+    for v in veriler[:5]:
         print(v)
     print(f"Toplam {len(veriler)} satır bulundu.")
