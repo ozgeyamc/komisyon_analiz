@@ -2,7 +2,7 @@ name: Günlük Komisyon Güncelleme
 
 on:
   schedule:
-    - cron: "0 5 * * *"  # Her gün sabah 05:00 UTC (Türkiye 08:00)
+    - cron: "0 5 * * *"
   workflow_dispatch: {}
 
 permissions:
@@ -32,17 +32,17 @@ jobs:
       - name: Scraper'ı çalıştır ve Excel'i güncelle
         run: python main.py
 
-            - name: Excel dosyasını artifact olarak kaydet
+      - name: Excel dosyasını artifact olarak kaydet
         uses: actions/upload-artifact@v4
         with:
           name: komisyon-raporu
-          path: garanti_komisyonlar.xlsx   # ← tum_bankalar değil, bu olmalı
+          path: garanti_komisyonlar.xlsx
           retention-days: 30
 
       - name: Değişiklik var mı kontrol et
         id: git_check
         run: |
-          if [ -n "$(git status --porcelain tum_bankalar_komisyonlar.xlsx)" ]; then
+          if [ -n "$(git status --porcelain garanti_komisyonlar.xlsx)" ]; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
           else
             echo "changed=false" >> "$GITHUB_OUTPUT"
@@ -53,6 +53,6 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add tum_bankalar_komisyonlar.xlsx
+          git add garanti_komisyonlar.xlsx
           git commit -m "Komisyon ücretleri güncellendi ($(date +'%d.%m.%Y'))"
           git push
