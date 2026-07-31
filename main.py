@@ -1,12 +1,12 @@
 """
-Garanti BBVA + Ziraat Bankası komisyon ücretleri takip botu.
+Garanti BBVA + Ziraat + Halkbank komisyon ücretleri takip botu.
 """
 
 import sys
 
 from scraper import ScraperError, scrape_garanti_bbva
-from scraper_ziraat import ScraperError as ZiraatScraperError
 from scraper_ziraat import scrape_ziraat
+from scraper_halkbank import scrape_halkbank
 from update_excel import EXCEL_DOSYA_ADI, excel_guncelle_coklu
 
 
@@ -18,26 +18,34 @@ def main() -> int:
     # Garanti BBVA
     print("\n--- Garanti BBVA çekiliyor ---")
     try:
-        garanti_satirlar = scrape_garanti_bbva()
-        banka_verileri["GARANTİ"] = garanti_satirlar
-        print(f"Garanti: {len(garanti_satirlar)} satır bulundu.")
-    except (ScraperError, Exception) as exc:
+        satirlar = scrape_garanti_bbva()
+        banka_verileri["GARANTİ"] = satirlar
+        print(f"Garanti: {len(satirlar)} satır bulundu.")
+    except Exception as exc:
         print(f"[HATA] Garanti çekilemedi: {exc}", file=sys.stderr)
 
     # Ziraat Bankası
     print("\n--- Ziraat Bankası çekiliyor ---")
     try:
-        ziraat_satirlar = scrape_ziraat()
-        banka_verileri["ZİRAAT"] = ziraat_satirlar
-        print(f"Ziraat: {len(ziraat_satirlar)} satır bulundu.")
-    except (ZiraatScraperError, Exception) as exc:
+        satirlar = scrape_ziraat()
+        banka_verileri["ZİRAAT"] = satirlar
+        print(f"Ziraat: {len(satirlar)} satır bulundu.")
+    except Exception as exc:
         print(f"[HATA] Ziraat çekilemedi: {exc}", file=sys.stderr)
+
+    # Halkbank
+    print("\n--- Halkbank çekiliyor ---")
+    try:
+        satirlar = scrape_halkbank()
+        banka_verileri["HALKBANK"] = satirlar
+        print(f"Halkbank: {len(satirlar)} satır bulundu.")
+    except Exception as exc:
+        print(f"[HATA] Halkbank çekilemedi: {exc}", file=sys.stderr)
 
     if not banka_verileri:
         print("[HATA] Hiçbir bankadan veri çekilemedi!", file=sys.stderr)
         return 1
 
-    # Excel'e yaz
     try:
         ozet = excel_guncelle_coklu(banka_verileri, EXCEL_DOSYA_ADI)
     except Exception as exc:
