@@ -244,7 +244,6 @@ def _scrape_with_requests(url: str = ZIRAAT_URL) -> Optional[List[UcretSatiri]]:
 def scrape_ziraat(url: str = ZIRAAT_URL) -> List[UcretSatiri]:
     print(f"[ziraat] {url} adresinden veri çekiliyor...", file=sys.stderr)
 
-    print("[ziraat] Playwright deneniyor...", file=sys.stderr)
     try:
         satirlar = _scrape_with_playwright(url)
         if satirlar:
@@ -253,7 +252,6 @@ def scrape_ziraat(url: str = ZIRAAT_URL) -> List[UcretSatiri]:
     except Exception as exc:
         print(f"[ziraat] Playwright başarısız: {exc}", file=sys.stderr)
 
-    print("[ziraat] requests ile deneniyor...", file=sys.stderr)
     satirlar = _scrape_with_requests(url)
     if satirlar:
         print(f"[ziraat] requests ile {len(satirlar)} satır bulundu.", file=sys.stderr)
