@@ -32,11 +32,11 @@ jobs:
       - name: Scraper'ı çalıştır ve Excel'i güncelle
         run: python main.py
 
-      - name: Excel dosyasını artifact olarak kaydet
+            - name: Excel dosyasını artifact olarak kaydet
         uses: actions/upload-artifact@v4
         with:
           name: komisyon-raporu
-          path: tum_bankalar_komisyonlar.xlsx
+          path: garanti_komisyonlar.xlsx   # ← tum_bankalar değil, bu olmalı
           retention-days: 30
 
       - name: Değişiklik var mı kontrol et
