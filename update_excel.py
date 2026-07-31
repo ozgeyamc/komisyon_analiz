@@ -13,7 +13,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 from scraper import UcretSatiri
 
 EXCEL_DOSYA_ADI = "garanti_komisyonlar.xlsx"
-SHEET_ADI = "GARANTI"
+SHEET_ADI = "KOMISYONLAR"
 
 BASLIKLAR = [
     "BANKA",
@@ -40,8 +40,11 @@ COL_GUNCELLEME_TARIHI = 9
 BASLIK_FILL = PatternFill(start_color="1F3864", end_color="1F3864", fill_type="solid")
 BASLIK_FONT = Font(color="FFFFFF", bold=True)
 
-GARANTI_FILL = PatternFill(start_color="00B050", end_color="00B050", fill_type="solid")
-GARANTI_FONT = Font(color="FFFFFF", bold=True)
+# Her banka için renk tanımları
+BANKA_RENKLER = {
+    "GARANTİ":  {"bg": "00B050", "fg": "FFFFFF"},  # Yeşil
+    "ZİRAAT":   {"bg": "C00000", "fg": "FFFFFF"},  # Kırmızı
+}
 
 
 def _bugun_tarih_str() -> str:
@@ -66,19 +69,17 @@ def _yeni_workbook_olustur() -> Tuple[Workbook, Worksheet]:
     return wb, ws
 
 
-def excel_guncelle(satirlar: List[UcretSatiri], dosya_yolu: str = EXCEL_DOSYA_ADI) -> Dict[str, int]:
-    if os.path.exists(dosya_yolu):
-        os.remove(dosya_yolu)
-
-    wb, ws = _yeni_workbook_olustur()
+def satirlari_yaz(ws: Worksheet, satirlar: List[UcretSatiri], banka_adi: str) -> int:
+    renk = BANKA_RENKLER.get(banka_adi, {"bg": "808080", "fg": "FFFFFF"})
+    banka_fill = PatternFill(start_color=renk["bg"], end_color=renk["bg"], fill_type="solid")
+    banka_font = Font(color=renk["fg"], bold=True)
 
     for satir in satirlar:
         yeni_row = ws.max_row + 1
 
-        # BANKA kolonu — yeşil renkli
-        banka_cell = ws.cell(row=yeni_row, column=COL_BANKA, value="GARANTİ")
-        banka_cell.fill = GARANTI_FILL
-        banka_cell.font = GARANTI_FONT
+        banka_cell = ws.cell(row=yeni_row, column=COL_BANKA, value=banka_adi)
+        banka_cell.fill = banka_fill
+        banka_cell.font = banka_font
         banka_cell.alignment = Alignment(horizontal="center", vertical="center")
 
         ws.cell(row=yeni_row, column=COL_KATEGORI, value=satir.kategori)
@@ -90,6 +91,30 @@ def excel_guncelle(satirlar: List[UcretSatiri], dosya_yolu: str = EXCEL_DOSYA_AD
         ws.cell(row=yeni_row, column=COL_ACIKLAMA, value=satir.aciklama)
         ws.cell(row=yeni_row, column=COL_GUNCELLEME_TARIHI, value=_bugun_tarih_str())
 
+    return len(satirlar)
+
+
+def excel_guncelle(satirlar: List[UcretSatiri], dosya_yolu: str = EXCEL_DOSYA_ADI) -> Dict[str, int]:
+    # Garanti için geriye dönük uyumluluk
+    if os.path.exists(dosya_yolu):
+        os.remove(dosya_yolu)
+
+    wb, ws = _yeni_workbook_olustur()
+    satirlari_yaz(ws, satirlar, "GARANTİ")
     wb.save(dosya_yolu)
 
     return {"eklendi": len(satirlar), "guncellendi": 0, "degismedi": 0}
+
+
+def excel_guncelle_coklu(banka_verileri: Dict[str, List[UcretSatiri]], dosya_yolu: str = EXCEL_DOSYA_ADI) -> Dict[str, int]:
+    if os.path.exists(dosya_yolu):
+        os.remove(dosya_yolu)
+
+    wb, ws = _yeni_workbook_olustur()
+
+    toplam = 0
+    for banka_adi, satirlar in banka_verileri.items():
+        toplam += satirlari_yaz(ws, satirlar, banka_adi)
+
+    wb.save(dosya_yolu)
+    return {"eklendi": toplam, "guncellendi": 0, "degismedi": 0}
