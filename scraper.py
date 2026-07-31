@@ -231,7 +231,6 @@ def _scrape_with_requests(url: str = GARANTI_URL) -> Optional[List[UcretSatiri]]
 def scrape_garanti_bbva(url: str = GARANTI_URL) -> List[UcretSatiri]:
     print(f"[garanti] {url} adresinden veri çekiliyor...", file=sys.stderr)
 
-    print("[garanti] Playwright deneniyor...", file=sys.stderr)
     try:
         satirlar = _scrape_with_playwright(url)
         if satirlar:
@@ -240,7 +239,6 @@ def scrape_garanti_bbva(url: str = GARANTI_URL) -> List[UcretSatiri]:
     except Exception as exc:
         print(f"[garanti] Playwright başarısız: {exc}", file=sys.stderr)
 
-    print("[garanti] requests ile deneniyor...", file=sys.stderr)
     satirlar = _scrape_with_requests(url)
     if satirlar:
         print(f"[garanti] requests ile {len(satirlar)} satır bulundu.", file=sys.stderr)
