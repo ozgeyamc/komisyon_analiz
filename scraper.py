@@ -54,19 +54,6 @@ def _normalize(val: str) -> str:
     return val.strip().replace("\xa0", " ").replace("\u200b", "").strip()
 
 
-def _debug_tables(soup):
-    """Tüm tabloları ve ilk 3 satırını yazdır - debug için."""
-    tables = soup.find_all("table")
-    print(f"\n=== TOPLAM {len(tables)} TABLO BULUNDU ===", file=sys.stderr)
-    for t_idx, table in enumerate(tables[:5]):  # ilk 5 tabloyu göster
-        rows = table.find_all("tr")
-        print(f"\n--- Tablo {t_idx+1} ({len(rows)} satır) ---", file=sys.stderr)
-        for r_idx, row in enumerate(rows[:4]):  # her tablodan ilk 4 satır
-            cells = row.find_all(["th", "td"])
-            values = [f"[{c.name}]'{_normalize(c.get_text(strip=True))}'" for c in cells]
-            print(f"  Satır {r_idx+1}: {values}", file=sys.stderr)
-
-
 def _find_category_title(table) -> str:
     el = table.parent
     depth = 0
@@ -86,12 +73,9 @@ def _extract_rows_from_table(table, kategori: str) -> List[UcretSatiri]:
     if not rows:
         return satirlar
 
-    # İlk satırı başlık olarak kabul et (th veya td olsun)
+    # İlk satır başlık satırı — th veya td olabilir
     header_cells = rows[0].find_all(["th", "td"])
     header_texts = [_normalize(c.get_text(strip=True)).lower() for c in header_cells]
-
-    print(f"  [debug] Kategori: {kategori}", file=sys.stderr)
-    print(f"  [debug] Başlık satırı ({len(header_texts)} kolon): {header_texts}", file=sys.stderr)
 
     # Kolon indexlerini başlık metnine göre bul
     def find_col(keywords):
@@ -105,15 +89,12 @@ def _extract_rows_from_table(table, kategori: str) -> List[UcretSatiri]:
     col_asg_oran  = find_col(["asgari", "oran"])
     col_azm_tutar = find_col(["azami", "tutar"])
     col_azm_oran  = find_col(["azami", "oran"])
-    col_aciklama  = find_col(["açıklama"]) if find_col(["açıklama"]) >= 0 else find_col(["aciklama"])
-
-    print(f"  [debug] Kolon indexleri: masraf={col_masraf}, asg_tutar={col_asg_tutar}, "
-          f"asg_oran={col_asg_oran}, azm_tutar={col_azm_tutar}, azm_oran={col_azm_oran}, "
-          f"aciklama={col_aciklama}", file=sys.stderr)
+    col_aciklama  = find_col(["açıklama"])
+    if col_aciklama == -1:
+        col_aciklama = find_col(["aciklama"])
 
     # Başlık bulunamadıysa varsayılan index kullan
     if col_masraf == -1:
-        print(f"  [UYARI] 'masraf' başlığı bulunamadı! Varsayılan sıra kullanılıyor.", file=sys.stderr)
         col_masraf    = 0
         col_asg_tutar = 1
         col_asg_oran  = 2
@@ -121,9 +102,9 @@ def _extract_rows_from_table(table, kategori: str) -> List[UcretSatiri]:
         col_azm_oran  = 4
         col_aciklama  = 5
 
-    # Veri satırlarını oku (başlık satırını atla)
+    # Veri satırlarını oku — ÖNEMLİ: th ve td ikisini birden ara!
     for row in rows[1:]:
-        cells = row.find_all("td")
+        cells = row.find_all(["th", "td"])  # ← DÜZELTME: sadece td değil, th+td
         if not cells or len(cells) < 2:
             continue
 
@@ -192,7 +173,6 @@ def _scrape_with_playwright(url: str = GARANTI_URL) -> List[UcretSatiri]:
             browser.close()
 
     soup = BeautifulSoup(html, "lxml")
-    _debug_tables(soup)  # DEBUG ÇIKTISI
     tables = soup.find_all("table")
 
     if not tables:
@@ -214,7 +194,6 @@ def _scrape_with_requests(url: str = GARANTI_URL) -> Optional[List[UcretSatiri]]
         raise ScraperError(f"Sayfaya erişilemedi: {exc}") from exc
 
     soup = BeautifulSoup(response.text, "lxml")
-    _debug_tables(soup)  # DEBUG ÇIKTISI
     tables = soup.find_all("table")
 
     if not tables:
