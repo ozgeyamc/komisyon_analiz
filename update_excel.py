@@ -40,10 +40,10 @@ COL_GUNCELLEME_TARIHI = 9
 BASLIK_FILL = PatternFill(start_color="1F3864", end_color="1F3864", fill_type="solid")
 BASLIK_FONT = Font(color="FFFFFF", bold=True)
 
-# Her banka için renk tanımları
 BANKA_RENKLER = {
     "GARANTİ":  {"bg": "00B050", "fg": "FFFFFF"},  # Yeşil
     "ZİRAAT":   {"bg": "C00000", "fg": "FFFFFF"},  # Kırmızı
+    "HALKBANK": {"bg": "7030A0", "fg": "FFFFFF"},  # Mor
 }
 
 
@@ -94,18 +94,6 @@ def satirlari_yaz(ws: Worksheet, satirlar: List[UcretSatiri], banka_adi: str) ->
     return len(satirlar)
 
 
-def excel_guncelle(satirlar: List[UcretSatiri], dosya_yolu: str = EXCEL_DOSYA_ADI) -> Dict[str, int]:
-    # Garanti için geriye dönük uyumluluk
-    if os.path.exists(dosya_yolu):
-        os.remove(dosya_yolu)
-
-    wb, ws = _yeni_workbook_olustur()
-    satirlari_yaz(ws, satirlar, "GARANTİ")
-    wb.save(dosya_yolu)
-
-    return {"eklendi": len(satirlar), "guncellendi": 0, "degismedi": 0}
-
-
 def excel_guncelle_coklu(banka_verileri: Dict[str, List[UcretSatiri]], dosya_yolu: str = EXCEL_DOSYA_ADI) -> Dict[str, int]:
     if os.path.exists(dosya_yolu):
         os.remove(dosya_yolu)
@@ -118,3 +106,7 @@ def excel_guncelle_coklu(banka_verileri: Dict[str, List[UcretSatiri]], dosya_yol
 
     wb.save(dosya_yolu)
     return {"eklendi": toplam, "guncellendi": 0, "degismedi": 0}
+
+
+def excel_guncelle(satirlar: List[UcretSatiri], dosya_yolu: str = EXCEL_DOSYA_ADI) -> Dict[str, int]:
+    return excel_guncelle_coklu({"GARANTİ": satirlar}, dosya_yolu)
