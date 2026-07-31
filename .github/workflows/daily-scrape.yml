@@ -2,7 +2,7 @@ name: Günlük Komisyon Güncelleme
 
 on:
   schedule:
-    - cron: "0 5 * * *"
+    - cron: "0 5 * * *"  # Her gün sabah 05:00 UTC (Türkiye 08:00)
   workflow_dispatch: {}
 
 permissions:
@@ -11,6 +11,7 @@ permissions:
 jobs:
   scrape-and-update:
     runs-on: ubuntu-latest
+
     steps:
       - name: Repo'yu checkout et
         uses: actions/checkout@v4
@@ -31,10 +32,17 @@ jobs:
       - name: Scraper'ı çalıştır ve Excel'i güncelle
         run: python main.py
 
+      - name: Excel dosyasını artifact olarak kaydet
+        uses: actions/upload-artifact@v4
+        with:
+          name: komisyon-raporu
+          path: tum_bankalar_komisyonlar.xlsx
+          retention-days: 30
+
       - name: Değişiklik var mı kontrol et
         id: git_check
         run: |
-          if [ -n "$(git status --porcelain garanti_komisyonlar.xlsx)" ]; then
+          if [ -n "$(git status --porcelain tum_bankalar_komisyonlar.xlsx)" ]; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
           else
             echo "changed=false" >> "$GITHUB_OUTPUT"
@@ -45,40 +53,6 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add garanti_komisyonlar.xlsx
+          git add tum_bankalar_komisyonlar.xlsx
           git commit -m "Komisyon ücretleri güncellendi ($(date +'%d.%m.%Y'))"
           git push
-          name: Günlük Komisyon Güncelleme
-
-on:
-  schedule:
-    - cron: '0 6 * * *'  # Her gün sabah 06:00 UTC (Türkiye 09:00)
-  workflow_dispatch:      # Manuel tetikleme butonu
-
-jobs:
-  scrape-and-update:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Kodu çek
-        uses: actions/checkout@v4
-
-      - name: Python kur
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Bağımlılıkları yükle
-        run: |
-          pip install requests beautifulsoup4 lxml openpyxl playwright
-          playwright install chromium
-
-      - name: Scripti çalıştır
-        run: python main.py
-
-      - name: Excel dosyasını artifact olarak kaydet  # ← YENİ EKLENEN ADIM
-        uses: actions/upload-artifact@v4
-        with:
-          name: komisyon-raporu
-          path: tum_bankalar_komisyonlar.xlsx
-          retention-days: 30  # 30 gün boyunca indirilebilir kalır
