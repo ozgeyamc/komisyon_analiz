@@ -1,5 +1,6 @@
 """
 Halkbank "Ürün ve Hizmet Ücretleri" sayfasını çeken scraper modülü.
+Ana sayfadaki tüm alt sayfa linklerini otomatik tespit eder.
 """
 
 import re
@@ -10,7 +11,7 @@ from typing import List, Optional
 import requests
 from bs4 import BeautifulSoup
 
-HALKBANK_URL = "https://www.halkbank.com.tr/tr/urun-ve-hizmet-ucretleri"
+HALKBANK_ANA_URL = "https://www.halkbank.com.tr/tr/urun-ve-hizmet-ucretleri"
 
 DATE_PATTERN = re.compile(
     r"G[üu]ncell[ei]nme\s*Tarihi\s*:\s*(\d{2}\.\d{2}\.\d{4}(?:\s+\d{2}:\d{2})?)",
@@ -24,19 +25,6 @@ HEADERS = {
         "Chrome/124.0.0.0 Safari/537.36"
     )
 }
-
-# Halkbank 9 alt kategori sayfası
-HALKBANK_ALT_SAYFALAR = [
-    ("Kredi Kartları ve Banka Kartları", "https://www.halkbank.com.tr/tr/urun-ve-hizmet-ucretleri/kredi-kartlari-ve-banka-kartlari"),
-    ("Havale EFT FAST", "https://www.halkbank.com.tr/tr/urun-ve-hizmet-ucretleri/havale-eft-fast"),
-    ("Krediler", "https://www.halkbank.com.tr/tr/urun-ve-hizmet-ucretleri/krediler"),
-    ("Mevduat İşlemleri", "https://www.halkbank.com.tr/tr/urun-ve-hizmet-ucretleri/mevduat-islemleri"),
-    ("Menkul Kıymet İşlemleri", "https://www.halkbank.com.tr/tr/urun-ve-hizmet-ucretleri/menkul-kiymet-islemleri"),
-    ("Dış Ticaret İşlemleri", "https://www.halkbank.com.tr/tr/urun-ve-hizmet-ucretleri/dis-ticaret-islemleri"),
-    ("Çekler ve Senetler", "https://www.halkbank.com.tr/tr/urun-ve-hizmet-ucretleri/cekler-ve-senetler"),
-    ("Sigorta İşlemleri", "https://www.halkbank.com.tr/tr/urun-ve-hizmet-ucretleri/sigorta-islemleri"),
-    ("Diğer İşlemler", "https://www.halkbank.com.tr/tr/urun-ve-hizmet-ucretleri/diger-islemler"),
-]
 
 
 @dataclass
@@ -73,7 +61,7 @@ def _find_category_title(table, sayfa_kategorisi: str) -> str:
     while el is not None and depth < 8:
         for sibling in el.find_all_previous(["h1", "h2", "h3", "h4", "h5", "button"], limit=3):
             text = _normalize(sibling.get_text())
-            if len(text) > 5 and text not in ["Müşteri Ol", "Ara", "Kapat", "Menü"]:
+            if len(text) > 5 and text not in ["Müşteri Ol", "Ara", "Kapat", "Menü", "Ana Sayfa"]:
                 return text
         el = el.parent
         depth += 1
@@ -170,11 +158,62 @@ def _extract_rows_from_table(table, kategori: str) -> List[UcretSatiri]:
     return satirlar
 
 
+def _alt_sayfa_linklerini_bul(ana_url: str) -> List[tuple]:
+    """
+    Ana sayfayı açıp /tr/urun-ve-hizmet-ucretleri/ ile başlayan
+    tüm alt sayfa linklerini otomatik olarak toplar.
+    """
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        try:
+            page = browser.new_page(user_agent=HEADERS["User-Agent"])
+            page.goto(ana_url, timeout=60000, wait_until="networkidle")
+            page.wait_for_timeout(2000)
+            html = page.content()
+        finally:
+            browser.close()
+
+    soup = BeautifulSoup(html, "lxml")
+
+    base = "https://www.halkbank.com.tr"
+    prefix = "/tr/urun-ve-hizmet-ucretleri/"
+
+    bulunan = {}
+    for a in soup.find_all("a", href=True):
+        href = a["href"].strip()
+        # Tam URL veya relative URL olabilir
+        if href.startswith(base):
+            path = href.replace(base, "")
+        else:
+            path = href
+
+        # /tr/urun-ve-hizmet-ucretleri/ ile başlayan ve alt sayfa olan linkler
+        if path.startswith(prefix) and len(path) > len(prefix):
+            # Fragment (#...) ve query string temizle
+            clean_path = path.split("#")[0].split("?")[0].rstrip("/")
+            full_url = base + clean_path
+
+            # Sadece bir seviye alt sayfa (içinde başka / yoksa)
+            alt_kisim = clean_path.replace(prefix, "")
+            if "/" not in alt_kisim and alt_kisim:
+                link_text = _normalize(a.get_text())
+                if not link_text:
+                    link_text = alt_kisim.replace("-", " ").title()
+                if full_url not in bulunan:
+                    bulunan[full_url] = link_text
+
+    linkler = [(ad, url) for url, ad in bulunan.items()]
+    print(f"[halkbank] Ana sayfada {len(linkler)} alt sayfa bulundu:", file=sys.stderr)
+    for ad, url in linkler:
+        print(f"  - {ad}: {url}", file=sys.stderr)
+
+    return linkler
+
+
 def _scrape_sayfa(url: str, sayfa_kategorisi: str) -> List[UcretSatiri]:
-    try:
-        from playwright.sync_api import sync_playwright
-    except ImportError as exc:
-        raise ScraperError("Playwright kurulu değil.") from exc
+    from playwright.sync_api import sync_playwright
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -182,6 +221,7 @@ def _scrape_sayfa(url: str, sayfa_kategorisi: str) -> List[UcretSatiri]:
             page = browser.new_page(user_agent=HEADERS["User-Agent"])
             page.goto(url, timeout=60000, wait_until="networkidle")
 
+            # Tüm accordion/tab'ları aç
             for selector in [
                 "button[aria-expanded='false']",
                 ".accordion-button.collapsed",
@@ -220,16 +260,38 @@ def _scrape_sayfa(url: str, sayfa_kategorisi: str) -> List[UcretSatiri]:
     return tum_satirlar
 
 
-def scrape_halkbank() -> List[UcretSatiri]:
-    print(f"[halkbank] 9 alt sayfa çekiliyor...", file=sys.stderr)
+def scrape_halkbank(ana_url: str = HALKBANK_ANA_URL) -> List[UcretSatiri]:
+    print(f"[halkbank] Alt sayfalar tespit ediliyor: {ana_url}", file=sys.stderr)
 
+    # 1. Ana sayfadan tüm alt sayfa linklerini otomatik bul
+    try:
+        alt_sayfalar = _alt_sayfa_linklerini_bul(ana_url)
+    except Exception as exc:
+        print(f"[halkbank] Alt sayfa tespiti başarısız: {exc}", file=sys.stderr)
+        alt_sayfalar = []
+
+    # Alt sayfa bulunamazsa fallback liste
+    if not alt_sayfalar:
+        print(f"[halkbank] Fallback liste kullanılıyor...", file=sys.stderr)
+        alt_sayfalar = [
+            ("Kredi Kartları ve Banka Kartları", f"{ana_url}/kredi-kartlari-ve-banka-kartlari"),
+            ("Havale EFT FAST", f"{ana_url}/havale-eft-fast"),
+            ("Krediler", f"{ana_url}/krediler"),
+            ("Mevduat İşlemleri", f"{ana_url}/mevduat-islemleri"),
+            ("Menkul Kıymet İşlemleri", f"{ana_url}/menkul-kiymet-islemleri"),
+            ("Dış Ticaret İşlemleri", f"{ana_url}/dis-ticaret-islemleri"),
+            ("Çekler ve Senetler", f"{ana_url}/cekler-ve-senetler"),
+            ("Sigorta İşlemleri", f"{ana_url}/sigorta-islemleri"),
+            ("Diğer İşlemler", f"{ana_url}/diger-islemler"),
+        ]
+
+    # 2. Her alt sayfadan tabloları çek
     tum_satirlar: List[UcretSatiri] = []
-
-    for sayfa_adi, url in HALKBANK_ALT_SAYFALAR:
+    for sayfa_adi, url in alt_sayfalar:
         print(f"[halkbank] '{sayfa_adi}' çekiliyor...", file=sys.stderr)
         try:
             satirlar = _scrape_sayfa(url, sayfa_adi)
-            print(f"[halkbank] '{sayfa_adi}' — {len(satirlar)} satır bulundu.", file=sys.stderr)
+            print(f"[halkbank] '{sayfa_adi}' — {len(satirlar)} satır.", file=sys.stderr)
             tum_satirlar.extend(satirlar)
         except Exception as exc:
             print(f"[halkbank] '{sayfa_adi}' çekilemedi: {exc}", file=sys.stderr)
