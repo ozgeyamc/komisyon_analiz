@@ -1,5 +1,5 @@
 """
-Garanti BBVA "Ürün ve Hizmet Ücretleri" sayfasını çeken scraper modülü.
+Ziraat Bankası "Ürün ve Hizmet Ücretleri" sayfasını çeken scraper modülü.
 """
 
 import re
@@ -10,7 +10,7 @@ from typing import List, Optional
 import requests
 from bs4 import BeautifulSoup
 
-GARANTI_URL = "https://www.garantibbva.com.tr/urun-ve-hizmet-ucretleri"
+ZIRAAT_URL = "https://www.ziraatbank.com.tr/tr/urun-ve-hizmet-ucretleri"
 
 DATE_PATTERN = re.compile(
     r"G[üu]ncell[ei]nme\s*Tarihi\s*:\s*(\d{2}\.\d{2}\.\d{4}(?:\s+\d{2}:\d{2})?)",
@@ -60,7 +60,7 @@ def _find_category_title(table) -> str:
     while el is not None and depth < 8:
         for sibling in el.find_all_previous(["h1", "h2", "h3", "h4", "h5", "button"], limit=3):
             text = _normalize(sibling.get_text())
-            if len(text) > 5 and text not in ["Müşteri Ol", "Ara", "Kapat"]:
+            if len(text) > 5 and text not in ["Müşteri Ol", "Ara", "Kapat", "Menü"]:
                 return text
         el = el.parent
         depth += 1
@@ -73,7 +73,6 @@ def _extract_rows_from_table(table, kategori: str) -> List[UcretSatiri]:
     thead = table.find("thead")
     tbody = table.find("tbody")
 
-    # Başlık satırını al
     header_texts = []
     if thead:
         header_row = thead.find("tr")
@@ -83,7 +82,6 @@ def _extract_rows_from_table(table, kategori: str) -> List[UcretSatiri]:
                 for c in header_row.find_all(["th", "td"])
             ]
 
-    # Veri satırlarını al
     if tbody:
         data_rows = tbody.find_all("tr")
         if not header_texts and data_rows:
@@ -103,7 +101,8 @@ def _extract_rows_from_table(table, kategori: str) -> List[UcretSatiri]:
             ]
         data_rows = all_rows[1:]
 
-    # Kolon indexlerini bul
+    print(f"  [ziraat debug] Kategori: {kategori}, Başlık: {header_texts}", file=sys.stderr)
+
     def find_col(keywords):
         for i, h in enumerate(header_texts):
             if all(k in h for k in keywords):
@@ -128,7 +127,6 @@ def _extract_rows_from_table(table, kategori: str) -> List[UcretSatiri]:
         col_aciklama  = 5
 
     for row in data_rows:
-        # ← KRİTİK DÜZELTME: th ve td ikisini birden oku
         cells = row.find_all(["th", "td"])
         if not cells or len(cells) < 2:
             continue
@@ -161,13 +159,11 @@ def _extract_rows_from_table(table, kategori: str) -> List[UcretSatiri]:
     return satirlar
 
 
-def _scrape_with_playwright(url: str = GARANTI_URL) -> List[UcretSatiri]:
+def _scrape_with_playwright(url: str = ZIRAAT_URL) -> List[UcretSatiri]:
     try:
         from playwright.sync_api import sync_playwright
     except ImportError as exc:
         raise ScraperError("Playwright kurulu değil.") from exc
-
-    tum_satirlar: List[UcretSatiri] = []
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -175,18 +171,21 @@ def _scrape_with_playwright(url: str = GARANTI_URL) -> List[UcretSatiri]:
             page = browser.new_page(user_agent=HEADERS["User-Agent"])
             page.goto(url, timeout=60000, wait_until="networkidle")
 
+            # Tüm accordion/tab'ları aç
             for selector in [
                 "button[aria-expanded='false']",
                 ".accordion-button.collapsed",
                 "[data-bs-toggle='collapse']",
                 ".card-header button",
+                "li[role='tab']",
+                ".nav-link:not(.active)",
             ]:
                 try:
                     elements = page.query_selector_all(selector)
                     for el in elements:
                         try:
                             el.click(timeout=2000)
-                            page.wait_for_timeout(400)
+                            page.wait_for_timeout(300)
                         except Exception:
                             continue
                 except Exception:
@@ -198,11 +197,22 @@ def _scrape_with_playwright(url: str = GARANTI_URL) -> List[UcretSatiri]:
             browser.close()
 
     soup = BeautifulSoup(html, "lxml")
+
+    # Debug: ilk 5 tabloyu göster
     tables = soup.find_all("table")
+    print(f"\n[ziraat] TOPLAM {len(tables)} TABLO BULUNDU", file=sys.stderr)
+    for t_idx, table in enumerate(tables[:5]):
+        rows = table.find_all("tr")
+        print(f"  Tablo {t_idx+1} ({len(rows)} satır):", file=sys.stderr)
+        for r_idx, row in enumerate(rows[:3]):
+            cells = row.find_all(["th", "td"])
+            vals = [f"[{c.name}]'{_normalize(c.get_text(strip=True))}'" for c in cells]
+            print(f"    Satır {r_idx+1}: {vals}", file=sys.stderr)
 
     if not tables:
-        raise ScraperError("Playwright ile de tablo bulunamadı.")
+        raise ScraperError("Playwright ile tablo bulunamadı.")
 
+    tum_satirlar: List[UcretSatiri] = []
     for table in tables:
         kategori = _find_category_title(table)
         rows = _extract_rows_from_table(table, kategori)
@@ -211,7 +221,7 @@ def _scrape_with_playwright(url: str = GARANTI_URL) -> List[UcretSatiri]:
     return tum_satirlar
 
 
-def _scrape_with_requests(url: str = GARANTI_URL) -> Optional[List[UcretSatiri]]:
+def _scrape_with_requests(url: str = ZIRAAT_URL) -> Optional[List[UcretSatiri]]:
     try:
         response = requests.get(url, headers=HEADERS, timeout=30)
         response.raise_for_status()
@@ -233,29 +243,29 @@ def _scrape_with_requests(url: str = GARANTI_URL) -> Optional[List[UcretSatiri]]
     return tum_satirlar if tum_satirlar else None
 
 
-def scrape_garanti_bbva(url: str = GARANTI_URL) -> List[UcretSatiri]:
-    print(f"[scraper] {url} adresinden veri çekiliyor...", file=sys.stderr)
+def scrape_ziraat(url: str = ZIRAAT_URL) -> List[UcretSatiri]:
+    print(f"[ziraat] {url} adresinden veri çekiliyor...", file=sys.stderr)
 
-    print("[scraper] Playwright deneniyor...", file=sys.stderr)
+    print("[ziraat] Playwright deneniyor...", file=sys.stderr)
     try:
         satirlar = _scrape_with_playwright(url)
         if satirlar:
-            print(f"[scraper] Playwright ile {len(satirlar)} satır bulundu.", file=sys.stderr)
+            print(f"[ziraat] Playwright ile {len(satirlar)} satır bulundu.", file=sys.stderr)
             return satirlar
     except Exception as exc:
-        print(f"[scraper] Playwright başarısız: {exc}", file=sys.stderr)
+        print(f"[ziraat] Playwright başarısız: {exc}", file=sys.stderr)
 
-    print("[scraper] requests ile deneniyor...", file=sys.stderr)
+    print("[ziraat] requests ile deneniyor...", file=sys.stderr)
     satirlar = _scrape_with_requests(url)
     if satirlar:
-        print(f"[scraper] requests ile {len(satirlar)} satır bulundu.", file=sys.stderr)
+        print(f"[ziraat] requests ile {len(satirlar)} satır bulundu.", file=sys.stderr)
         return satirlar
 
-    raise ScraperError("Sayfadan hiçbir ücret satırı çekilemedi.")
+    raise ScraperError("Ziraat sayfasından hiçbir ücret satırı çekilemedi.")
 
 
 if __name__ == "__main__":
-    veriler = scrape_garanti_bbva()
+    veriler = scrape_ziraat()
     for v in veriler[:5]:
         print(v)
     print(f"Toplam {len(veriler)} satır bulundu.")
