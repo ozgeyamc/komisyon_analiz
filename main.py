@@ -1,43 +1,50 @@
 """
-Garanti BBVA komisyon ücretleri takip botu - ana çalıştırma script'i.
-
-Kullanım:
-    python main.py
+Garanti BBVA + Ziraat Bankası komisyon ücretleri takip botu.
 """
 
 import sys
 
 from scraper import ScraperError, scrape_garanti_bbva
-from update_excel import EXCEL_DOSYA_ADI, excel_guncelle
+from scraper_ziraat import ScraperError as ZiraatScraperError
+from scraper_ziraat import scrape_ziraat
+from update_excel import EXCEL_DOSYA_ADI, excel_guncelle_coklu
 
 
 def main() -> int:
-    print("=== Garanti BBVA Komisyon Ücretleri Takip Botu ===")
+    print("=== Banka Komisyon Ücretleri Takip Botu ===")
 
+    banka_verileri = {}
+
+    # Garanti BBVA
+    print("\n--- Garanti BBVA çekiliyor ---")
     try:
-        satirlar = scrape_garanti_bbva()
-    except ScraperError as exc:
-        print(f"[HATA] Scraping başarısız oldu: {exc}", file=sys.stderr)
-        return 1
-    except Exception as exc:
-        print(f"[HATA] Beklenmeyen bir hata oluştu: {exc}", file=sys.stderr)
-        return 1
+        garanti_satirlar = scrape_garanti_bbva()
+        banka_verileri["GARANTİ"] = garanti_satirlar
+        print(f"Garanti: {len(garanti_satirlar)} satır bulundu.")
+    except (ScraperError, Exception) as exc:
+        print(f"[HATA] Garanti çekilemedi: {exc}", file=sys.stderr)
 
-    if not satirlar:
-        print("[HATA] Hiçbir veri çekilemedi, Excel güncellenmedi.", file=sys.stderr)
-        return 1
-
+    # Ziraat Bankası
+    print("\n--- Ziraat Bankası çekiliyor ---")
     try:
-        ozet = excel_guncelle(satirlar, EXCEL_DOSYA_ADI)
-    except Exception as exc:
-        print(f"[HATA] Excel güncellenirken hata oluştu: {exc}", file=sys.stderr)
+        ziraat_satirlar = scrape_ziraat()
+        banka_verileri["ZİRAAT"] = ziraat_satirlar
+        print(f"Ziraat: {len(ziraat_satirlar)} satır bulundu.")
+    except (ZiraatScraperError, Exception) as exc:
+        print(f"[HATA] Ziraat çekilemedi: {exc}", file=sys.stderr)
+
+    if not banka_verileri:
+        print("[HATA] Hiçbir bankadan veri çekilemedi!", file=sys.stderr)
         return 1
 
-    print(
-        f"Tamamlandı. Eklenen: {ozet['eklendi']}, "
-        f"Güncellenen: {ozet['guncellendi']}, "
-        f"Değişmeyen: {ozet['degismedi']}"
-    )
+    # Excel'e yaz
+    try:
+        ozet = excel_guncelle_coklu(banka_verileri, EXCEL_DOSYA_ADI)
+    except Exception as exc:
+        print(f"[HATA] Excel yazılırken hata: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"\nTamamlandı. Toplam {ozet['eklendi']} satır yazıldı.")
     print(f"Excel dosyası: {EXCEL_DOSYA_ADI}")
     return 0
 
