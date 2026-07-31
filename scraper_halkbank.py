@@ -10,7 +10,7 @@ from typing import List, Optional
 import requests
 from bs4 import BeautifulSoup
 
-HALKBANK_URL = "https://www.halkbank.com.tr/tr/urun-ve-hizmet-ucretleri/menkul-kiymet-islemleri"
+HALKBANK_URL = "https://www.halkbank.com.tr/tr/urun-ve-hizmet-ucretleri"
 
 DATE_PATTERN = re.compile(
     r"G[üu]ncell[ei]nme\s*Tarihi\s*:\s*(\d{2}\.\d{2}\.\d{4}(?:\s+\d{2}:\d{2})?)",
@@ -24,6 +24,19 @@ HEADERS = {
         "Chrome/124.0.0.0 Safari/537.36"
     )
 }
+
+# Halkbank 9 alt kategori sayfası
+HALKBANK_ALT_SAYFALAR = [
+    ("Kredi Kartları ve Banka Kartları", "https://www.halkbank.com.tr/tr/urun-ve-hizmet-ucretleri/kredi-kartlari-ve-banka-kartlari"),
+    ("Havale EFT FAST", "https://www.halkbank.com.tr/tr/urun-ve-hizmet-ucretleri/havale-eft-fast"),
+    ("Krediler", "https://www.halkbank.com.tr/tr/urun-ve-hizmet-ucretleri/krediler"),
+    ("Mevduat İşlemleri", "https://www.halkbank.com.tr/tr/urun-ve-hizmet-ucretleri/mevduat-islemleri"),
+    ("Menkul Kıymet İşlemleri", "https://www.halkbank.com.tr/tr/urun-ve-hizmet-ucretleri/menkul-kiymet-islemleri"),
+    ("Dış Ticaret İşlemleri", "https://www.halkbank.com.tr/tr/urun-ve-hizmet-ucretleri/dis-ticaret-islemleri"),
+    ("Çekler ve Senetler", "https://www.halkbank.com.tr/tr/urun-ve-hizmet-ucretleri/cekler-ve-senetler"),
+    ("Sigorta İşlemleri", "https://www.halkbank.com.tr/tr/urun-ve-hizmet-ucretleri/sigorta-islemleri"),
+    ("Diğer İşlemler", "https://www.halkbank.com.tr/tr/urun-ve-hizmet-ucretleri/diger-islemler"),
+]
 
 
 @dataclass
@@ -54,7 +67,7 @@ def _normalize(val: str) -> str:
     return val.strip().replace("\xa0", " ").replace("\u200b", "").strip()
 
 
-def _find_category_title(table) -> str:
+def _find_category_title(table, sayfa_kategorisi: str) -> str:
     el = table.parent
     depth = 0
     while el is not None and depth < 8:
@@ -64,7 +77,7 @@ def _find_category_title(table) -> str:
                 return text
         el = el.parent
         depth += 1
-    return "Genel"
+    return sayfa_kategorisi
 
 
 def _extract_rows_from_table(table, kategori: str) -> List[UcretSatiri]:
@@ -100,8 +113,6 @@ def _extract_rows_from_table(table, kategori: str) -> List[UcretSatiri]:
                 for c in all_rows[0].find_all(["th", "td"])
             ]
         data_rows = all_rows[1:]
-
-    print(f"  [halkbank debug] Kategori: {kategori}, Başlık: {header_texts}", file=sys.stderr)
 
     def find_col(keywords):
         for i, h in enumerate(header_texts):
@@ -159,7 +170,7 @@ def _extract_rows_from_table(table, kategori: str) -> List[UcretSatiri]:
     return satirlar
 
 
-def _scrape_with_playwright(url: str = HALKBANK_URL) -> List[UcretSatiri]:
+def _scrape_sayfa(url: str, sayfa_kategorisi: str) -> List[UcretSatiri]:
     try:
         from playwright.sync_api import sync_playwright
     except ImportError as exc:
@@ -198,66 +209,37 @@ def _scrape_with_playwright(url: str = HALKBANK_URL) -> List[UcretSatiri]:
     soup = BeautifulSoup(html, "lxml")
     tables = soup.find_all("table")
 
-    print(f"\n[halkbank] TOPLAM {len(tables)} TABLO BULUNDU", file=sys.stderr)
-    for t_idx, table in enumerate(tables[:5]):
-        rows = table.find_all("tr")
-        print(f"  Tablo {t_idx+1} ({len(rows)} satır):", file=sys.stderr)
-        for r_idx, row in enumerate(rows[:3]):
-            cells = row.find_all(["th", "td"])
-            vals = [f"[{c.name}]'{_normalize(c.get_text(strip=True))}'" for c in cells]
-            print(f"    Satır {r_idx+1}: {vals}", file=sys.stderr)
-
-    if not tables:
-        raise ScraperError("Playwright ile tablo bulunamadı.")
+    print(f"  [halkbank] '{sayfa_kategorisi}' — {len(tables)} tablo bulundu", file=sys.stderr)
 
     tum_satirlar: List[UcretSatiri] = []
     for table in tables:
-        kategori = _find_category_title(table)
+        kategori = _find_category_title(table, sayfa_kategorisi)
         rows = _extract_rows_from_table(table, kategori)
         tum_satirlar.extend(rows)
 
     return tum_satirlar
 
 
-def _scrape_with_requests(url: str = HALKBANK_URL) -> Optional[List[UcretSatiri]]:
-    try:
-        response = requests.get(url, headers=HEADERS, timeout=30)
-        response.raise_for_status()
-    except requests.RequestException as exc:
-        raise ScraperError(f"Sayfaya erişilemedi: {exc}") from exc
-
-    soup = BeautifulSoup(response.text, "lxml")
-    tables = soup.find_all("table")
-
-    if not tables:
-        return None
+def scrape_halkbank() -> List[UcretSatiri]:
+    print(f"[halkbank] 9 alt sayfa çekiliyor...", file=sys.stderr)
 
     tum_satirlar: List[UcretSatiri] = []
-    for table in tables:
-        kategori = _find_category_title(table)
-        rows = _extract_rows_from_table(table, kategori)
-        tum_satirlar.extend(rows)
 
-    return tum_satirlar if tum_satirlar else None
+    for sayfa_adi, url in HALKBANK_ALT_SAYFALAR:
+        print(f"[halkbank] '{sayfa_adi}' çekiliyor...", file=sys.stderr)
+        try:
+            satirlar = _scrape_sayfa(url, sayfa_adi)
+            print(f"[halkbank] '{sayfa_adi}' — {len(satirlar)} satır bulundu.", file=sys.stderr)
+            tum_satirlar.extend(satirlar)
+        except Exception as exc:
+            print(f"[halkbank] '{sayfa_adi}' çekilemedi: {exc}", file=sys.stderr)
+            continue
 
+    if not tum_satirlar:
+        raise ScraperError("Halkbank sayfalarından hiçbir ücret satırı çekilemedi.")
 
-def scrape_halkbank(url: str = HALKBANK_URL) -> List[UcretSatiri]:
-    print(f"[halkbank] {url} adresinden veri çekiliyor...", file=sys.stderr)
-
-    try:
-        satirlar = _scrape_with_playwright(url)
-        if satirlar:
-            print(f"[halkbank] Playwright ile {len(satirlar)} satır bulundu.", file=sys.stderr)
-            return satirlar
-    except Exception as exc:
-        print(f"[halkbank] Playwright başarısız: {exc}", file=sys.stderr)
-
-    satirlar = _scrape_with_requests(url)
-    if satirlar:
-        print(f"[halkbank] requests ile {len(satirlar)} satır bulundu.", file=sys.stderr)
-        return satirlar
-
-    raise ScraperError("Halkbank sayfasından hiçbir ücret satırı çekilemedi.")
+    print(f"[halkbank] Toplam {len(tum_satirlar)} satır bulundu.", file=sys.stderr)
+    return tum_satirlar
 
 
 if __name__ == "__main__":
