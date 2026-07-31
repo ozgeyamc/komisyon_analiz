@@ -70,11 +70,10 @@ def _find_category_title(table) -> str:
 def _extract_rows_from_table(table, kategori: str) -> List[UcretSatiri]:
     satirlar: List[UcretSatiri] = []
 
-    # thead'den başlık al
     thead = table.find("thead")
     tbody = table.find("tbody")
 
-    # Başlık satırını belirle
+    # Başlık satırını al
     header_texts = []
     if thead:
         header_row = thead.find("tr")
@@ -84,10 +83,9 @@ def _extract_rows_from_table(table, kategori: str) -> List[UcretSatiri]:
                 for c in header_row.find_all(["th", "td"])
             ]
 
-    # tbody yoksa tüm tr'lerden başlık ilk satır, geri kalanlar veri
+    # Veri satırlarını al
     if tbody:
         data_rows = tbody.find_all("tr")
-        # eğer başlık tbody'den alınacaksa
         if not header_texts and data_rows:
             header_texts = [
                 _normalize(c.get_text(strip=True)).lower()
@@ -105,9 +103,7 @@ def _extract_rows_from_table(table, kategori: str) -> List[UcretSatiri]:
             ]
         data_rows = all_rows[1:]
 
-    print(f"  [debug] Kategori: {kategori}, Başlık: {header_texts}", file=sys.stderr)
-
-    # Kolon indexlerini başlık metnine göre bul
+    # Kolon indexlerini bul
     def find_col(keywords):
         for i, h in enumerate(header_texts):
             if all(k in h for k in keywords):
@@ -131,19 +127,13 @@ def _extract_rows_from_table(table, kategori: str) -> List[UcretSatiri]:
         col_azm_oran  = 4
         col_aciklama  = 5
 
-    print(f"  [debug] Kolon indexleri: masraf={col_masraf}, asg_tutar={col_asg_tutar}, "
-          f"asg_oran={col_asg_oran}, azm_tutar={col_azm_tutar}, azm_oran={col_azm_oran}, "
-          f"aciklama={col_aciklama}", file=sys.stderr)
-
-    # Veri satırlarını oku — th ve td ikisini birden ara
     for row in data_rows:
+        # ← KRİTİK DÜZELTME: th ve td ikisini birden oku
         cells = row.find_all(["th", "td"])
         if not cells or len(cells) < 2:
             continue
 
         values = [_normalize(c.get_text(strip=True)) for c in cells]
-
-        print(f"  [debug] Satır values: {values}", file=sys.stderr)
 
         def get(idx):
             return values[idx] if 0 <= idx < len(values) else ""
