@@ -48,3 +48,37 @@ jobs:
           git add garanti_komisyonlar.xlsx
           git commit -m "Komisyon ücretleri güncellendi ($(date +'%d.%m.%Y'))"
           git push
+          name: Günlük Komisyon Güncelleme
+
+on:
+  schedule:
+    - cron: '0 6 * * *'  # Her gün sabah 06:00 UTC (Türkiye 09:00)
+  workflow_dispatch:      # Manuel tetikleme butonu
+
+jobs:
+  scrape-and-update:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Kodu çek
+        uses: actions/checkout@v4
+
+      - name: Python kur
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Bağımlılıkları yükle
+        run: |
+          pip install requests beautifulsoup4 lxml openpyxl playwright
+          playwright install chromium
+
+      - name: Scripti çalıştır
+        run: python main.py
+
+      - name: Excel dosyasını artifact olarak kaydet  # ← YENİ EKLENEN ADIM
+        uses: actions/upload-artifact@v4
+        with:
+          name: komisyon-raporu
+          path: tum_bankalar_komisyonlar.xlsx
+          retention-days: 30  # 30 gün boyunca indirilebilir kalır
