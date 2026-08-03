@@ -26,6 +26,17 @@ HEADERS = {
     )
 }
 
+AKBANK_FALLBACK_SAYFALAR = [
+    ("Kredi Kartları", f"{AKBANK_ANA_URL}/kredi-kartlari"),
+    ("Havale EFT FAST", f"{AKBANK_ANA_URL}/havale-eft-fast"),
+    ("Krediler", f"{AKBANK_ANA_URL}/krediler"),
+    ("Mevduat İşlemleri", f"{AKBANK_ANA_URL}/mevduat-islemleri"),
+    ("Menkul Kıymet İşlemleri", f"{AKBANK_ANA_URL}/menkul-kiymet-islemleri"),
+    ("Dış Ticaret İşlemleri", f"{AKBANK_ANA_URL}/dis-ticaret-islemleri"),
+    ("Çekler ve Senetler", f"{AKBANK_ANA_URL}/cekler-ve-senetler"),
+    ("Diğer İşlemler", f"{AKBANK_ANA_URL}/diger-islemler"),
+]
+
 
 @dataclass
 class UcretSatiri:
@@ -159,10 +170,6 @@ def _extract_rows_from_table(table, kategori: str) -> List[UcretSatiri]:
 
 
 def _alt_sayfa_linklerini_bul(ana_url: str) -> List[tuple]:
-    """
-    Ana sayfayı açıp akbank.com/urun-ve-hizmet-ucretleri/ ile başlayan
-    tüm alt sayfa linklerini otomatik olarak toplar.
-    """
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as p:
@@ -183,7 +190,6 @@ def _alt_sayfa_linklerini_bul(ana_url: str) -> List[tuple]:
     bulunan = {}
     for a in soup.find_all("a", href=True):
         href = a["href"].strip()
-
         if href.startswith(base):
             path = href.replace(base, "")
         elif href.startswith("http"):
@@ -194,7 +200,6 @@ def _alt_sayfa_linklerini_bul(ana_url: str) -> List[tuple]:
         if path.startswith(prefix) and len(path) > len(prefix):
             clean_path = path.split("#")[0].split("?")[0].rstrip("/")
             full_url = base + clean_path
-
             alt_kisim = clean_path.replace(prefix, "")
             if "/" not in alt_kisim and alt_kisim:
                 link_text = _normalize(a.get_text())
@@ -246,7 +251,6 @@ def _scrape_sayfa(url: str, sayfa_kategorisi: str) -> List[UcretSatiri]:
 
     soup = BeautifulSoup(html, "lxml")
     tables = soup.find_all("table")
-
     print(f"  [akbank] '{sayfa_kategorisi}' — {len(tables)} tablo bulundu", file=sys.stderr)
 
     tum_satirlar: List[UcretSatiri] = []
@@ -269,16 +273,7 @@ def scrape_akbank(ana_url: str = AKBANK_ANA_URL) -> List[UcretSatiri]:
 
     if not alt_sayfalar:
         print(f"[akbank] Fallback liste kullanılıyor...", file=sys.stderr)
-        alt_sayfalar = [
-            ("Kredi Kartları", f"{ana_url}/kredi-kartlari"),
-            ("Havale EFT FAST", f"{ana_url}/havale-eft-fast"),
-            ("Krediler", f"{ana_url}/krediler"),
-            ("Mevduat İşlemleri", f"{ana_url}/mevduat-islemleri"),
-            ("Menkul Kıymet İşlemleri", f"{ana_url}/menkul-kiymet-islemleri"),
-            ("Dış Ticaret İşlemleri", f"{ana_url}/dis-ticaret-islemleri"),
-            ("Çekler ve Senetler", f"{ana_url}/cekler-ve-senetler"),
-            ("Diğer İşlemler", f"{ana_url}/diger-islemler"),
-        ]
+        alt_sayfalar = AKBANK_FALLBACK_SAYFALAR
 
     tum_satirlar: List[UcretSatiri] = []
     for sayfa_adi, url in alt_sayfalar:
