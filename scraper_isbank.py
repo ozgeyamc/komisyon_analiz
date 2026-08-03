@@ -140,48 +140,69 @@ def scrape_isbank(url: str = ISBANK_URL) -> List[UcretSatiri]:
         browser = p.chromium.launch(headless=True)
         try:
             page = browser.new_page(user_agent=HEADERS["User-Agent"])
+
+            # Network isteklerini yakala — API endpoint'i bulmak için
+            api_urls = []
+            def handle_request(request):
+                if any(x in request.url for x in ["json", "api", "service", "ucret", "price", "fee", "data"]):
+                    api_urls.append(request.url)
+            page.on("request", handle_request)
+
             page.goto(url, timeout=120000, wait_until="domcontentloaded")
-            page.wait_for_timeout(8000)
+            page.wait_for_timeout(10000)
 
-            # Sayfadaki tüm linkleri logla
-            all_links = page.evaluate("""
-                () => Array.from(document.querySelectorAll('a[href]')).map(a => ({
-                    href: a.href,
-                    text: a.innerText.trim().substring(0, 80)
-                })).filter(l => l.href.includes('isbank'))
-            """)
-            print(f"[isbank] Sayfada {len(all_links)} isbank linki bulundu:", file=sys.stderr)
-            for l in all_links[:30]:
-                print(f"  {l['text'][:50]} -> {l['href']}", file=sys.stderr)
+            # Yakalanan API URL'lerini logla
+            print(f"[isbank] Yakalanan API istekleri ({len(api_urls)} adet):", file=sys.stderr)
+            for u in api_urls[:20]:
+                print(f"  {u}", file=sys.stderr)
 
-            # Tüm accordion/tab/buton'ları aç
-            for selector in [
+            # Tab'ları bul ve tıkla
+            tab_selectors = [
+                ".tabContentC",
+                "[class*='tab']",
+                "[class*='Tab']",
+                "[class*='Cover_M']",
                 "button[aria-expanded='false']",
                 ".accordion-button.collapsed",
                 "[data-bs-toggle='collapse']",
-                ".card-header button",
+                "[class*='accordion']",
                 "li[role='tab']",
                 ".nav-link",
-                "[class*='accordion']",
-                "[class*='Accordion']",
-                "[class*='tab']",
-                "[class*='Tab']",
-                "[class*='expand']",
-                "[class*='collapse']",
-            ]:
+            ]
+            for selector in tab_selectors:
                 try:
                     elements = page.query_selector_all(selector)
                     for el in elements:
                         try:
                             el.click(timeout=1500)
-                            page.wait_for_timeout(200)
+                            page.wait_for_timeout(500)
                         except Exception:
                             continue
                 except Exception:
                     continue
 
-            page.wait_for_timeout(3000)
+            page.wait_for_timeout(5000)
             html = page.content()
+
+            # Sayfanın içeriğini logla
+            soup_debug = BeautifulSoup(html, "lxml")
+            body = soup_debug.find("body")
+            if body:
+                text = body.get_text(separator="\n", strip=True)
+                # Ücret/masraf içeren satırları bul
+                lines = [l for l in text.split("\n") if any(k in l.lower() for k in ["masraf", "ücret", "komisyon", "tl", "%"])]
+                print(f"[isbank] Ücret içeren satırlar ({len(lines)} adet):", file=sys.stderr)
+                for l in lines[:20]:
+                    print(f"  {l}", file=sys.stderr)
+
+            # Tüm div class'larını logla
+            divs = soup_debug.find_all("div", class_=True)
+            classes = set()
+            for d in divs[:500]:
+                for c in d.get("class", []):
+                    classes.add(c)
+            print(f"[isbank] Tüm div class'ları: {sorted(classes)}", file=sys.stderr)
+
         finally:
             browser.close()
 
@@ -190,18 +211,7 @@ def scrape_isbank(url: str = ISBANK_URL) -> List[UcretSatiri]:
     print(f"[isbank] Toplam {len(tables)} <table> bulundu", file=sys.stderr)
 
     if not tables:
-        print("[isbank] TABLO YOK — Sayfa yapısı analiz ediliyor:", file=sys.stderr)
-        body = soup.find("body")
-        if body:
-            text = body.get_text(separator="\n", strip=True)
-            print(f"[isbank] Sayfa metni (ilk 1000 kar):\n{text[:1000]}", file=sys.stderr)
-        divs = soup.find_all("div", class_=True)
-        classes = set()
-        for d in divs[:200]:
-            for c in d.get("class", []):
-                classes.add(c)
-        print(f"[isbank] Bulunan div class'ları: {sorted(classes)[:50]}", file=sys.stderr)
-        raise ScraperError("İş Bankası sayfasında hiç <table> bulunamadı.")
+        raise ScraperError("İş Bankası sayfasında hiç <table> bulunamadı — log'dan yapıyı inceleyin.")
 
     tum_satirlar = []
     for table in tables:
