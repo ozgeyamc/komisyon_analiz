@@ -41,10 +41,11 @@ BASLIK_FILL = PatternFill(start_color="1F3864", end_color="1F3864", fill_type="s
 BASLIK_FONT = Font(color="FFFFFF", bold=True)
 
 BANKA_RENKLER = {
-    "GARANTİ":  {"bg": "00B050", "fg": "FFFFFF"},  # Yeşil
-    "ZİRAAT":   {"bg": "C00000", "fg": "FFFFFF"},  # Kırmızı
-    "HALKBANK": {"bg": "7030A0", "fg": "FFFFFF"},  # Mor
-    "AKBANK":   {"bg": "FF0000", "fg": "FFFF00"},  # Kırmızı + Sarı yazı
+    "GARANTİ":    {"bg": "00B050", "fg": "FFFFFF"},  # Yeşil
+    "ZİRAAT":     {"bg": "C00000", "fg": "FFFFFF"},  # Kırmızı
+    "HALKBANK":   {"bg": "7030A0", "fg": "FFFFFF"},  # Mor
+    "AKBANK":     {"bg": "FF0000", "fg": "FFFF00"},  # Kırmızı + Sarı yazı
+    "İŞBANKASI":  {"bg": "002060", "fg": "FFFFFF"},  # Lacivert
 }
 
 
