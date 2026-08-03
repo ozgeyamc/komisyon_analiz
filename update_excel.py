@@ -44,9 +44,9 @@ BANKA_RENKLER = {
     "GARANTİ":    {"bg": "00B050", "fg": "FFFFFF"},  # Yeşil
     "ZİRAAT":     {"bg": "C00000", "fg": "FFFFFF"},  # Kırmızı
     "HALKBANK":   {"bg": "7030A0", "fg": "FFFFFF"},  # Mor
-    "AKBANK":     {"bg": "FF0000", "fg": "FFFF00"},  # Kırmızı + Sarı yazı
-    "YAPIKREDI":  {"bg": "003087", "fg": "FFD700"},  # Lacivert + Altın yazı
-
+    "AKBANK":     {"bg": "FF0000", "fg": "FFFF00"},  # Kırmızı
+    "YAPIKREDI":  {"bg": "003087", "fg": "FFD700"},  # Lacivert
+    "VAKIFBANK":  {"bg": "FFD700", "fg": "000000"},  # Altın + Siyah yazı
 }
 
 
