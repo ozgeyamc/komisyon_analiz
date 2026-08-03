@@ -1,16 +1,14 @@
 """
 Akbank "Ürün ve Hizmet Ücretleri" sayfasını çeken scraper modülü.
+Tüm veriler tek sayfada — accordion'lar açılarak çekilir.
 """
 
 import re
 import sys
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List
 
-import requests
-from bs4 import BeautifulSoup
-
-AKBANK_ANA_URL = "https://www.akbank.com/urun-ve-hizmet-ucretleri"
+AKBANK_URL = "https://www.akbank.com/urun-ve-hizmet-ucretleri"
 
 DATE_PATTERN = re.compile(
     r"G[üu]ncell[ei]nme\s*Tarihi\s*:\s*(\d{2}\.\d{2}\.\d{4}(?:\s+\d{2}:\d{2})?)",
@@ -24,17 +22,6 @@ HEADERS = {
         "Chrome/124.0.0.0 Safari/537.36"
     )
 }
-
-AKBANK_FALLBACK_SAYFALAR = [
-    ("Kredi Kartları", "https://www.akbank.com/urun-ve-hizmet-ucretleri/kredi-kartlari"),
-    ("Havale EFT FAST", "https://www.akbank.com/urun-ve-hizmet-ucretleri/havale-eft-fast"),
-    ("Krediler", "https://www.akbank.com/urun-ve-hizmet-ucretleri/krediler"),
-    ("Mevduat İşlemleri", "https://www.akbank.com/urun-ve-hizmet-ucretleri/mevduat-islemleri"),
-    ("Menkul Kıymet İşlemleri", "https://www.akbank.com/urun-ve-hizmet-ucretleri/menkul-kiymet-islemleri"),
-    ("Dış Ticaret İşlemleri", "https://www.akbank.com/urun-ve-hizmet-ucretleri/dis-ticaret-islemleri"),
-    ("Çekler ve Senetler", "https://www.akbank.com/urun-ve-hizmet-ucretleri/cekler-ve-senetler"),
-    ("Diğer İşlemler", "https://www.akbank.com/urun-ve-hizmet-ucretleri/diger-islemler"),
-]
 
 
 @dataclass
@@ -65,50 +52,42 @@ def _normalize(val: str) -> str:
     return val.strip().replace("\xa0", " ").replace("\u200b", "").strip()
 
 
-def _find_category_title(el, sayfa_kategorisi: str) -> str:
+def _find_category_title(el, fallback: str) -> str:
     parent = el.parent
     depth = 0
-    while parent is not None and depth < 8:
+    while parent is not None and depth < 10:
         for sibling in parent.find_all_previous(["h1", "h2", "h3", "h4", "h5"], limit=3):
             text = _normalize(sibling.get_text())
             if len(text) > 5 and text not in ["Müşteri Ol", "Ara", "Kapat", "Menü", "Ana Sayfa"]:
                 return text
         parent = parent.parent
         depth += 1
-    return sayfa_kategorisi
+    return fallback
 
 
 def _extract_from_table(table, kategori: str) -> List[UcretSatiri]:
-    satirlar: List[UcretSatiri] = []
+    from bs4 import BeautifulSoup
+    satirlar = []
     thead = table.find("thead")
     tbody = table.find("tbody")
 
     header_texts = []
     if thead:
-        header_row = thead.find("tr")
-        if header_row:
-            header_texts = [
-                _normalize(c.get_text(strip=True)).lower()
-                for c in header_row.find_all(["th", "td"])
-            ]
+        hr = thead.find("tr")
+        if hr:
+            header_texts = [_normalize(c.get_text(strip=True)).lower() for c in hr.find_all(["th", "td"])]
 
     if tbody:
         data_rows = tbody.find_all("tr")
         if not header_texts and data_rows:
-            header_texts = [
-                _normalize(c.get_text(strip=True)).lower()
-                for c in data_rows[0].find_all(["th", "td"])
-            ]
+            header_texts = [_normalize(c.get_text(strip=True)).lower() for c in data_rows[0].find_all(["th", "td"])]
             data_rows = data_rows[1:]
     else:
         all_rows = table.find_all("tr")
         if not all_rows:
             return satirlar
         if not header_texts:
-            header_texts = [
-                _normalize(c.get_text(strip=True)).lower()
-                for c in all_rows[0].find_all(["th", "td"])
-            ]
+            header_texts = [_normalize(c.get_text(strip=True)).lower() for c in all_rows[0].find_all(["th", "td"])]
         data_rows = all_rows[1:]
 
     def find_col(keywords):
@@ -127,12 +106,8 @@ def _extract_from_table(table, kategori: str) -> List[UcretSatiri]:
         col_aciklama = find_col(["aciklama"])
 
     if col_masraf == -1:
-        col_masraf    = 0
-        col_asg_tutar = 1
-        col_asg_oran  = 2
-        col_azm_tutar = 3
-        col_azm_oran  = 4
-        col_aciklama  = 5
+        col_masraf = 0; col_asg_tutar = 1; col_asg_oran = 2
+        col_azm_tutar = 3; col_azm_oran = 4; col_aciklama = 5
 
     for row in data_rows:
         cells = row.find_all(["th", "td"])
@@ -147,49 +122,61 @@ def _extract_from_table(table, kategori: str) -> List[UcretSatiri]:
         if not masraf:
             continue
 
-        raw_aciklama = get(col_aciklama)
-        temiz_aciklama, site_tarihi = _parse_aciklama(raw_aciklama)
-
+        temiz_aciklama, site_tarihi = _parse_aciklama(get(col_aciklama))
         satirlar.append(UcretSatiri(
-            kategori=kategori,
-            masraf=masraf,
-            asgari_tutar=get(col_asg_tutar),
-            asgari_oran=get(col_asg_oran),
-            azami_tutar=get(col_azm_tutar),
-            azami_oran=get(col_azm_oran),
-            aciklama=temiz_aciklama,
-            site_guncelleme_tarihi=site_tarihi,
+            kategori=kategori, masraf=masraf,
+            asgari_tutar=get(col_asg_tutar), asgari_oran=get(col_asg_oran),
+            azami_tutar=get(col_azm_tutar), azami_oran=get(col_azm_oran),
+            aciklama=temiz_aciklama, site_guncelleme_tarihi=site_tarihi,
         ))
-
     return satirlar
 
 
-def _scrape_sayfa(url: str, sayfa_kategorisi: str) -> List[UcretSatiri]:
+def scrape_akbank(url: str = AKBANK_URL) -> List[UcretSatiri]:
     from playwright.sync_api import sync_playwright
+    from bs4 import BeautifulSoup
+
+    print(f"[akbank] {url} adresinden veri çekiliyor...", file=sys.stderr)
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         try:
             page = browser.new_page(user_agent=HEADERS["User-Agent"])
             page.goto(url, timeout=60000, wait_until="networkidle")
+            page.wait_for_timeout(3000)
 
-            # Accordion/tab'ları aç
+            # Sayfadaki tüm linkleri logla — doğru URL'yi bulmak için
+            all_links = page.evaluate("""
+                () => Array.from(document.querySelectorAll('a[href]')).map(a => ({
+                    href: a.href,
+                    text: a.innerText.trim().substring(0, 80)
+                })).filter(l => l.href.includes('akbank'))
+            """)
+            print(f"[akbank] Sayfada {len(all_links)} akbank linki bulundu:", file=sys.stderr)
+            for l in all_links[:30]:
+                print(f"  {l['text'][:50]} -> {l['href']}", file=sys.stderr)
+
+            # Tüm accordion/tab/buton'ları aç
             for selector in [
                 "button[aria-expanded='false']",
                 ".accordion-button.collapsed",
                 "[data-bs-toggle='collapse']",
                 ".card-header button",
                 "li[role='tab']",
-                ".nav-link:not(.active)",
+                ".nav-link",
                 "[class*='accordion']",
-                "[class*='tab']",
+                "[class*='Accordion']",
+                "[class*='tab-']",
+                "[class*='Tab']",
+                "[class*='expand']",
+                "[class*='Expand']",
             ]:
                 try:
                     elements = page.query_selector_all(selector)
                     for el in elements:
                         try:
                             el.click(timeout=1500)
-                            page.wait_for_timeout(300)
+                            page.wait_for_timeout(200)
                         except Exception:
                             continue
                 except Exception:
@@ -201,107 +188,34 @@ def _scrape_sayfa(url: str, sayfa_kategorisi: str) -> List[UcretSatiri]:
             browser.close()
 
     soup = BeautifulSoup(html, "lxml")
-
-    # DEBUG: HTML yapısını göster
     tables = soup.find_all("table")
-    print(f"  [akbank] '{sayfa_kategorisi}' — {len(tables)} <table> bulundu", file=sys.stderr)
+    print(f"[akbank] Toplam {len(tables)} <table> bulundu", file=sys.stderr)
 
-    # Tablo yoksa hangi yapı var göster
+    # Tablo bulunamazsa sayfanın yapısını debug et
     if not tables:
-        # div row yapısını ara
-        div_rows = soup.find_all("div", class_=re.compile(r"row|grid|list|item|price|fee|ucret|komisyon", re.I))
-        print(f"  [akbank] '{sayfa_kategorisi}' — {len(div_rows)} potansiyel div row bulundu", file=sys.stderr)
+        print("[akbank] TABLO YOK — Sayfa yapısı analiz ediliyor:", file=sys.stderr)
+        # Body içeriğinin ilk 2000 karakterini logla
+        body = soup.find("body")
+        if body:
+            text = body.get_text(separator="\n", strip=True)
+            print(f"[akbank] Sayfa metni (ilk 1000 kar):\n{text[:1000]}", file=sys.stderr)
+        # Tüm div class'larını listele
+        divs = soup.find_all("div", class_=True)
+        classes = set()
+        for d in divs[:200]:
+            for c in d.get("class", []):
+                classes.add(c)
+        print(f"[akbank] Bulunan div class'ları: {sorted(classes)[:50]}", file=sys.stderr)
+        raise ScraperError("Akbank sayfasında hiç <table> bulunamadı — farklı HTML yapısı kullanılıyor olabilir.")
 
-        # Sayfa başlıklarını göster
-        headers = soup.find_all(["h1", "h2", "h3", "h4"])
-        for h in headers[:5]:
-            print(f"  [akbank] Başlık: {_normalize(h.get_text())}", file=sys.stderr)
-
-        # Tüm linkleri göster
-        links = soup.find_all("a", href=True)
-        akbank_links = [a["href"] for a in links if "urun-ve-hizmet" in a.get("href", "")]
-        print(f"  [akbank] Sayfadaki ücret linkleri: {akbank_links[:10]}", file=sys.stderr)
-
-    tum_satirlar: List[UcretSatiri] = []
+    tum_satirlar = []
     for table in tables:
-        kategori = _find_category_title(table, sayfa_kategorisi)
+        kategori = _find_category_title(table, "Genel")
         rows = _extract_from_table(table, kategori)
         tum_satirlar.extend(rows)
 
-    return tum_satirlar
-
-
-def _alt_sayfa_linklerini_bul(ana_url: str) -> List[tuple]:
-    from playwright.sync_api import sync_playwright
-
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        try:
-            page = browser.new_page(user_agent=HEADERS["User-Agent"])
-            page.goto(ana_url, timeout=60000, wait_until="networkidle")
-            page.wait_for_timeout(3000)
-
-            # Tüm linkleri JS ile al
-            links = page.evaluate("""
-                () => {
-                    const anchors = document.querySelectorAll('a[href]');
-                    return Array.from(anchors).map(a => ({
-                        href: a.href,
-                        text: a.innerText.trim()
-                    }));
-                }
-            """)
-            html = page.content()
-        finally:
-            browser.close()
-
-    # JS ile bulunan linklerden filtrele
-    prefix = "urun-ve-hizmet-ucretleri/"
-    bulunan = {}
-    for link in links:
-        href = link.get("href", "")
-        text = link.get("text", "")
-        if prefix in href:
-            clean = href.split("#")[0].split("?")[0].rstrip("/")
-            alt = clean.split(prefix)[-1]
-            if alt and "/" not in alt:
-                if clean not in bulunan:
-                    bulunan[clean] = text if text else alt.replace("-", " ").title()
-
-    linkler = [(ad, url) for url, ad in bulunan.items()]
-    print(f"[akbank] Ana sayfada {len(linkler)} alt sayfa bulundu:", file=sys.stderr)
-    for ad, url in linkler:
-        print(f"  - {ad}: {url}", file=sys.stderr)
-
-    return linkler
-
-
-def scrape_akbank(ana_url: str = AKBANK_ANA_URL) -> List[UcretSatiri]:
-    print(f"[akbank] Alt sayfalar tespit ediliyor: {ana_url}", file=sys.stderr)
-
-    try:
-        alt_sayfalar = _alt_sayfa_linklerini_bul(ana_url)
-    except Exception as exc:
-        print(f"[akbank] Alt sayfa tespiti başarısız: {exc}", file=sys.stderr)
-        alt_sayfalar = []
-
-    if not alt_sayfalar:
-        print(f"[akbank] Fallback liste kullanılıyor...", file=sys.stderr)
-        alt_sayfalar = AKBANK_FALLBACK_SAYFALAR
-
-    tum_satirlar: List[UcretSatiri] = []
-    for sayfa_adi, url in alt_sayfalar:
-        print(f"[akbank] '{sayfa_adi}' çekiliyor...", file=sys.stderr)
-        try:
-            satirlar = _scrape_sayfa(url, sayfa_adi)
-            print(f"[akbank] '{sayfa_adi}' — {len(satirlar)} satır.", file=sys.stderr)
-            tum_satirlar.extend(satirlar)
-        except Exception as exc:
-            print(f"[akbank] '{sayfa_adi}' çekilemedi: {exc}", file=sys.stderr)
-            continue
-
     if not tum_satirlar:
-        raise ScraperError("Akbank sayfalarından hiçbir ücret satırı çekilemedi.")
+        raise ScraperError("Akbank sayfasında tablo var ama hiç veri satırı çekilemedi.")
 
     print(f"[akbank] Toplam {len(tum_satirlar)} satır bulundu.", file=sys.stderr)
     return tum_satirlar
