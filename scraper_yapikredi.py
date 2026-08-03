@@ -88,8 +88,6 @@ def _extract_from_table(table, kategori: str) -> List[UcretSatiri]:
             header_texts = [_normalize(c.get_text(strip=True)).lower() for c in all_rows[0].find_all(["th", "td"])]
         data_rows = all_rows[1:]
 
-    print(f"  [yapikredi] Sütun başlıkları: {header_texts}", file=sys.stderr)
-
     def find_col(keywords):
         for i, h in enumerate(header_texts):
             if all(k in h for k in keywords):
@@ -104,7 +102,6 @@ def _extract_from_table(table, kategori: str) -> List[UcretSatiri]:
     col_aciklama  = find_col(["açıklama"])
     if col_aciklama == -1:
         col_aciklama = find_col(["aciklama"])
-    # Yapı Kredi'ye özel sütun adları
     if col_masraf == -1:
         col_masraf = find_col(["işlem"])
     if col_masraf == -1:
@@ -164,38 +161,11 @@ def scrape_yapikredi(url: str = YAPIKREDI_URL) -> List[UcretSatiri]:
             )
             page = context.new_page()
             page.goto(url, timeout=120000, wait_until="domcontentloaded")
-            page.wait_for_timeout(8000)
+            page.wait_for_timeout(8000)  # Sadece bekle, accordion tıklama YOK
 
-            # Tablo sayısını logla
             table_count = page.evaluate("() => document.querySelectorAll('table').length")
             print(f"[yapikredi] JS ile {table_count} <table> bulundu", file=sys.stderr)
 
-            # Accordion/tab'ları aç
-            for selector in [
-                "button[aria-expanded='false']",
-                ".accordion-button.collapsed",
-                "[data-bs-toggle='collapse']",
-                "li[role='tab']",
-                ".nav-link",
-                "[class*='accordion']",
-                "[class*='Accordion']",
-                "[class*='tab']",
-                "[class*='Tab']",
-                "[class*='expand']",
-                "[class*='collapse']",
-            ]:
-                try:
-                    elements = page.query_selector_all(selector)
-                    for el in elements:
-                        try:
-                            el.click(timeout=1500)
-                            page.wait_for_timeout(200)
-                        except Exception:
-                            continue
-                except Exception:
-                    continue
-
-            page.wait_for_timeout(3000)
             html = page.content()
         finally:
             browser.close()
@@ -205,20 +175,6 @@ def scrape_yapikredi(url: str = YAPIKREDI_URL) -> List[UcretSatiri]:
     print(f"[yapikredi] Toplam {len(tables)} <table> bulundu", file=sys.stderr)
 
     if not tables:
-        print("[yapikredi] TABLO YOK — Sayfa yapısı analiz ediliyor:", file=sys.stderr)
-        body = soup.find("body")
-        if body:
-            text = body.get_text(separator="\n", strip=True)
-            lines = [l for l in text.split("\n") if any(k in l.lower() for k in ["masraf", "ücret", "komisyon", "tl", "%"])]
-            print(f"[yapikredi] Ücret içeren satırlar ({len(lines)} adet):", file=sys.stderr)
-            for l in lines[:20]:
-                print(f"  {l}", file=sys.stderr)
-        divs = soup.find_all("div", class_=True)
-        classes = set()
-        for d in divs[:200]:
-            for c in d.get("class", []):
-                classes.add(c)
-        print(f"[yapikredi] Div class'ları: {sorted(classes)[:30]}", file=sys.stderr)
         raise ScraperError("Yapı Kredi sayfasında hiç <table> bulunamadı.")
 
     tum_satirlar = []
