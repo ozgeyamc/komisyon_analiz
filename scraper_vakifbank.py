@@ -160,11 +160,49 @@ def scrape_vakifbank(url: str = VAKIFBANK_URL) -> List[UcretSatiri]:
                 }
             )
             page = context.new_page()
-            page.goto(url, timeout=120000, wait_until="domcontentloaded")
-            page.wait_for_timeout(8000)
+
+            # Önce ana sayfayı ziyaret et
+            page.goto("https://www.vakifbank.com.tr", timeout=60000, wait_until="domcontentloaded")
+            page.wait_for_timeout(3000)
+
+            # Sonra hedef sayfaya git, networkidle bekle
+            page.goto(url, timeout=120000, wait_until="networkidle")
+            page.wait_for_timeout(5000)
+
+            # Tablo yoksa .content div'ini bekle
+            table_count = page.evaluate("() => document.querySelectorAll('table').length")
+            print(f"[vakifbank] İlk kontrol: {table_count} <table>", file=sys.stderr)
+
+            if table_count == 0:
+                # .content div'i içinde bir şey çıkana kadar bekle
+                try:
+                    page.wait_for_selector(".content table", timeout=20000)
+                    print("[vakifbank] .content table beklendi, bulundu", file=sys.stderr)
+                except Exception:
+                    print("[vakifbank] .content table timeout — devam ediliyor", file=sys.stderr)
+
+                # Tüm class içeren elementleri logla
+                all_classes = page.evaluate("""
+                    () => {
+                        const els = document.querySelectorAll('[class]');
+                        const classes = new Set();
+                        els.forEach(el => el.className.split(' ').forEach(c => c && classes.add(c)));
+                        return Array.from(classes).slice(0, 50);
+                    }
+                """)
+                print(f"[vakifbank] Tüm class'lar: {all_classes}", file=sys.stderr)
+
+                # content div içeriği
+                content_html = page.evaluate("""
+                    () => {
+                        const el = document.querySelector('.content');
+                        return el ? el.innerHTML.substring(0, 2000) : 'content bulunamadi';
+                    }
+                """)
+                print(f"[vakifbank] .content içeriği:\n{content_html[:500]}", file=sys.stderr)
 
             table_count = page.evaluate("() => document.querySelectorAll('table').length")
-            print(f"[vakifbank] JS ile {table_count} <table> bulundu", file=sys.stderr)
+            print(f"[vakifbank] Son kontrol: {table_count} <table>", file=sys.stderr)
 
             html = page.content()
         finally:
@@ -175,7 +213,6 @@ def scrape_vakifbank(url: str = VAKIFBANK_URL) -> List[UcretSatiri]:
     print(f"[vakifbank] Toplam {len(tables)} <table> bulundu", file=sys.stderr)
 
     if not tables:
-        print("[vakifbank] TABLO YOK — Sayfa yapısı analiz ediliyor:", file=sys.stderr)
         body = soup.find("body")
         if body:
             text = body.get_text(separator="\n", strip=True)
@@ -183,12 +220,6 @@ def scrape_vakifbank(url: str = VAKIFBANK_URL) -> List[UcretSatiri]:
             print(f"[vakifbank] Ücret içeren satırlar ({len(lines)} adet):", file=sys.stderr)
             for l in lines[:20]:
                 print(f"  {l}", file=sys.stderr)
-        divs = soup.find_all("div", class_=True)
-        classes = set()
-        for d in divs[:200]:
-            for c in d.get("class", []):
-                classes.add(c)
-        print(f"[vakifbank] Div class'ları: {sorted(classes)[:30]}", file=sys.stderr)
         raise ScraperError("Vakıfbank sayfasında hiç <table> bulunamadı.")
 
     tum_satirlar = []
