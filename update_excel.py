@@ -45,7 +45,8 @@ BANKA_RENKLER = {
     "ZİRAAT":     {"bg": "C00000", "fg": "FFFFFF"},  # Kırmızı
     "HALKBANK":   {"bg": "7030A0", "fg": "FFFFFF"},  # Mor
     "AKBANK":     {"bg": "FF0000", "fg": "FFFF00"},  # Kırmızı + Sarı yazı
-    "İŞBANKASI":  {"bg": "002060", "fg": "FFFFFF"},  # Lacivert
+    "YAPIKREDI":  {"bg": "003087", "fg": "FFD700"},  # Lacivert + Altın yazı
+
 }
 
 
