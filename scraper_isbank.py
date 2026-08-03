@@ -4,6 +4,7 @@ Türkiye İş Bankası "Ürün ve Hizmet Ücretleri" sayfasını çeken scraper 
 
 import re
 import sys
+import json
 from dataclasses import dataclass
 from typing import List
 
@@ -136,73 +137,67 @@ def scrape_isbank(url: str = ISBANK_URL) -> List[UcretSatiri]:
 
     print(f"[isbank] {url} adresinden veri çekiliyor...", file=sys.stderr)
 
+    captured_responses = []
+
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         try:
             page = browser.new_page(user_agent=HEADERS["User-Agent"])
 
-            # Network isteklerini yakala — API endpoint'i bulmak için
-            api_urls = []
-            def handle_request(request):
-                if any(x in request.url for x in ["json", "api", "service", "ucret", "price", "fee", "data"]):
-                    api_urls.append(request.url)
-            page.on("request", handle_request)
+            # TÜM network response'larını yakala
+            def handle_response(response):
+                try:
+                    rurl = response.url
+                    ctype = response.headers.get("content-type", "")
+                    # HTML, JSON veya text içerenleri kaydet
+                    if any(x in ctype for x in ["html", "json", "text"]):
+                        captured_responses.append({
+                            "url": rurl,
+                            "status": response.status,
+                            "content_type": ctype,
+                        })
+                except Exception:
+                    pass
+
+            page.on("response", handle_response)
 
             page.goto(url, timeout=120000, wait_until="domcontentloaded")
-            page.wait_for_timeout(10000)
+            page.wait_for_timeout(15000)  # Daha uzun bekle
 
-            # Yakalanan API URL'lerini logla
-            print(f"[isbank] Yakalanan API istekleri ({len(api_urls)} adet):", file=sys.stderr)
-            for u in api_urls[:20]:
-                print(f"  {u}", file=sys.stderr)
+            # Tüm response'ları logla
+            print(f"[isbank] Yakalanan {len(captured_responses)} response:", file=sys.stderr)
+            for r in captured_responses:
+                print(f"  [{r['status']}] {r['content_type'][:30]} -> {r['url'][:120]}", file=sys.stderr)
 
-            # Tab'ları bul ve tıkla
-            tab_selectors = [
-                ".tabContentC",
-                "[class*='tab']",
-                "[class*='Tab']",
-                "[class*='Cover_M']",
-                "button[aria-expanded='false']",
-                ".accordion-button.collapsed",
-                "[data-bs-toggle='collapse']",
-                "[class*='accordion']",
-                "li[role='tab']",
-                ".nav-link",
-            ]
-            for selector in tab_selectors:
-                try:
-                    elements = page.query_selector_all(selector)
-                    for el in elements:
-                        try:
-                            el.click(timeout=1500)
-                            page.wait_for_timeout(500)
-                        except Exception:
-                            continue
-                except Exception:
-                    continue
+            # tabContentC içeriğini JS ile al
+            tab_content = page.evaluate("""
+                () => {
+                    const el = document.querySelector('.tabContentC');
+                    return el ? el.innerHTML.substring(0, 2000) : 'tabContentC bulunamadi';
+                }
+            """)
+            print(f"[isbank] tabContentC içeriği:\n{tab_content[:1000]}", file=sys.stderr)
 
-            page.wait_for_timeout(5000)
+            # iframe var mı?
+            iframes = page.evaluate("""
+                () => Array.from(document.querySelectorAll('iframe')).map(f => ({
+                    src: f.src,
+                    id: f.id,
+                    name: f.name
+                }))
+            """)
+            print(f"[isbank] iframe'ler: {iframes}", file=sys.stderr)
+
+            # Tüm script src'lerini logla
+            scripts = page.evaluate("""
+                () => Array.from(document.querySelectorAll('script[src]')).map(s => s.src)
+                    .filter(s => !s.includes('google') && !s.includes('chrome-ext'))
+            """)
+            print(f"[isbank] Script'ler:", file=sys.stderr)
+            for s in scripts[:20]:
+                print(f"  {s}", file=sys.stderr)
+
             html = page.content()
-
-            # Sayfanın içeriğini logla
-            soup_debug = BeautifulSoup(html, "lxml")
-            body = soup_debug.find("body")
-            if body:
-                text = body.get_text(separator="\n", strip=True)
-                # Ücret/masraf içeren satırları bul
-                lines = [l for l in text.split("\n") if any(k in l.lower() for k in ["masraf", "ücret", "komisyon", "tl", "%"])]
-                print(f"[isbank] Ücret içeren satırlar ({len(lines)} adet):", file=sys.stderr)
-                for l in lines[:20]:
-                    print(f"  {l}", file=sys.stderr)
-
-            # Tüm div class'larını logla
-            divs = soup_debug.find_all("div", class_=True)
-            classes = set()
-            for d in divs[:500]:
-                for c in d.get("class", []):
-                    classes.add(c)
-            print(f"[isbank] Tüm div class'ları: {sorted(classes)}", file=sys.stderr)
-
         finally:
             browser.close()
 
