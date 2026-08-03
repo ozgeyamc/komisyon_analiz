@@ -1,12 +1,13 @@
 """
-Garanti BBVA + Ziraat + Halkbank komisyon ücretleri takip botu.
+Garanti BBVA + Ziraat + Halkbank + Akbank komisyon ücretleri takip botu.
 """
 
 import sys
 
-from scraper import ScraperError, scrape_garanti_bbva
+from scraper import scrape_garanti_bbva
 from scraper_ziraat import scrape_ziraat
 from scraper_halkbank import scrape_halkbank
+from scraper_akbank import scrape_akbank
 from update_excel import EXCEL_DOSYA_ADI, excel_guncelle_coklu
 
 
@@ -15,7 +16,6 @@ def main() -> int:
 
     banka_verileri = {}
 
-    # Garanti BBVA
     print("\n--- Garanti BBVA çekiliyor ---")
     try:
         satirlar = scrape_garanti_bbva()
@@ -24,7 +24,6 @@ def main() -> int:
     except Exception as exc:
         print(f"[HATA] Garanti çekilemedi: {exc}", file=sys.stderr)
 
-    # Ziraat Bankası
     print("\n--- Ziraat Bankası çekiliyor ---")
     try:
         satirlar = scrape_ziraat()
@@ -33,7 +32,6 @@ def main() -> int:
     except Exception as exc:
         print(f"[HATA] Ziraat çekilemedi: {exc}", file=sys.stderr)
 
-    # Halkbank
     print("\n--- Halkbank çekiliyor ---")
     try:
         satirlar = scrape_halkbank()
@@ -41,6 +39,14 @@ def main() -> int:
         print(f"Halkbank: {len(satirlar)} satır bulundu.")
     except Exception as exc:
         print(f"[HATA] Halkbank çekilemedi: {exc}", file=sys.stderr)
+
+    print("\n--- Akbank çekiliyor ---")
+    try:
+        satirlar = scrape_akbank()
+        banka_verileri["AKBANK"] = satirlar
+        print(f"Akbank: {len(satirlar)} satır bulundu.")
+    except Exception as exc:
+        print(f"[HATA] Akbank çekilemedi: {exc}", file=sys.stderr)
 
     if not banka_verileri:
         print("[HATA] Hiçbir bankadan veri çekilemedi!", file=sys.stderr)
