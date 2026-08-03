@@ -44,6 +44,7 @@ BANKA_RENKLER = {
     "GARANTİ":  {"bg": "00B050", "fg": "FFFFFF"},  # Yeşil
     "ZİRAAT":   {"bg": "C00000", "fg": "FFFFFF"},  # Kırmızı
     "HALKBANK": {"bg": "7030A0", "fg": "FFFFFF"},  # Mor
+    "AKBANK":   {"bg": "FF0000", "fg": "FFFF00"},  # Kırmızı + Sarı yazı
 }
 
 
