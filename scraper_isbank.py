@@ -141,8 +141,9 @@ def scrape_isbank(url: str = ISBANK_URL) -> List[UcretSatiri]:
         browser = p.chromium.launch(headless=True)
         try:
             page = browser.new_page(user_agent=HEADERS["User-Agent"])
-            page.goto(url, timeout=60000, wait_until="networkidle")
-            page.wait_for_timeout(3000)
+          
+page.goto(url, timeout=120000, wait_until="domcontentloaded")
+page.wait_for_timeout(8000)
 
             # Sayfadaki tüm linkleri logla
             all_links = page.evaluate("""
