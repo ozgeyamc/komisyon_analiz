@@ -146,6 +146,8 @@ def scrape_vakifbank(url: str = VAKIFBANK_URL) -> List[UcretSatiri]:
 
     print(f"[vakifbank] {url} adresinden veri çekiliyor...", file=sys.stderr)
 
+    captured_requests = []
+
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         try:
@@ -161,48 +163,41 @@ def scrape_vakifbank(url: str = VAKIFBANK_URL) -> List[UcretSatiri]:
             )
             page = context.new_page()
 
-            # Önce ana sayfayı ziyaret et
+            # Tüm network isteklerini yakala
+            def on_request(request):
+                rurl = request.url
+                if any(k in rurl.lower() for k in [
+                    "ucret", "price", "fee", "service", "servis",
+                    "content", "api", "json", "data", "getpage",
+                    "ajax", "masraf", "komisyon"
+                ]):
+                    captured_requests.append(rurl)
+
+            page.on("request", on_request)
+
             page.goto("https://www.vakifbank.com.tr", timeout=60000, wait_until="domcontentloaded")
-            page.wait_for_timeout(3000)
+            page.wait_for_timeout(2000)
 
-            # Sonra hedef sayfaya git, networkidle bekle
             page.goto(url, timeout=120000, wait_until="networkidle")
-            page.wait_for_timeout(5000)
+            page.wait_for_timeout(10000)
 
-            # Tablo yoksa .content div'ini bekle
-            table_count = page.evaluate("() => document.querySelectorAll('table').length")
-            print(f"[vakifbank] İlk kontrol: {table_count} <table>", file=sys.stderr)
+            # Yakalanan istekleri logla
+            print(f"[vakifbank] Yakalanan API istekleri ({len(captured_requests)} adet):", file=sys.stderr)
+            for r in captured_requests[:30]:
+                print(f"  {r}", file=sys.stderr)
 
-            if table_count == 0:
-                # .content div'i içinde bir şey çıkana kadar bekle
-                try:
-                    page.wait_for_selector(".content table", timeout=20000)
-                    print("[vakifbank] .content table beklendi, bulundu", file=sys.stderr)
-                except Exception:
-                    print("[vakifbank] .content table timeout — devam ediliyor", file=sys.stderr)
-
-                # Tüm class içeren elementleri logla
-                all_classes = page.evaluate("""
-                    () => {
-                        const els = document.querySelectorAll('[class]');
-                        const classes = new Set();
-                        els.forEach(el => el.className.split(' ').forEach(c => c && classes.add(c)));
-                        return Array.from(classes).slice(0, 50);
-                    }
-                """)
-                print(f"[vakifbank] Tüm class'lar: {all_classes}", file=sys.stderr)
-
-                # content div içeriği
-                content_html = page.evaluate("""
-                    () => {
-                        const el = document.querySelector('.content');
-                        return el ? el.innerHTML.substring(0, 2000) : 'content bulunamadi';
-                    }
-                """)
-                print(f"[vakifbank] .content içeriği:\n{content_html[:500]}", file=sys.stderr)
+            # Tüm response URL'lerini de logla
+            all_responses = page.evaluate("""
+                () => performance.getEntriesByType('resource')
+                    .map(r => r.name)
+                    .filter(u => !u.endsWith('.css') && !u.endsWith('.png') && !u.endsWith('.jpg') && !u.endsWith('.woff2'))
+            """)
+            print(f"[vakifbank] Tüm resource URL'leri ({len(all_responses)} adet):", file=sys.stderr)
+            for r in all_responses[:50]:
+                print(f"  {r}", file=sys.stderr)
 
             table_count = page.evaluate("() => document.querySelectorAll('table').length")
-            print(f"[vakifbank] Son kontrol: {table_count} <table>", file=sys.stderr)
+            print(f"[vakifbank] Toplam {table_count} <table>", file=sys.stderr)
 
             html = page.content()
         finally:
@@ -210,17 +205,9 @@ def scrape_vakifbank(url: str = VAKIFBANK_URL) -> List[UcretSatiri]:
 
     soup = BeautifulSoup(html, "lxml")
     tables = soup.find_all("table")
-    print(f"[vakifbank] Toplam {len(tables)} <table> bulundu", file=sys.stderr)
 
     if not tables:
-        body = soup.find("body")
-        if body:
-            text = body.get_text(separator="\n", strip=True)
-            lines = [l for l in text.split("\n") if any(k in l.lower() for k in ["masraf", "ücret", "komisyon", "tl", "%"])]
-            print(f"[vakifbank] Ücret içeren satırlar ({len(lines)} adet):", file=sys.stderr)
-            for l in lines[:20]:
-                print(f"  {l}", file=sys.stderr)
-        raise ScraperError("Vakıfbank sayfasında hiç <table> bulunamadı.")
+        raise ScraperError("Vakıfbank sayfasında hiç <table> bulunamadı — log'dan API endpoint'ini inceleyin.")
 
     tum_satirlar = []
     for table in tables:
