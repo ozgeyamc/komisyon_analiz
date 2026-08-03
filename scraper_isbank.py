@@ -1,14 +1,16 @@
 """
-Türkiye İş Bankası "Ürün ve Hizmet Ücretleri" sayfasını çeken scraper modülü.
+Türkiye İş Bankası "Ürün ve Hizmet Ücretleri" scraper modülü.
+Bot koruması nedeniyle isbank.core.js'den endpoint tespit edilerek çekilir.
 """
 
 import re
 import sys
-import json
+import requests
 from dataclasses import dataclass
 from typing import List
 
 ISBANK_URL = "https://www.isbank.com.tr/urun-ve-hizmet-ucretleri"
+ISBANK_CORE_JS = "https://www.isbank.com.tr/StaticFiles/Isbank/scripts/isbank.core.js"
 
 DATE_PATTERN = re.compile(
     r"G[üu]ncell[ei]nme\s*Tarihi\s*:\s*(\d{2}\.\d{2}\.\d{4}(?:\s+\d{2}:\d{2})?)",
@@ -20,7 +22,10 @@ HEADERS = {
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/124.0.0.0 Safari/537.36"
-    )
+    ),
+    "Referer": "https://www.isbank.com.tr/urun-ve-hizmet-ucretleri",
+    "Accept-Language": "tr-TR,tr;q=0.9",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 }
 
 
@@ -66,6 +71,7 @@ def _find_category_title(el, fallback: str) -> str:
 
 
 def _extract_from_table(table, kategori: str) -> List[UcretSatiri]:
+    from bs4 import BeautifulSoup
     satirlar = []
     thead = table.find("thead")
     tbody = table.find("tbody")
@@ -131,71 +137,82 @@ def _extract_from_table(table, kategori: str) -> List[UcretSatiri]:
     return satirlar
 
 
+def _find_endpoints_in_js() -> List[str]:
+    """isbank.core.js içindeki endpoint URL'lerini bul."""
+    try:
+        r = requests.get(ISBANK_CORE_JS, headers=HEADERS, timeout=30)
+        r.raise_for_status()
+        js_content = r.text
+
+        # URL pattern'lerini ara
+        urls = re.findall(r'["\']([^"\']*(?:ucret|price|fee|tarim|servis|Service|getPage|GetPage|content|Content)[^"\']*)["\']', js_content, re.IGNORECASE)
+        print(f"[isbank] isbank.core.js'de bulunan URL pattern'leri:", file=sys.stderr)
+        for u in urls[:20]:
+            print(f"  {u}", file=sys.stderr)
+        return urls
+    except Exception as e:
+        print(f"[isbank] isbank.core.js okunamadı: {e}", file=sys.stderr)
+        return []
+
+
 def scrape_isbank(url: str = ISBANK_URL) -> List[UcretSatiri]:
     from playwright.sync_api import sync_playwright
     from bs4 import BeautifulSoup
 
     print(f"[isbank] {url} adresinden veri çekiliyor...", file=sys.stderr)
 
-    captured_responses = []
+    # JS'den endpoint bulmayı dene
+    _find_endpoints_in_js()
+
+    captured_html_responses = {}
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         try:
-            page = browser.new_page(user_agent=HEADERS["User-Agent"])
+            context = browser.new_context(
+                user_agent=HEADERS["User-Agent"],
+                extra_http_headers={
+                    "Accept-Language": "tr-TR,tr;q=0.9",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                }
+            )
+            page = context.new_page()
 
-            # TÜM network response'larını yakala
+            # HTML response'larını body ile birlikte yakala
             def handle_response(response):
                 try:
-                    rurl = response.url
                     ctype = response.headers.get("content-type", "")
-                    # HTML, JSON veya text içerenleri kaydet
-                    if any(x in ctype for x in ["html", "json", "text"]):
-                        captured_responses.append({
-                            "url": rurl,
-                            "status": response.status,
-                            "content_type": ctype,
-                        })
+                    rurl = response.url
+                    if "text/html" in ctype and "TSPD" not in rurl and "google" not in rurl:
+                        captured_html_responses[rurl] = response
                 except Exception:
                     pass
 
             page.on("response", handle_response)
 
             page.goto(url, timeout=120000, wait_until="domcontentloaded")
-            page.wait_for_timeout(15000)  # Daha uzun bekle
+            page.wait_for_timeout(15000)
 
-            # Tüm response'ları logla
-            print(f"[isbank] Yakalanan {len(captured_responses)} response:", file=sys.stderr)
-            for r in captured_responses:
-                print(f"  [{r['status']}] {r['content_type'][:30]} -> {r['url'][:120]}", file=sys.stderr)
+            # HTML response'larının içeriğini logla
+            print(f"[isbank] HTML response'ları:", file=sys.stderr)
+            for rurl, resp in captured_html_responses.items():
+                try:
+                    body = resp.text()
+                    soup_r = BeautifulSoup(body, "lxml")
+                    tables_r = soup_r.find_all("table")
+                    text_preview = soup_r.get_text()[:200].replace("\n", " ")
+                    print(f"  {rurl[:80]} — {len(tables_r)} tablo — {text_preview[:100]}", file=sys.stderr)
+                except Exception as e:
+                    print(f"  {rurl[:80]} — okunamadı: {e}", file=sys.stderr)
 
-            # tabContentC içeriğini JS ile al
-            tab_content = page.evaluate("""
-                () => {
-                    const el = document.querySelector('.tabContentC');
-                    return el ? el.innerHTML.substring(0, 2000) : 'tabContentC bulunamadi';
-                }
+            # Sayfadaki tüm <script> içeriklerinde endpoint ara
+            inline_scripts = page.evaluate("""
+                () => Array.from(document.querySelectorAll('script:not([src])')).map(s => s.textContent).join('\\n')
             """)
-            print(f"[isbank] tabContentC içeriği:\n{tab_content[:1000]}", file=sys.stderr)
-
-            # iframe var mı?
-            iframes = page.evaluate("""
-                () => Array.from(document.querySelectorAll('iframe')).map(f => ({
-                    src: f.src,
-                    id: f.id,
-                    name: f.name
-                }))
-            """)
-            print(f"[isbank] iframe'ler: {iframes}", file=sys.stderr)
-
-            # Tüm script src'lerini logla
-            scripts = page.evaluate("""
-                () => Array.from(document.querySelectorAll('script[src]')).map(s => s.src)
-                    .filter(s => !s.includes('google') && !s.includes('chrome-ext'))
-            """)
-            print(f"[isbank] Script'ler:", file=sys.stderr)
-            for s in scripts[:20]:
-                print(f"  {s}", file=sys.stderr)
+            # ucret/servis içeren satırları bul
+            for line in inline_scripts.split("\n"):
+                if any(k in line.lower() for k in ["ucret", "servis", "getpage", "service", "ajax", "fetch", "url"]):
+                    print(f"  [inline-js] {line.strip()[:150]}", file=sys.stderr)
 
             html = page.content()
         finally:
@@ -206,7 +223,7 @@ def scrape_isbank(url: str = ISBANK_URL) -> List[UcretSatiri]:
     print(f"[isbank] Toplam {len(tables)} <table> bulundu", file=sys.stderr)
 
     if not tables:
-        raise ScraperError("İş Bankası sayfasında hiç <table> bulunamadı — log'dan yapıyı inceleyin.")
+        raise ScraperError("İş Bankası sayfasında hiç <table> bulunamadı.")
 
     tum_satirlar = []
     for table in tables:
