@@ -1,6 +1,5 @@
 """
 Akbank "Ürün ve Hizmet Ücretleri" sayfasını çeken scraper modülü.
-Ana sayfadaki tüm alt sayfa linklerini otomatik tespit eder.
 """
 
 import re
@@ -27,14 +26,14 @@ HEADERS = {
 }
 
 AKBANK_FALLBACK_SAYFALAR = [
-    ("Kredi Kartları", f"{AKBANK_ANA_URL}/kredi-kartlari"),
-    ("Havale EFT FAST", f"{AKBANK_ANA_URL}/havale-eft-fast"),
-    ("Krediler", f"{AKBANK_ANA_URL}/krediler"),
-    ("Mevduat İşlemleri", f"{AKBANK_ANA_URL}/mevduat-islemleri"),
-    ("Menkul Kıymet İşlemleri", f"{AKBANK_ANA_URL}/menkul-kiymet-islemleri"),
-    ("Dış Ticaret İşlemleri", f"{AKBANK_ANA_URL}/dis-ticaret-islemleri"),
-    ("Çekler ve Senetler", f"{AKBANK_ANA_URL}/cekler-ve-senetler"),
-    ("Diğer İşlemler", f"{AKBANK_ANA_URL}/diger-islemler"),
+    ("Kredi Kartları", "https://www.akbank.com/urun-ve-hizmet-ucretleri/kredi-kartlari"),
+    ("Havale EFT FAST", "https://www.akbank.com/urun-ve-hizmet-ucretleri/havale-eft-fast"),
+    ("Krediler", "https://www.akbank.com/urun-ve-hizmet-ucretleri/krediler"),
+    ("Mevduat İşlemleri", "https://www.akbank.com/urun-ve-hizmet-ucretleri/mevduat-islemleri"),
+    ("Menkul Kıymet İşlemleri", "https://www.akbank.com/urun-ve-hizmet-ucretleri/menkul-kiymet-islemleri"),
+    ("Dış Ticaret İşlemleri", "https://www.akbank.com/urun-ve-hizmet-ucretleri/dis-ticaret-islemleri"),
+    ("Çekler ve Senetler", "https://www.akbank.com/urun-ve-hizmet-ucretleri/cekler-ve-senetler"),
+    ("Diğer İşlemler", "https://www.akbank.com/urun-ve-hizmet-ucretleri/diger-islemler"),
 ]
 
 
@@ -66,22 +65,21 @@ def _normalize(val: str) -> str:
     return val.strip().replace("\xa0", " ").replace("\u200b", "").strip()
 
 
-def _find_category_title(table, sayfa_kategorisi: str) -> str:
-    el = table.parent
+def _find_category_title(el, sayfa_kategorisi: str) -> str:
+    parent = el.parent
     depth = 0
-    while el is not None and depth < 8:
-        for sibling in el.find_all_previous(["h1", "h2", "h3", "h4", "h5", "button"], limit=3):
+    while parent is not None and depth < 8:
+        for sibling in parent.find_all_previous(["h1", "h2", "h3", "h4", "h5"], limit=3):
             text = _normalize(sibling.get_text())
             if len(text) > 5 and text not in ["Müşteri Ol", "Ara", "Kapat", "Menü", "Ana Sayfa"]:
                 return text
-        el = el.parent
+        parent = parent.parent
         depth += 1
     return sayfa_kategorisi
 
 
-def _extract_rows_from_table(table, kategori: str) -> List[UcretSatiri]:
+def _extract_from_table(table, kategori: str) -> List[UcretSatiri]:
     satirlar: List[UcretSatiri] = []
-
     thead = table.find("thead")
     tbody = table.find("tbody")
 
@@ -140,7 +138,6 @@ def _extract_rows_from_table(table, kategori: str) -> List[UcretSatiri]:
         cells = row.find_all(["th", "td"])
         if not cells or len(cells) < 2:
             continue
-
         values = [_normalize(c.get_text(strip=True)) for c in cells]
 
         def get(idx):
@@ -153,67 +150,18 @@ def _extract_rows_from_table(table, kategori: str) -> List[UcretSatiri]:
         raw_aciklama = get(col_aciklama)
         temiz_aciklama, site_tarihi = _parse_aciklama(raw_aciklama)
 
-        satirlar.append(
-            UcretSatiri(
-                kategori=kategori,
-                masraf=masraf,
-                asgari_tutar=get(col_asg_tutar),
-                asgari_oran=get(col_asg_oran),
-                azami_tutar=get(col_azm_tutar),
-                azami_oran=get(col_azm_oran),
-                aciklama=temiz_aciklama,
-                site_guncelleme_tarihi=site_tarihi,
-            )
-        )
+        satirlar.append(UcretSatiri(
+            kategori=kategori,
+            masraf=masraf,
+            asgari_tutar=get(col_asg_tutar),
+            asgari_oran=get(col_asg_oran),
+            azami_tutar=get(col_azm_tutar),
+            azami_oran=get(col_azm_oran),
+            aciklama=temiz_aciklama,
+            site_guncelleme_tarihi=site_tarihi,
+        ))
 
     return satirlar
-
-
-def _alt_sayfa_linklerini_bul(ana_url: str) -> List[tuple]:
-    from playwright.sync_api import sync_playwright
-
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        try:
-            page = browser.new_page(user_agent=HEADERS["User-Agent"])
-            page.goto(ana_url, timeout=60000, wait_until="networkidle")
-            page.wait_for_timeout(2000)
-            html = page.content()
-        finally:
-            browser.close()
-
-    soup = BeautifulSoup(html, "lxml")
-
-    base = "https://www.akbank.com"
-    prefix = "/urun-ve-hizmet-ucretleri/"
-
-    bulunan = {}
-    for a in soup.find_all("a", href=True):
-        href = a["href"].strip()
-        if href.startswith(base):
-            path = href.replace(base, "")
-        elif href.startswith("http"):
-            continue
-        else:
-            path = href
-
-        if path.startswith(prefix) and len(path) > len(prefix):
-            clean_path = path.split("#")[0].split("?")[0].rstrip("/")
-            full_url = base + clean_path
-            alt_kisim = clean_path.replace(prefix, "")
-            if "/" not in alt_kisim and alt_kisim:
-                link_text = _normalize(a.get_text())
-                if not link_text:
-                    link_text = alt_kisim.replace("-", " ").title()
-                if full_url not in bulunan:
-                    bulunan[full_url] = link_text
-
-    linkler = [(ad, url) for url, ad in bulunan.items()]
-    print(f"[akbank] Ana sayfada {len(linkler)} alt sayfa bulundu:", file=sys.stderr)
-    for ad, url in linkler:
-        print(f"  - {ad}: {url}", file=sys.stderr)
-
-    return linkler
 
 
 def _scrape_sayfa(url: str, sayfa_kategorisi: str) -> List[UcretSatiri]:
@@ -225,6 +173,7 @@ def _scrape_sayfa(url: str, sayfa_kategorisi: str) -> List[UcretSatiri]:
             page = browser.new_page(user_agent=HEADERS["User-Agent"])
             page.goto(url, timeout=60000, wait_until="networkidle")
 
+            # Accordion/tab'ları aç
             for selector in [
                 "button[aria-expanded='false']",
                 ".accordion-button.collapsed",
@@ -232,34 +181,99 @@ def _scrape_sayfa(url: str, sayfa_kategorisi: str) -> List[UcretSatiri]:
                 ".card-header button",
                 "li[role='tab']",
                 ".nav-link:not(.active)",
+                "[class*='accordion']",
+                "[class*='tab']",
             ]:
                 try:
                     elements = page.query_selector_all(selector)
                     for el in elements:
                         try:
-                            el.click(timeout=2000)
+                            el.click(timeout=1500)
                             page.wait_for_timeout(300)
                         except Exception:
                             continue
                 except Exception:
                     continue
 
-            page.wait_for_timeout(2000)
+            page.wait_for_timeout(3000)
             html = page.content()
         finally:
             browser.close()
 
     soup = BeautifulSoup(html, "lxml")
+
+    # DEBUG: HTML yapısını göster
     tables = soup.find_all("table")
-    print(f"  [akbank] '{sayfa_kategorisi}' — {len(tables)} tablo bulundu", file=sys.stderr)
+    print(f"  [akbank] '{sayfa_kategorisi}' — {len(tables)} <table> bulundu", file=sys.stderr)
+
+    # Tablo yoksa hangi yapı var göster
+    if not tables:
+        # div row yapısını ara
+        div_rows = soup.find_all("div", class_=re.compile(r"row|grid|list|item|price|fee|ucret|komisyon", re.I))
+        print(f"  [akbank] '{sayfa_kategorisi}' — {len(div_rows)} potansiyel div row bulundu", file=sys.stderr)
+
+        # Sayfa başlıklarını göster
+        headers = soup.find_all(["h1", "h2", "h3", "h4"])
+        for h in headers[:5]:
+            print(f"  [akbank] Başlık: {_normalize(h.get_text())}", file=sys.stderr)
+
+        # Tüm linkleri göster
+        links = soup.find_all("a", href=True)
+        akbank_links = [a["href"] for a in links if "urun-ve-hizmet" in a.get("href", "")]
+        print(f"  [akbank] Sayfadaki ücret linkleri: {akbank_links[:10]}", file=sys.stderr)
 
     tum_satirlar: List[UcretSatiri] = []
     for table in tables:
         kategori = _find_category_title(table, sayfa_kategorisi)
-        rows = _extract_rows_from_table(table, kategori)
+        rows = _extract_from_table(table, kategori)
         tum_satirlar.extend(rows)
 
     return tum_satirlar
+
+
+def _alt_sayfa_linklerini_bul(ana_url: str) -> List[tuple]:
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        try:
+            page = browser.new_page(user_agent=HEADERS["User-Agent"])
+            page.goto(ana_url, timeout=60000, wait_until="networkidle")
+            page.wait_for_timeout(3000)
+
+            # Tüm linkleri JS ile al
+            links = page.evaluate("""
+                () => {
+                    const anchors = document.querySelectorAll('a[href]');
+                    return Array.from(anchors).map(a => ({
+                        href: a.href,
+                        text: a.innerText.trim()
+                    }));
+                }
+            """)
+            html = page.content()
+        finally:
+            browser.close()
+
+    # JS ile bulunan linklerden filtrele
+    prefix = "urun-ve-hizmet-ucretleri/"
+    bulunan = {}
+    for link in links:
+        href = link.get("href", "")
+        text = link.get("text", "")
+        if prefix in href:
+            clean = href.split("#")[0].split("?")[0].rstrip("/")
+            alt = clean.split(prefix)[-1]
+            if alt and "/" not in alt:
+                if clean not in bulunan:
+                    bulunan[clean] = text if text else alt.replace("-", " ").title()
+
+    linkler = [(ad, url) for url, ad in bulunan.items()]
+    print(f"[akbank] Ana sayfada {len(linkler)} alt sayfa bulundu:", file=sys.stderr)
+    for ad, url in linkler:
+        print(f"  - {ad}: {url}", file=sys.stderr)
+
+    return linkler
 
 
 def scrape_akbank(ana_url: str = AKBANK_ANA_URL) -> List[UcretSatiri]:
