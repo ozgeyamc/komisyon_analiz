@@ -171,6 +171,10 @@ def scrape_denizbank(url: str = DENIZBANK_URL) -> List[UcretSatiri]:
 
             page.wait_for_timeout(3000)
             html = page.content()
+            soup_debug = BeautifulSoup(html, "lxml")
+tables_debug = soup_debug.find_all("table")
+for i, t in enumerate(tables_debug):
+    print(f"[denizbank] Tablo {i+1} (ilk 300): {t.get_text()[:300]}", file=sys.stderr)
         finally:
             browser.close()
 
