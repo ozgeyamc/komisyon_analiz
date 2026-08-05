@@ -1,21 +1,24 @@
 """
-Garanti BBVA + Ziraat + Halkbank + Akbank + Yapı Kredi + Vakıfbank + QNB + DenizBank + TEB + İş Bankası
-komisyon ücretleri takip botu.
+Banka komisyon ücretleri takip botu - ana çalıştırma script'i.
+
+Kullanım:
+    python main.py
 """
 
 import sys
 
 from scraper import scrape_garanti_bbva
-from scraper_ziraat import scrape_ziraat
-from scraper_halkbank import scrape_halkbank
-from scraper_akbank import scrape_akbank
-from scraper_yapikredi import scrape_yapikredi
-from scraper_vakifbank import scrape_vakifbank
-from scraper_qnb import scrape_qnb
-from scraper_denizbank import scrape_denizbank
-from scraper_teb import scrape_teb
-from scraper_isbank import scrape_isbank
 from update_excel import EXCEL_DOSYA_ADI, excel_guncelle_coklu
+
+
+def _try_scrape(banka_adi, fn):
+    try:
+        satirlar = fn()
+        print(f"{banka_adi}: {len(satirlar)} satır bulundu.")
+        return satirlar
+    except Exception as exc:
+        print(f"[HATA] {banka_adi} çekilemedi: {exc}", file=sys.stderr)
+        return None
 
 
 def main() -> int:
@@ -23,85 +26,35 @@ def main() -> int:
 
     banka_verileri = {}
 
-    print("\n--- Garanti BBVA çekiliyor ---")
-    try:
-        satirlar = scrape_garanti_bbva()
-        banka_verileri["GARANTİ"] = satirlar
-        print(f"Garanti: {len(satirlar)} satır bulundu.")
-    except Exception as exc:
-        print(f"[HATA] Garanti çekilemedi: {exc}", file=sys.stderr)
+    scrapers = [
+        ("GARANTİ", scrape_garanti_bbva),
+    ]
 
-    print("\n--- Ziraat Bankası çekiliyor ---")
-    try:
-        satirlar = scrape_ziraat()
-        banka_verileri["ZİRAAT"] = satirlar
-        print(f"Ziraat: {len(satirlar)} satır bulundu.")
-    except Exception as exc:
-        print(f"[HATA] Ziraat çekilemedi: {exc}", file=sys.stderr)
+    # Opsiyonel scraper'ları dinamik import et (dosya yoksa atla)
+    optional = [
+        ("ZİRAAT",    "scraper_ziraat",    "scrape_ziraat"),
+        ("HALKBANK",  "scraper_halkbank",  "scrape_halkbank"),
+        ("AKBANK",    "scraper_akbank",    "scrape_akbank"),
+        ("YAPIKREDI", "scraper_yapikredi", "scrape_yapikredi"),
+        ("VAKIFBANK", "scraper_vakifbank", "scrape_vakifbank"),
+        ("QNB",       "scraper_qnb",       "scrape_qnb"),
+        ("DENİZBANK", "scraper_denizbank", "scrape_denizbank"),
+        ("TEB",       "scraper_teb",       "scrape_teb"),
+        ("İŞBANKASI", "scraper_isbank",    "scrape_isbank"),
+    ]
 
-    print("\n--- Halkbank çekiliyor ---")
-    try:
-        satirlar = scrape_halkbank()
-        banka_verileri["HALKBANK"] = satirlar
-        print(f"Halkbank: {len(satirlar)} satır bulundu.")
-    except Exception as exc:
-        print(f"[HATA] Halkbank çekilemedi: {exc}", file=sys.stderr)
+    for label, module, func in optional:
+        try:
+            mod = __import__(module)
+            scrapers.append((label, getattr(mod, func)))
+        except ImportError:
+            pass
 
-    print("\n--- Akbank çekiliyor ---")
-    try:
-        satirlar = scrape_akbank()
-        banka_verileri["AKBANK"] = satirlar
-        print(f"Akbank: {len(satirlar)} satır bulundu.")
-    except Exception as exc:
-        print(f"[HATA] Akbank çekilemedi: {exc}", file=sys.stderr)
-
-    print("\n--- Yapı Kredi çekiliyor ---")
-    try:
-        satirlar = scrape_yapikredi()
-        banka_verileri["YAPIKREDI"] = satirlar
-        print(f"Yapı Kredi: {len(satirlar)} satır bulundu.")
-    except Exception as exc:
-        print(f"[HATA] Yapı Kredi çekilemedi: {exc}", file=sys.stderr)
-
-    print("\n--- Vakıfbank çekiliyor ---")
-    try:
-        satirlar = scrape_vakifbank()
-        banka_verileri["VAKIFBANK"] = satirlar
-        print(f"Vakıfbank: {len(satirlar)} satır bulundu.")
-    except Exception as exc:
-        print(f"[HATA] Vakıfbank çekilemedi: {exc}", file=sys.stderr)
-
-    print("\n--- QNB Finansbank çekiliyor ---")
-    try:
-        satirlar = scrape_qnb()
-        banka_verileri["QNB"] = satirlar
-        print(f"QNB: {len(satirlar)} satır bulundu.")
-    except Exception as exc:
-        print(f"[HATA] QNB çekilemedi: {exc}", file=sys.stderr)
-
-    print("\n--- DenizBank çekiliyor ---")
-    try:
-        satirlar = scrape_denizbank()
-        banka_verileri["DENİZBANK"] = satirlar
-        print(f"DenizBank: {len(satirlar)} satır bulundu.")
-    except Exception as exc:
-        print(f"[HATA] DenizBank çekilemedi: {exc}", file=sys.stderr)
-
-    print("\n--- TEB çekiliyor ---")
-    try:
-        satirlar = scrape_teb()
-        banka_verileri["TEB"] = satirlar
-        print(f"TEB: {len(satirlar)} satır bulundu.")
-    except Exception as exc:
-        print(f"[HATA] TEB çekilemedi: {exc}", file=sys.stderr)
-
-    print("\n--- İş Bankası çekiliyor ---")
-    try:
-        satirlar = scrape_isbank()
-        banka_verileri["İŞBANKASI"] = satirlar
-        print(f"İş Bankası: {len(satirlar)} satır bulundu.")
-    except Exception as exc:
-        print(f"[HATA] İş Bankası çekilemedi: {exc}", file=sys.stderr)
+    for banka_adi, fn in scrapers:
+        print(f"\n--- {banka_adi} çekiliyor ---")
+        satirlar = _try_scrape(banka_adi, fn)
+        if satirlar:
+            banka_verileri[banka_adi] = satirlar
 
     if not banka_verileri:
         print("[HATA] Hiçbir bankadan veri çekilemedi!", file=sys.stderr)
