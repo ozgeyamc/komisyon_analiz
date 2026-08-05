@@ -1,8 +1,4 @@
 from playwright.sync_api import sync_playwright
-from bs4 import BeautifulSoup
-import json
-
-api_responses = []
 
 with sync_playwright() as p:
     browser = p.chromium.launch(headless=True)
@@ -15,17 +11,18 @@ with sync_playwright() as p:
 
     page = context.new_page()
 
-    # Tüm network isteklerini yakala
     def handle_response(response):
         url = response.url
-        if any(k in url for k in ["ucret", "fee", "commission", "price", "tarife", "api", "json", "data"]):
+        ct = response.headers.get("content-type", "")
+        # sadece html/json/text dönenler
+        if any(k in ct for k in ["json", "text", "xml"]):
             try:
                 body = response.body()
-                print(f"\n[API] {response.status} {url}")
-                print(f"Content-Type: {response.headers.get('content-type','')}")
-                print(f"İlk 300 byte: {body[:300]}")
+                print(f"\n[{response.status}] {url}")
+                print(f"  CT: {ct}")
+                print(f"  Body (ilk 200): {body[:200]}")
             except Exception as e:
-                print(f"[API hata] {url}: {e}")
+                print(f"  [hata] {e}")
 
     page.on("response", handle_response)
 
