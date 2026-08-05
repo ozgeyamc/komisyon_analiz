@@ -1,5 +1,6 @@
 """
-Garanti BBVA + Ziraat + Halkbank + Akbank + Yapı Kredi + Vakıfbank + QNB + DenizBank + TEB komisyon ücretleri takip botu.
+Garanti BBVA + Ziraat + Halkbank + Akbank + Yapı Kredi + Vakıfbank + QNB + DenizBank + TEB + İş Bankası
+komisyon ücretleri takip botu.
 """
 
 import sys
@@ -13,6 +14,7 @@ from scraper_vakifbank import scrape_vakifbank
 from scraper_qnb import scrape_qnb
 from scraper_denizbank import scrape_denizbank
 from scraper_teb import scrape_teb
+from scraper_isbank import scrape_isbank
 from update_excel import EXCEL_DOSYA_ADI, excel_guncelle_coklu
 
 
@@ -92,6 +94,14 @@ def main() -> int:
         print(f"TEB: {len(satirlar)} satır bulundu.")
     except Exception as exc:
         print(f"[HATA] TEB çekilemedi: {exc}", file=sys.stderr)
+
+    print("\n--- İş Bankası çekiliyor ---")
+    try:
+        satirlar = scrape_isbank()
+        banka_verileri["İŞBANKASI"] = satirlar
+        print(f"İş Bankası: {len(satirlar)} satır bulundu.")
+    except Exception as exc:
+        print(f"[HATA] İş Bankası çekilemedi: {exc}", file=sys.stderr)
 
     if not banka_verileri:
         print("[HATA] Hiçbir bankadan veri çekilemedi!", file=sys.stderr)
