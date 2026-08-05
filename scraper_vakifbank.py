@@ -1,5 +1,5 @@
 """
-Vakıfbank "Ürün ve Hizmet Ücretleri" - direkt API endpoint'i kullanır.
+Vakıfbank "Ürün ve Hizmet Ücretleri" - Playwright route intercept ile API yanıtını yakalar.
 """
 
 import re
@@ -123,117 +123,66 @@ def _parse_json_response(data, satirlar: List[UcretSatiri]):
                     _parse_json_response(v, satirlar)
 
 
-def _try_requests(api_url: str, cookies: dict = None) -> str:
-    import requests
-    import urllib3
-    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
-    headers = {
-        "User-Agent": HEADERS["User-Agent"],
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "tr-TR,tr;q=0.9,en;q=0.8",
-        "Referer": VAKIFBANK_PAGE_URL,
-        "Origin": "https://www.vakifbank.com.tr",
-    }
-
-    resp = requests.get(
-        api_url,
-        headers=headers,
-        cookies=cookies or {},
-        timeout=30,
-        verify=False,
-    )
-    print(f"[vakifbank] requests status: {resp.status_code}", file=sys.stderr)
-    print(f"[vakifbank] requests yanıt (ilk 500): {resp.text[:500]}", file=sys.stderr)
-    resp.raise_for_status()
-    return resp.text
-
-
-def _get_cookies_via_playwright() -> dict:
+def scrape_vakifbank(page_url: str = VAKIFBANK_PAGE_URL) -> List[UcretSatiri]:
     from playwright.sync_api import sync_playwright
 
-    print("[vakifbank] Cookie'ler toplanıyor...", file=sys.stderr)
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        try:
-            context = browser.new_context(
-                user_agent=HEADERS["User-Agent"],
-                locale="tr-TR",
-            )
-            page = context.new_page()
-            page.goto("https://www.vakifbank.com.tr", timeout=60000, wait_until="domcontentloaded")
-            page.wait_for_timeout(3000)
-            cookies = context.cookies()
-            return {c["name"]: c["value"] for c in cookies}
-        finally:
-            browser.close()
-
-
-def _intercept_api_via_playwright(api_url: str) -> str:
-    from playwright.sync_api import sync_playwright
-
-    print("[vakifbank] Playwright route intercept deneniyor...", file=sys.stderr)
+    print(f"[vakifbank] Playwright intercept başlıyor...", file=sys.stderr)
     captured = []
+    all_api_urls = []
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         try:
             context = browser.new_context(
                 user_agent=HEADERS["User-Agent"],
+                viewport={"width": 1280, "height": 800},
                 locale="tr-TR",
                 extra_http_headers={
                     "Accept-Language": "tr-TR,tr;q=0.9,en;q=0.8",
                 }
             )
+            page = context.new_page()
 
+            # ÖNEMLİ: handler goto'dan ÖNCE tanımlanmalı
             def handle_response(response):
-                if "getProductServicePrices" in response.url:
+                url = response.url
+                if "apigateway" in url or "api." in url:
+                    all_api_urls.append(f"{response.status} {url}")
+
+                if "getProductServicePrices" in url or "ProductServicePrice" in url:
+                    print(f"[vakifbank] Hedef URL: {url} ({response.status})", file=sys.stderr)
                     try:
                         body = response.body()
-                        captured.append(body.decode("utf-8"))
-                        print(f"[vakifbank] API yanıtı yakalandı! ({len(body)} byte)", file=sys.stderr)
+                        text = body.decode("utf-8")
+                        if len(text) > 50:
+                            captured.append(text)
+                            print(f"[vakifbank] Yanıt yakalandı! ({len(text)} karakter)", file=sys.stderr)
+                            print(f"[vakifbank] İlk 300: {text[:300]}", file=sys.stderr)
                     except Exception as e:
                         print(f"[vakifbank] Yanıt okunamadı: {e}", file=sys.stderr)
 
-            page = context.new_page()
             page.on("response", handle_response)
-            page.goto(VAKIFBANK_PAGE_URL, timeout=120000, wait_until="networkidle")
-            page.wait_for_timeout(5000)
+
+            print(f"[vakifbank] Sayfa yükleniyor...", file=sys.stderr)
+            page.goto(page_url, timeout=120000, wait_until="domcontentloaded")
+            page.wait_for_timeout(10000)
+
+            print(f"[vakifbank] Görülen API URL'leri:", file=sys.stderr)
+            for u in all_api_urls:
+                print(f"  {u}", file=sys.stderr)
+
         finally:
             browser.close()
 
-    if captured:
-        return captured[0]
-    return ""
+    if not captured:
+        raise ScraperError(f"Vakıfbank API yanıtı yakalanamadı. API URL'leri: {all_api_urls}")
 
-
-def scrape_vakifbank(api_url: str = VAKIFBANK_API_URL) -> List[UcretSatiri]:
-    print(f"[vakifbank] Başlıyor...", file=sys.stderr)
-
-    full_response = ""
-
-    # Yöntem 1: Cookie alıp direkt requests ile çağır
-    try:
-        cookies = _get_cookies_via_playwright()
-        print(f"[vakifbank] {len(cookies)} cookie alındı", file=sys.stderr)
-        full_response = _try_requests(api_url, cookies)
-    except Exception as e:
-        print(f"[vakifbank] requests yöntemi başarısız: {e}", file=sys.stderr)
-
-    # Yöntem 2: Playwright route intercept
-    if not full_response:
-        try:
-            full_response = _intercept_api_via_playwright(api_url)
-        except Exception as e:
-            print(f"[vakifbank] Playwright intercept başarısız: {e}", file=sys.stderr)
-
-    if not full_response:
-        raise ScraperError("Vakıfbank API'sine erişilemedi.")
+    full_response = captured[0]
 
     try:
         data = json.loads(full_response)
     except json.JSONDecodeError:
-        print(f"[vakifbank] JSON parse hatası, ham yanıt:\n{full_response[:2000]}", file=sys.stderr)
+        print(f"[vakifbank] JSON parse hatası:\n{full_response[:2000]}", file=sys.stderr)
         raise ScraperError("Vakıfbank API yanıtı JSON değil.")
 
     print(f"[vakifbank] JSON parse edildi. Tip: {type(data).__name__}", file=sys.stderr)
@@ -248,7 +197,7 @@ def scrape_vakifbank(api_url: str = VAKIFBANK_API_URL) -> List[UcretSatiri]:
     _parse_json_response(data, tum_satirlar)
 
     if not tum_satirlar:
-        print(f"[vakifbank] Ham JSON (ilk 3000 karakter):\n{full_response[:3000]}", file=sys.stderr)
+        print(f"[vakifbank] Ham JSON (ilk 3000):\n{full_response[:3000]}", file=sys.stderr)
         raise ScraperError("Vakıfbank API'sinden veri parse edilemedi.")
 
     print(f"[vakifbank] Toplam {len(tum_satirlar)} satır bulundu.", file=sys.stderr)
