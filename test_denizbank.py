@@ -4,30 +4,36 @@ from bs4 import BeautifulSoup
 with sync_playwright() as p:
     browser = p.chromium.launch(headless=True)
     page = browser.new_page()
-    page.goto("https://www.denizbank.com/urun-ve-hizmet-ucretleri", timeout=90000, wait_until="domcontentloaded")
+    page.goto("https://www.teb.com.tr/urun-ve-hizmet-ucretleri/", timeout=90000, wait_until="domcontentloaded")
     page.wait_for_timeout(5000)
 
-    # nav-0 dan nav-6 ya kadar tüm tab'ları tıkla
-    for i in range(7):
+    for selector in [
+        "button[aria-expanded='false']",
+        ".accordion-button.collapsed",
+        "[data-bs-toggle='collapse']",
+        "li[role='tab']",
+        ".nav-link",
+    ]:
         try:
-            page.click(f"a[href='#nav-{i}']", timeout=3000)
-            page.wait_for_timeout(1000)
-            print(f"[tab nav-{i}] tiklandi")
-        except Exception as e:
-            print(f"[tab nav-{i}] tiklanamadi: {e}")
+            elements = page.query_selector_all(selector)
+            for el in elements:
+                try:
+                    el.click(timeout=1500)
+                    page.wait_for_timeout(200)
+                except Exception:
+                    continue
+        except Exception:
+            continue
 
-    page.wait_for_timeout(2000)
+    page.wait_for_timeout(3000)
     html = page.content()
     browser.close()
 
 soup = BeautifulSoup(html, "lxml")
+tables = soup.find_all("table")
+print(f"Toplam tablo: {len(tables)}")
 
-# tb-1 den tb-9 a kadar her bolumun basligini ve tablo sayisini logla
-for i in range(1, 10):
-    bolum = soup.find(id=f"tb-{i}")
-    if bolum:
-        baslik = bolum.find(["h1","h2","h3","h4","h5"])
-        tablolar = bolum.find_all("table")
-        print(f"\n[tb-{i}] Baslik: {baslik.get_text(strip=True) if baslik else 'YOK'} | Tablo sayisi: {len(tablolar)}")
-        for j, t in enumerate(tablolar):
-            print(f"  Tablo {j+1} (ilk 200): {t.get_text()[:200]}")
+for i, table in enumerate(tables):
+    text = table.get_text()[:200].strip().replace("\n", " ")
+    rows = table.find_all("tr")
+    print(f"\nTablo {i+1} ({len(rows)} satır): {text}")
