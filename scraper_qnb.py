@@ -145,7 +145,6 @@ def scrape_qnb(url: str = QNB_URL) -> List[UcretSatiri]:
             page.goto(url, timeout=90000, wait_until="domcontentloaded")
             page.wait_for_timeout(5000)
 
-            # Accordion/tab'ları aç
             for selector in [
                 "button[aria-expanded='false']",
                 ".accordion-button.collapsed",
