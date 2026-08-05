@@ -1,4 +1,5 @@
 from playwright.sync_api import sync_playwright
+from bs4 import BeautifulSoup
 
 with sync_playwright() as p:
     browser = p.chromium.launch(headless=True)
@@ -11,21 +12,22 @@ with sync_playwright() as p:
     page = context.new_page()
     page.goto("https://www.isbank.com.tr/urun-ve-hizmet-ucretleri", timeout=90000, wait_until="domcontentloaded")
     page.wait_for_timeout(15000)
-
-    for i in range(1, 10):
-        result = page.evaluate(f"""
-            () => {{
-                const el = document.getElementById('h{i}');
-                if (!el) return 'YOK';
-                return {{
-                    html: el.innerHTML.substring(0, 800),
-                    childCount: el.children.length,
-                    tableCount: el.querySelectorAll('table').length,
-                    text: el.innerText.substring(0, 300),
-                }};
-            }}
-        """)
-        print(f"\n=== #h{i} ===")
-        print(result)
-
+    html = page.content()
     browser.close()
+
+soup = BeautifulSoup(html, "lxml")
+
+# h1 içindeki ilk UHU_item_icerikC bloğunun tüm class'larını ve içeriğini göster
+h1 = soup.find(id="h1")
+if h1:
+    bloklar = h1.find_all(class_="UHU_item_icerikC")
+    print(f"h1 içinde {len(bloklar)} icerikC bloğu var\n")
+    for i, blok in enumerate(bloklar[:3]):
+        print(f"--- Blok {i+1} ---")
+        # Tüm child elemanları class + metin ile göster
+        for child in blok.find_all(True):
+            cls = child.get("class", [])
+            text = child.get_text(strip=True)[:100]
+            if text:
+                print(f"  <{child.name} class={cls}>: {text}")
+        print()
