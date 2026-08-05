@@ -56,14 +56,16 @@ def _parse_aciklama(raw_aciklama: str):
 
 
 def _parse_json_response(data, satirlar: List[UcretSatiri]):
-    """JSON yanıtını recursive olarak parse eder."""
     if isinstance(data, list):
         for item in data:
             _parse_json_response(item, satirlar)
     elif isinstance(data, dict):
-        # Satır gibi görünen dict'leri topla
         keys = [k.lower() for k in data.keys()]
-        has_fee = any(k in keys for k in ["masraf", "ucret", "fee", "price", "tutar", "amount", "servicename", "servisadi", "islemadi"])
+        has_fee = any(k in keys for k in [
+            "masraf", "ucret", "fee", "price", "tutar", "amount",
+            "servicename", "servisadi", "islemadi", "servisucretid",
+            "islemturu", "hizmetadi", "hizmetucret"
+        ])
         if has_fee:
             kategori = ""
             masraf = ""
@@ -78,7 +80,10 @@ def _parse_json_response(data, satirlar: List[UcretSatiri]):
                 kl = k.lower()
                 if any(x in kl for x in ["kategori", "category", "grup", "group", "baslik", "title"]):
                     kategori = _normalize(v)
-                elif any(x in kl for x in ["masraf", "islemadi", "servicename", "servisadi", "ad", "name"]):
+                elif any(x in kl for x in ["masraf", "islemadi", "servicename", "servisadi", "hizmetadi", "islemturu"]):
+                    if not masraf:
+                        masraf = _normalize(v)
+                elif kl in ["ad", "name"]:
                     if not masraf:
                         masraf = _normalize(v)
                 elif any(x in kl for x in ["asgari", "min"]) and any(x in kl for x in ["tutar", "amount", "fiyat"]):
@@ -95,7 +100,7 @@ def _parse_json_response(data, satirlar: List[UcretSatiri]):
                 elif any(x in kl for x in ["oran", "rate", "percent"]):
                     if not asg_oran:
                         asg_oran = _normalize(v)
-                elif any(x in kl for x in ["aciklama", "description", "note", "not", "bilgi"]):
+                elif any(x in kl for x in ["aciklama", "description", "note", "bilgi"]):
                     aciklama = _normalize(v)
                 elif any(x in kl for x in ["tarih", "date", "guncelleme"]):
                     tarih = _normalize(v)
@@ -118,88 +123,120 @@ def _parse_json_response(data, satirlar: List[UcretSatiri]):
                     _parse_json_response(v, satirlar)
 
 
-def scrape_vakifbank(api_url: str = VAKIFBANK_API_URL) -> List[UcretSatiri]:
+def _try_requests(api_url: str, cookies: dict = None) -> str:
+    import requests
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+    headers = {
+        "User-Agent": HEADERS["User-Agent"],
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "tr-TR,tr;q=0.9,en;q=0.8",
+        "Referer": VAKIFBANK_PAGE_URL,
+        "Origin": "https://www.vakifbank.com.tr",
+    }
+
+    resp = requests.get(
+        api_url,
+        headers=headers,
+        cookies=cookies or {},
+        timeout=30,
+        verify=False,
+    )
+    print(f"[vakifbank] requests status: {resp.status_code}", file=sys.stderr)
+    print(f"[vakifbank] requests yanıt (ilk 500): {resp.text[:500]}", file=sys.stderr)
+    resp.raise_for_status()
+    return resp.text
+
+
+def _get_cookies_via_playwright() -> dict:
     from playwright.sync_api import sync_playwright
 
-    print(f"[vakifbank] API endpoint'i çağrılıyor: {api_url}", file=sys.stderr)
+    print("[vakifbank] Cookie'ler toplanıyor...", file=sys.stderr)
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        try:
+            context = browser.new_context(
+                user_agent=HEADERS["User-Agent"],
+                locale="tr-TR",
+            )
+            page = context.new_page()
+            page.goto("https://www.vakifbank.com.tr", timeout=60000, wait_until="domcontentloaded")
+            page.wait_for_timeout(3000)
+            cookies = context.cookies()
+            return {c["name"]: c["value"] for c in cookies}
+        finally:
+            browser.close()
+
+
+def _intercept_api_via_playwright(api_url: str) -> str:
+    from playwright.sync_api import sync_playwright
+
+    print("[vakifbank] Playwright route intercept deneniyor...", file=sys.stderr)
+    captured = []
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         try:
             context = browser.new_context(
                 user_agent=HEADERS["User-Agent"],
-                viewport={"width": 1280, "height": 800},
                 locale="tr-TR",
                 extra_http_headers={
                     "Accept-Language": "tr-TR,tr;q=0.9,en;q=0.8",
-                    "Accept": "application/json, text/plain, */*",
-                    "Referer": VAKIFBANK_PAGE_URL,
-                    "Origin": "https://www.vakifbank.com.tr",
                 }
             )
 
-            # Önce ana sayfayı ziyaret et — cookie al
+            def handle_response(response):
+                if "getProductServicePrices" in response.url:
+                    try:
+                        body = response.body()
+                        captured.append(body.decode("utf-8"))
+                        print(f"[vakifbank] API yanıtı yakalandı! ({len(body)} byte)", file=sys.stderr)
+                    except Exception as e:
+                        print(f"[vakifbank] Yanıt okunamadı: {e}", file=sys.stderr)
+
             page = context.new_page()
-            page.goto("https://www.vakifbank.com.tr", timeout=60000, wait_until="domcontentloaded")
-            page.wait_for_timeout(2000)
-
-            # API'yi fetch ile çağır — cookie'ler otomatik gönderilir
-            response_text = page.evaluate(f"""
-                async () => {{
-                    try {{
-                        const resp = await fetch('{api_url}', {{
-                            method: 'GET',
-                            credentials: 'include',
-                            headers: {{
-                                'Accept': 'application/json, text/plain, */*',
-                                'Referer': '{VAKIFBANK_PAGE_URL}',
-                            }}
-                        }});
-                        const text = await resp.text();
-                        return {{ status: resp.status, body: text.substring(0, 5000) }};
-                    }} catch(e) {{
-                        return {{ status: 0, body: 'HATA: ' + e.message }};
-                    }}
-                }}
-            """)
-
-            print(f"[vakifbank] API yanıt status: {response_text.get('status')}", file=sys.stderr)
-            body_preview = response_text.get('body', '')
-            print(f"[vakifbank] API yanıt (ilk 1000 karakter):\n{body_preview[:1000]}", file=sys.stderr)
-
-            # Tam yanıtı al
-            full_response = page.evaluate(f"""
-                async () => {{
-                    try {{
-                        const resp = await fetch('{api_url}', {{
-                            method: 'GET',
-                            credentials: 'include',
-                            headers: {{
-                                'Accept': 'application/json, text/plain, */*',
-                                'Referer': '{VAKIFBANK_PAGE_URL}',
-                            }}
-                        }});
-                        return await resp.text();
-                    }} catch(e) {{
-                        return 'HATA: ' + e.message;
-                    }}
-                }}
-            """)
-
+            page.on("response", handle_response)
+            page.goto(VAKIFBANK_PAGE_URL, timeout=120000, wait_until="networkidle")
+            page.wait_for_timeout(5000)
         finally:
             browser.close()
 
-    if full_response.startswith("HATA:"):
-        raise ScraperError(f"Vakıfbank API çağrısı başarısız: {full_response}")
+    if captured:
+        return captured[0]
+    return ""
 
-    # JSON parse
+
+def scrape_vakifbank(api_url: str = VAKIFBANK_API_URL) -> List[UcretSatiri]:
+    print(f"[vakifbank] Başlıyor...", file=sys.stderr)
+
+    full_response = ""
+
+    # Yöntem 1: Cookie alıp direkt requests ile çağır
+    try:
+        cookies = _get_cookies_via_playwright()
+        print(f"[vakifbank] {len(cookies)} cookie alındı", file=sys.stderr)
+        full_response = _try_requests(api_url, cookies)
+    except Exception as e:
+        print(f"[vakifbank] requests yöntemi başarısız: {e}", file=sys.stderr)
+
+    # Yöntem 2: Playwright route intercept
+    if not full_response:
+        try:
+            full_response = _intercept_api_via_playwright(api_url)
+        except Exception as e:
+            print(f"[vakifbank] Playwright intercept başarısız: {e}", file=sys.stderr)
+
+    if not full_response:
+        raise ScraperError("Vakıfbank API'sine erişilemedi.")
+
     try:
         data = json.loads(full_response)
     except json.JSONDecodeError:
         print(f"[vakifbank] JSON parse hatası, ham yanıt:\n{full_response[:2000]}", file=sys.stderr)
         raise ScraperError("Vakıfbank API yanıtı JSON değil.")
 
-    print(f"[vakifbank] JSON başarıyla parse edildi. Tip: {type(data).__name__}", file=sys.stderr)
+    print(f"[vakifbank] JSON parse edildi. Tip: {type(data).__name__}", file=sys.stderr)
     if isinstance(data, dict):
         print(f"[vakifbank] JSON keys: {list(data.keys())[:20]}", file=sys.stderr)
     elif isinstance(data, list):
