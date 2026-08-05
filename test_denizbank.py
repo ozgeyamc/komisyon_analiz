@@ -1,6 +1,5 @@
 from playwright.sync_api import sync_playwright
 from bs4 import BeautifulSoup
-import re
 
 with sync_playwright() as p:
     browser = p.chromium.launch(headless=True)
@@ -12,33 +11,30 @@ with sync_playwright() as p:
     context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
     page = context.new_page()
     page.goto("https://www.isbank.com.tr/urun-ve-hizmet-ucretleri", timeout=90000, wait_until="domcontentloaded")
-    page.wait_for_timeout(10000)
+    page.wait_for_timeout(15000)
+
+    # header1..header10 id'li elementleri kontrol et
+    for i in range(1, 15):
+        el = page.query_selector(f"#header{i}")
+        if el:
+            text = el.inner_text()[:200].replace("\n", " ")
+            print(f"#header{i}: {text}")
+
+    # Tablo sayısını kontrol et
+    tables = page.query_selector_all("table")
+    print(f"\nToplam tablo: {len(tables)}")
+
+    # div içinde ücret verisi ara
     html = page.content()
     browser.close()
 
 soup = BeautifulSoup(html, "lxml")
 
-# 1. Script tagları içinde JSON/veri var mı?
-scripts = soup.find_all("script")
-print(f"Toplam script tag: {len(scripts)}")
-for i, s in enumerate(scripts):
-    text = s.get_text()
-    if any(k in text for k in ["ucret", "masraf", "komisyon", "tarife", "fee", "price"]):
-        print(f"\n[Script {i+1}] (ilk 500):\n{text[:500]}")
-
-# 2. data- attribute içinde veri var mı?
-data_els = soup.find_all(attrs={"data-url": True})
-print(f"\ndata-url attribute'lu eleman: {len(data_els)}")
-for el in data_els[:10]:
-    print(f"  {el.name}: {el.get('data-url')}")
-
-data_src = soup.find_all(attrs={"data-src": True})
-print(f"\ndata-src attribute'lu eleman: {len(data_src)}")
-for el in data_src[:10]:
-    print(f"  {el.name}: {el.get('data-src')}")
-
-# 3. iframe var mı?
-iframes = soup.find_all("iframe")
-print(f"\niframe sayısı: {len(iframes)}")
-for f in iframes:
-    print(f"  src: {f.get('src')}")
+# isbank.table.css kullanan div/section bul
+for tag in ["div", "section", "article"]:
+    els = soup.find_all(tag, class_=lambda c: c and any(k in " ".join(c) for k in ["table", "ucret", "fee", "price", "tarife", "komisyon"]))
+    if els:
+        print(f"\n{tag} eleman sayısı: {len(els)}")
+        for el in els[:3]:
+            print(f"  class={el.get('class')} id={el.get('id')}")
+            print(f"  metin (ilk 200): {el.get_text()[:200].strip()}")
