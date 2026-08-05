@@ -47,6 +47,7 @@ BANKA_RENKLER = {
     "AKBANK":     {"bg": "FF0000", "fg": "FFFF00"},  # Kırmızı
     "YAPIKREDI":  {"bg": "003087", "fg": "FFD700"},  # Lacivert
     "VAKIFBANK":  {"bg": "FFD700", "fg": "000000"},  # Altın + Siyah yazı
+    "QNB":        {"bg": "6B0F8E", "fg": "FFFFFF"},  # Mor
 }
 
 
@@ -79,7 +80,7 @@ def satirlari_yaz(ws: Worksheet, satirlar: List[UcretSatiri], banka_adi: str) ->
 
     # Kategori bazında sırala — tüm bankalar için tutarlı görünüm
     satirlar = sorted(satirlar, key=lambda s: (s.kategori, s.masraf))
-    
+
     for satir in satirlar:
         yeni_row = ws.max_row + 1
 
