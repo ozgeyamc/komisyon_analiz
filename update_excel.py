@@ -48,6 +48,7 @@ BANKA_RENKLER = {
     "YAPIKREDI":  {"bg": "003087", "fg": "FFD700"},  # Lacivert
     "VAKIFBANK":  {"bg": "FFD700", "fg": "000000"},  # Altın + Siyah yazı
     "QNB":        {"bg": "6B0F8E", "fg": "FFFFFF"},  # Mor
+    "DENİZBANK":  {"bg": "003DA5", "fg": "FFFFFF"},  # Mavi
 }
 
 
