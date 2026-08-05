@@ -16,8 +16,8 @@ jobs:
 
       - name: Bagimlilik yukle
         run: |
-          pip install playwright beautifulsoup4 lxml
+          pip install playwright beautifulsoup4 lxml requests
           playwright install chromium
 
-      - name: DenizBank URL test
+      - name: Test
         run: python test_denizbank.py
