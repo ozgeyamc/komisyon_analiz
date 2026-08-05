@@ -54,9 +54,16 @@ def _parse_aciklama(raw_aciklama: str):
 
 
 def _find_category_title(el, fallback: str) -> str:
+    # Önce tb-X bölüm başlığını bul
     parent = el.parent
     depth = 0
-    while parent is not None and depth < 10:
+    while parent is not None and depth < 15:
+        # tb-X div'inin başlığını ara
+        baslik = parent.find(["h1", "h2", "h3", "h4", "h5"], recursive=False)
+        if baslik:
+            text = _normalize(baslik.get_text())
+            if len(text) > 3:
+                return text
         for sibling in parent.find_all_previous(["h1", "h2", "h3", "h4", "h5"], limit=3):
             text = _normalize(sibling.get_text())
             if len(text) > 5 and text not in ["Müşteri Ol", "Ara", "Kapat", "Menü", "Ana Sayfa"]:
@@ -90,13 +97,18 @@ def _extract_from_table(table, kategori: str) -> List[UcretSatiri]:
             header_texts = [_normalize(c.get_text(strip=True)).lower() for c in all_rows[0].find_all(["th", "td"])]
         data_rows = all_rows[1:]
 
+    print(f"[denizbank]   Header: {header_texts}", file=sys.stderr)
+
     def find_col(keywords):
         for i, h in enumerate(header_texts):
             if all(k in h for k in keywords):
                 return i
         return -1
 
-    col_masraf    = find_col(["masraf"])
+    # DenizBank sütun isimleri: "şube", "işlem türü", "asgari tutar", "asgari oran (%)", "azami tutar", "azami oran (%)", "açıklama", "güncelleme tarihi"
+    col_masraf    = find_col(["işlem"])
+    if col_masraf == -1:
+        col_masraf = find_col(["masraf"])
     col_asg_tutar = find_col(["asgari", "tutar"])
     col_asg_oran  = find_col(["asgari", "oran"])
     col_azm_tutar = find_col(["azami", "tutar"])
@@ -104,6 +116,14 @@ def _extract_from_table(table, kategori: str) -> List[UcretSatiri]:
     col_aciklama  = find_col(["açıklama"])
     if col_aciklama == -1:
         col_aciklama = find_col(["aciklama"])
+    col_tarih     = find_col(["güncelleme"])
+    if col_tarih == -1:
+        col_tarih = find_col(["guncelleme"])
+
+    # Kategori için "şube" sütununu da kullan
+    col_sube = find_col(["şube"])
+    if col_sube == -1:
+        col_sube = find_col(["sube"])
 
     if col_masraf == -1:
         col_masraf = 0; col_asg_tutar = 1; col_asg_oran = 2
@@ -122,9 +142,18 @@ def _extract_from_table(table, kategori: str) -> List[UcretSatiri]:
         if not masraf:
             continue
 
-        temiz_aciklama, site_tarihi = _parse_aciklama(get(col_aciklama))
+        # Şube varsa kategoriyi zenginleştir
+        sube = get(col_sube) if col_sube >= 0 else ""
+        gercek_kategori = f"{kategori} - {sube}" if sube and sube != masraf else kategori
+
+        # Güncelleme tarihini doğrudan sütundan al
+        site_tarihi = get(col_tarih) if col_tarih >= 0 else ""
+        temiz_aciklama, aciklama_tarihi = _parse_aciklama(get(col_aciklama))
+        if not site_tarihi:
+            site_tarihi = aciklama_tarihi
+
         satirlar.append(UcretSatiri(
-            kategori=kategori, masraf=masraf,
+            kategori=gercek_kategori, masraf=masraf,
             asgari_tutar=get(col_asg_tutar), asgari_oran=get(col_asg_oran),
             azami_tutar=get(col_azm_tutar), azami_oran=get(col_azm_oran),
             aciklama=temiz_aciklama, site_guncelleme_tarihi=site_tarihi,
@@ -145,67 +174,42 @@ def scrape_denizbank(url: str = DENIZBANK_URL) -> List[UcretSatiri]:
             page.goto(url, timeout=90000, wait_until="domcontentloaded")
             page.wait_for_timeout(5000)
 
-            for selector in [
-                "button[aria-expanded='false']",
-                ".accordion-button.collapsed",
-                "[data-bs-toggle='collapse']",
-                ".card-header button",
-                "li[role='tab']",
-                ".nav-link",
-                "[class*='accordion']",
-                "[class*='Accordion']",
-                "[class*='tab-']",
-                "[class*='Tab']",
-                "[class*='expand']",
-            ]:
-                try:
-                    elements = page.query_selector_all(selector)
-                    for el in elements:
-                        try:
-                            el.click(timeout=1500)
-                            page.wait_for_timeout(200)
-                        except Exception:
-                            continue
-                except Exception:
-                    continue
-
-            page.wait_for_timeout(3000)
+            # Tab içeriklerini JS ile görünür yap
+            page.evaluate("""
+                () => {
+                    document.querySelectorAll('.tab-pane').forEach(el => {
+                        el.classList.add('active', 'show');
+                        el.style.display = 'block';
+                    });
+                }
+            """)
+            page.wait_for_timeout(2000)
             html = page.content()
-
-            # DEBUG — tablolarin icerigini logla
-            soup_debug = BeautifulSoup(html, "lxml")
-            for i, t in enumerate(soup_debug.find_all("table")):
-                print(f"[denizbank] Tablo {i+1} (ilk 300): {t.get_text()[:300]}", file=sys.stderr)
 
         finally:
             browser.close()
 
     soup = BeautifulSoup(html, "lxml")
-    tables = soup.find_all("table")
-    print(f"[denizbank] Toplam {len(tables)} <table> bulundu", file=sys.stderr)
 
-    if not tables:
-        print("[denizbank] TABLO YOK — Sayfa yapısı analiz ediliyor:", file=sys.stderr)
-        body = soup.find("body")
-        if body:
-            text = body.get_text(separator="\n", strip=True)
-            print(f"[denizbank] Sayfa metni (ilk 1000 kar):\n{text[:1000]}", file=sys.stderr)
-        divs = soup.find_all("div", class_=True)
-        classes = set()
-        for d in divs[:200]:
-            for c in d.get("class", []):
-                classes.add(c)
-        print(f"[denizbank] Bulunan div class'ları: {sorted(classes)[:50]}", file=sys.stderr)
-        raise ScraperError("DenizBank sayfasında hiç <table> bulunamadı.")
-
+    # tb-1 den tb-9 a kadar bölümleri işle
     tum_satirlar = []
-    for table in tables:
-        kategori = _find_category_title(table, "Genel")
-        rows = _extract_from_table(table, kategori)
-        tum_satirlar.extend(rows)
+    for i in range(1, 10):
+        bolum = soup.find(id=f"tb-{i}")
+        if not bolum:
+            continue
+        # Bölüm başlığını bul
+        baslik_el = bolum.find(["h1", "h2", "h3", "h4", "h5"])
+        kategori = _normalize(baslik_el.get_text()) if baslik_el else f"Bölüm {i}"
+        print(f"[denizbank] tb-{i} kategorisi: {kategori}", file=sys.stderr)
+
+        tablolar = bolum.find_all("table")
+        print(f"[denizbank] tb-{i} tablo sayısı: {len(tablolar)}", file=sys.stderr)
+        for table in tablolar:
+            rows = _extract_from_table(table, kategori)
+            tum_satirlar.extend(rows)
 
     if not tum_satirlar:
-        raise ScraperError("DenizBank sayfasında tablo var ama hiç veri satırı çekilemedi.")
+        raise ScraperError("DenizBank sayfasında hiç veri satırı çekilemedi.")
 
     tum_satirlar = sorted(tum_satirlar, key=lambda s: (s.kategori, s.masraf))
     print(f"[denizbank] Toplam {len(tum_satirlar)} satır bulundu.", file=sys.stderr)
