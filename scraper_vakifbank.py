@@ -128,7 +128,6 @@ def scrape_vakifbank(page_url: str = VAKIFBANK_PAGE_URL) -> List[UcretSatiri]:
 
     print(f"[vakifbank] Playwright intercept başlıyor...", file=sys.stderr)
     captured = []
-    all_api_urls = []
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -143,39 +142,33 @@ def scrape_vakifbank(page_url: str = VAKIFBANK_PAGE_URL) -> List[UcretSatiri]:
             )
             page = context.new_page()
 
-            # ÖNEMLİ: handler goto'dan ÖNCE tanımlanmalı
             def handle_response(response):
                 url = response.url
-                if "apigateway" in url or "api." in url:
-                    all_api_urls.append(f"{response.status} {url}")
-
                 if "getProductServicePrices" in url or "ProductServicePrice" in url:
                     print(f"[vakifbank] Hedef URL: {url} ({response.status})", file=sys.stderr)
-                    try:
-                        body = response.body()
-                        text = body.decode("utf-8")
-                        if len(text) > 50:
-                            captured.append(text)
-                            print(f"[vakifbank] Yanıt yakalandı! ({len(text)} karakter)", file=sys.stderr)
-                            print(f"[vakifbank] İlk 300: {text[:300]}", file=sys.stderr)
-                    except Exception as e:
-                        print(f"[vakifbank] Yanıt okunamadı: {e}", file=sys.stderr)
+                    if response.status == 200:
+                        try:
+                            response.finished()
+                            body = response.body()
+                            text = body.decode("utf-8")
+                            if len(text) > 50:
+                                captured.append(text)
+                                print(f"[vakifbank] Yanıt yakalandı! ({len(text)} karakter)", file=sys.stderr)
+                                print(f"[vakifbank] İlk 300: {text[:300]}", file=sys.stderr)
+                        except Exception as e:
+                            print(f"[vakifbank] body() hatası: {e}", file=sys.stderr)
 
             page.on("response", handle_response)
 
             print(f"[vakifbank] Sayfa yükleniyor...", file=sys.stderr)
-            page.goto(page_url, timeout=120000, wait_until="domcontentloaded")
-            page.wait_for_timeout(10000)
-
-            print(f"[vakifbank] Görülen API URL'leri:", file=sys.stderr)
-            for u in all_api_urls:
-                print(f"  {u}", file=sys.stderr)
+            page.goto(page_url, timeout=120000, wait_until="networkidle")
+            page.wait_for_timeout(3000)
 
         finally:
             browser.close()
 
     if not captured:
-        raise ScraperError(f"Vakıfbank API yanıtı yakalanamadı. API URL'leri: {all_api_urls}")
+        raise ScraperError("Vakıfbank API yanıtı yakalanamadı.")
 
     full_response = captured[0]
 
