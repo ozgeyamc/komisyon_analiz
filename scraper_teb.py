@@ -22,6 +22,12 @@ HEADERS = {
     )
 }
 
+GEREKSIZ_BASLIKLAR = {
+    "Müşteri Ol", "Ara", "Kapat", "Menü", "Ana Sayfa",
+    "Kredi Kartı Masraf, Komisyon ve Ücret Listesi",
+    "Temel Bankacılık Ürün Bilgilendirme Formu",
+}
+
 
 @dataclass
 class UcretSatiri:
@@ -56,10 +62,15 @@ def _parse_aciklama(raw_aciklama: str):
 def _find_category_title(el, fallback: str) -> str:
     parent = el.parent
     depth = 0
-    while parent is not None and depth < 10:
+    while parent is not None and depth < 15:
+        baslik = parent.find(["h1", "h2", "h3", "h4", "h5"], recursive=False)
+        if baslik:
+            text = _normalize(baslik.get_text())
+            if len(text) > 3 and text not in GEREKSIZ_BASLIKLAR:
+                return text
         for sibling in parent.find_all_previous(["h1", "h2", "h3", "h4", "h5"], limit=3):
             text = _normalize(sibling.get_text())
-            if len(text) > 5 and text not in ["Müşteri Ol", "Ara", "Kapat", "Menü", "Ana Sayfa"]:
+            if len(text) > 5 and text not in GEREKSIZ_BASLIKLAR:
                 return text
         parent = parent.parent
         depth += 1
@@ -78,12 +89,12 @@ def _extract_from_table(table, kategori: str) -> List[UcretSatiri]:
             header_texts = [_normalize(c.get_text(strip=True)).lower() for c in hr.find_all(["th", "td"])]
 
     if tbody:
-        data_rows = tbody.find_all("tr")
+        data_rows = tbody.find_all("tr", recursive=False)
         if not header_texts and data_rows:
             header_texts = [_normalize(c.get_text(strip=True)).lower() for c in data_rows[0].find_all(["th", "td"])]
             data_rows = data_rows[1:]
     else:
-        all_rows = table.find_all("tr")
+        all_rows = table.find_all("tr", recursive=False)
         if not all_rows:
             return satirlar
         if not header_texts:
@@ -104,13 +115,16 @@ def _extract_from_table(table, kategori: str) -> List[UcretSatiri]:
     col_aciklama  = find_col(["açıklama"])
     if col_aciklama == -1:
         col_aciklama = find_col(["aciklama"])
+    col_tarih     = find_col(["güncelleme"])
+    if col_tarih == -1:
+        col_tarih = find_col(["guncelleme"])
 
     if col_masraf == -1:
         col_masraf = 0; col_asg_tutar = 1; col_asg_oran = 2
         col_azm_tutar = 3; col_azm_oran = 4; col_aciklama = 5
 
     for row in data_rows:
-        cells = row.find_all(["th", "td"])
+        cells = row.find_all(["th", "td"], recursive=False)
         if not cells or len(cells) < 2:
             continue
         values = [_normalize(c.get_text(strip=True)) for c in cells]
@@ -122,7 +136,11 @@ def _extract_from_table(table, kategori: str) -> List[UcretSatiri]:
         if not masraf:
             continue
 
-        temiz_aciklama, site_tarihi = _parse_aciklama(get(col_aciklama))
+        site_tarihi = get(col_tarih) if col_tarih >= 0 else ""
+        temiz_aciklama, aciklama_tarihi = _parse_aciklama(get(col_aciklama))
+        if not site_tarihi:
+            site_tarihi = aciklama_tarihi
+
         satirlar.append(UcretSatiri(
             kategori=kategori, masraf=masraf,
             asgari_tutar=get(col_asg_tutar), asgari_oran=get(col_asg_oran),
@@ -130,6 +148,11 @@ def _extract_from_table(table, kategori: str) -> List[UcretSatiri]:
             aciklama=temiz_aciklama, site_guncelleme_tarihi=site_tarihi,
         ))
     return satirlar
+
+
+def _is_leaf_table(table) -> bool:
+    """İçinde başka tablo barındırmayan (en içteki) tabloları bul."""
+    return len(table.find_all("table")) == 0
 
 
 def scrape_teb(url: str = TEB_URL) -> List[UcretSatiri]:
@@ -144,57 +167,22 @@ def scrape_teb(url: str = TEB_URL) -> List[UcretSatiri]:
             page = browser.new_page(user_agent=HEADERS["User-Agent"])
             page.goto(url, timeout=90000, wait_until="domcontentloaded")
             page.wait_for_timeout(5000)
-
-            for selector in [
-                "button[aria-expanded='false']",
-                ".accordion-button.collapsed",
-                "[data-bs-toggle='collapse']",
-                ".card-header button",
-                "li[role='tab']",
-                ".nav-link",
-                "[class*='accordion']",
-                "[class*='Accordion']",
-                "[class*='tab-']",
-                "[class*='Tab']",
-                "[class*='expand']",
-            ]:
-                try:
-                    elements = page.query_selector_all(selector)
-                    for el in elements:
-                        try:
-                            el.click(timeout=1500)
-                            page.wait_for_timeout(200)
-                        except Exception:
-                            continue
-                except Exception:
-                    continue
-
-            page.wait_for_timeout(3000)
             html = page.content()
-
         finally:
             browser.close()
 
     soup = BeautifulSoup(html, "lxml")
-    tables = soup.find_all("table")
-    print(f"[teb] Toplam {len(tables)} <table> bulundu", file=sys.stderr)
+    all_tables = soup.find_all("table")
 
-    if not tables:
-        print("[teb] TABLO YOK — Sayfa yapısı analiz ediliyor:", file=sys.stderr)
-        body = soup.find("body")
-        if body:
-            text = body.get_text(separator="\n", strip=True)
-            print(f"[teb] Sayfa metni (ilk 1000 kar):\n{text[:1000]}", file=sys.stderr)
-        divs = soup.find_all("div", class_=True)
-        classes = set()
-        for d in divs[:200]:
-            for c in d.get("class", []):
-                classes.add(c)
-        print(f"[teb] Bulunan div class'ları: {sorted(classes)[:50]}", file=sys.stderr)
-        raise ScraperError("TEB sayfasında hiç <table> bulunamadı.")
+    # Sadece en içteki tabloları al (nested olmayanlar)
+    leaf_tables = [t for t in all_tables if _is_leaf_table(t)]
+    print(f"[teb] Toplam {len(all_tables)} tablo, {len(leaf_tables)} leaf tablo bulundu", file=sys.stderr)
+
+    if not leaf_tables:
+        raise ScraperError("TEB sayfasında hiç tablo bulunamadı.")
 
     tum_satirlar = []
-    for table in tables:
+    for table in leaf_tables:
         kategori = _find_category_title(table, "Genel")
         rows = _extract_from_table(table, kategori)
         tum_satirlar.extend(rows)
