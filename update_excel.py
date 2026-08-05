@@ -41,15 +41,16 @@ BASLIK_FILL = PatternFill(start_color="1F3864", end_color="1F3864", fill_type="s
 BASLIK_FONT = Font(color="FFFFFF", bold=True)
 
 BANKA_RENKLER = {
-    "GARANTİ":    {"bg": "00B050", "fg": "FFFFFF"},  # Yeşil
-    "ZİRAAT":     {"bg": "C00000", "fg": "FFFFFF"},  # Kırmızı
-    "HALKBANK":   {"bg": "7030A0", "fg": "FFFFFF"},  # Mor
-    "AKBANK":     {"bg": "FF0000", "fg": "FFFF00"},  # Kırmızı
-    "YAPIKREDI":  {"bg": "003087", "fg": "FFD700"},  # Lacivert
-    "VAKIFBANK":  {"bg": "FFD700", "fg": "000000"},  # Altın + Siyah yazı
-    "QNB":        {"bg": "6B0F8E", "fg": "FFFFFF"},  # Mor
-    "DENİZBANK":  {"bg": "003DA5", "fg": "FFFFFF"},  # Mavi
-    "TEB":        {"bg": "003087", "fg": "FFFFFF"},  # Lacivert
+    "GARANTİ":    {"bg": "00B050", "fg": "FFFFFF"},
+    "ZİRAAT":     {"bg": "C00000", "fg": "FFFFFF"},
+    "HALKBANK":   {"bg": "7030A0", "fg": "FFFFFF"},
+    "AKBANK":     {"bg": "FF0000", "fg": "FFFF00"},
+    "YAPIKREDI":  {"bg": "003087", "fg": "FFD700"},
+    "VAKIFBANK":  {"bg": "FFD700", "fg": "000000"},
+    "QNB":        {"bg": "6B0F8E", "fg": "FFFFFF"},
+    "DENİZBANK":  {"bg": "003DA5", "fg": "FFFFFF"},
+    "TEB":        {"bg": "00539B", "fg": "FFFFFF"},
+    "İŞBANKASI":  {"bg": "012169", "fg": "FFFFFF"},
 }
 
 
@@ -68,7 +69,7 @@ def _yeni_workbook_olustur() -> Tuple[Workbook, Worksheet]:
         cell.font = BASLIK_FONT
         cell.alignment = Alignment(horizontal="center", vertical="center")
 
-    genislikler = [15, 30, 35, 14, 14, 14, 14, 60, 20]
+    genislikler = [15, 40, 40, 14, 14, 14, 14, 60, 20]
     for idx, genislik in enumerate(genislikler, start=1):
         ws.column_dimensions[ws.cell(row=1, column=idx).column_letter].width = genislik
 
