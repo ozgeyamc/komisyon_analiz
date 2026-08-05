@@ -142,7 +142,7 @@ def scrape_akbank(url: str = AKBANK_URL) -> List[UcretSatiri]:
         browser = p.chromium.launch(headless=True)
         try:
             page = browser.new_page(user_agent=HEADERS["User-Agent"])
-            page.goto(url, timeout=60000, wait_until="networkidle")
+            page.goto(url, timeout=90000, wait_until="domcontentloaded")
             page.wait_for_timeout(3000)
 
             # Sayfadaki tüm linkleri logla — doğru URL'yi bulmak için
