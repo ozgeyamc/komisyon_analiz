@@ -12,21 +12,20 @@ with sync_playwright() as p:
     page.goto("https://www.isbank.com.tr/urun-ve-hizmet-ucretleri", timeout=90000, wait_until="domcontentloaded")
     page.wait_for_timeout(15000)
 
-    # header id'li TÜM elementleri bul
-    result = page.evaluate("""
-        () => {
-            const all = document.querySelectorAll('[id*="header"]');
-            return Array.from(all).map(el => ({
-                id: el.id,
-                tag: el.tagName,
-                text: el.innerText ? el.innerText.substring(0, 80) : '',
-                parentTag: el.parentElement ? el.parentElement.tagName : '',
-                parentId: el.parentElement ? el.parentElement.id : '',
-                parentClass: el.parentElement ? el.parentElement.className.substring(0, 80) : '',
-            }));
-        }
-    """)
-    for r in result:
-        print(r)
+    for i in range(1, 10):
+        result = page.evaluate(f"""
+            () => {{
+                const el = document.getElementById('h{i}');
+                if (!el) return 'YOK';
+                return {{
+                    html: el.innerHTML.substring(0, 800),
+                    childCount: el.children.length,
+                    tableCount: el.querySelectorAll('table').length,
+                    text: el.innerText.substring(0, 300),
+                }};
+            }}
+        """)
+        print(f"\n=== #h{i} ===")
+        print(result)
 
     browser.close()
