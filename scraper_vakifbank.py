@@ -7,7 +7,7 @@ import sys
 from dataclasses import dataclass
 from typing import List
 
-VAKIFBANK_URL = "https://www.vakifbank.com.tr/tr/urun-ve-hizmet-ucretleri"
+VAKIFBANK_API_URL = "https://inbound.apigateway.vakifbank.com.tr:8443/getProductServicePrices"
 
 DATE_PATTERN = re.compile(
     r"G[üu]ncell[ei]nme\s*Tarihi\s*:\s*(\d{2}\.\d{2}\.\d{4}(?:\s+\d{2}:\d{2})?)",
