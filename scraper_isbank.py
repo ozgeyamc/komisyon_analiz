@@ -2,7 +2,6 @@
 İş Bankası "Ürün ve Hizmet Ücretleri" sayfasını çeken scraper modülü.
 """
 
-import re
 import sys
 from dataclasses import dataclass
 from typing import List
@@ -40,9 +39,8 @@ def _normalize(val) -> str:
     return str(val).strip().replace("\xa0", " ").replace("\u200b", "").strip()
 
 
-def _meta(el):
-    """UHU_icerik_meta span içindeki değeri al."""
-    span = el.find("span", class_="UHU_icerik_meta") if el else None
+def _meta(el, cls="UHU_icerik_meta"):
+    span = el.find("span", class_=cls) if el else None
     return _normalize(span.get_text()) if span else ""
 
 
@@ -74,7 +72,6 @@ def scrape_isbank(url: str = ISBANK_URL) -> List[UcretSatiri]:
     soup = BeautifulSoup(html, "lxml")
     tum_satirlar = []
 
-    # Ana gruplar: #h1 .. #h9
     for hi in range(1, 20):
         grup_div = soup.find(id=f"h{hi}")
         if not grup_div:
@@ -83,30 +80,20 @@ def scrape_isbank(url: str = ISBANK_URL) -> List[UcretSatiri]:
         ana_kategori_el = grup_div.find(class_="UHU_group_header")
         ana_kategori = _normalize(ana_kategori_el.get_text()) if ana_kategori_el else f"Grup {hi}"
 
-        # Alt kategoriler: UHU_item_header
         item_headers = grup_div.find_all(class_="UHU_item_header")
         for item_el in item_headers:
             alt_kategori = _normalize(item_el.get_text())
 
-            # Alt-alt kategoriler: UHU_itemSub_header (item_el'in sonraki kardeşinde)
             item_sub_cover = item_el.find_next_sibling(id="UHU_itemSubCover")
             if not item_sub_cover:
-                # Bazen doğrudan parent içinde
                 item_sub_cover = item_el.parent
 
             sub_headers = item_sub_cover.find_all(class_="UHU_itemSub_header") if item_sub_cover else []
 
-            if not sub_headers:
-                # Alt-alt başlık yoksa direkt icerik'lere bak
-                sub_headers_iter = [None]
-            else:
-                sub_headers_iter = sub_headers
-
-            for sub_el in sub_headers_iter:
+            for sub_el in (sub_headers if sub_headers else [None]):
                 if sub_el is not None:
                     sub_kategori = _normalize(sub_el.get_text())
                     tam_kategori = f"{ana_kategori} - {alt_kategori} - {sub_kategori}"
-                    # Bu sub_el'in altındaki içerik bloklarını bul
                     icerik_gc = sub_el.find_next_sibling(id="UHU_item_icerik_GC")
                     if not icerik_gc:
                         icerik_gc = sub_el.parent
@@ -117,9 +104,7 @@ def scrape_isbank(url: str = ISBANK_URL) -> List[UcretSatiri]:
                 if not icerik_gc:
                     continue
 
-                # Her icerikC bloğu bir satır
-                icerik_blocks = icerik_gc.find_all(class_="UHU_item_icerikC")
-                for blok in icerik_blocks:
+                for blok in icerik_gc.find_all(class_="UHU_item_icerikC"):
                     masraf_el = blok.find(class_="UHU_item_icerikH")
                     masraf = _normalize(masraf_el.get_text()) if masraf_el else ""
                     if not masraf:
@@ -130,13 +115,14 @@ def scrape_isbank(url: str = ISBANK_URL) -> List[UcretSatiri]:
                     icerik3 = blok.find(class_="UHU_item_icerik3")
                     icerik4 = blok.find(class_="UHU_item_icerik4")
                     icerik5 = blok.find(class_="UHU_item_icerik5")
-                    aciklama_el = blok.find(class_=re.compile(r"UHU_item_icerik[Aa]ciklama|UHU_aciklama|UHU_item_aciklama"))
+                    aciklama_el = blok.find(class_="UHU_item_icerikF")
 
                     asgari_tutar = _meta(icerik1)
                     asgari_oran  = _meta(icerik2)
                     azami_tutar  = _meta(icerik3)
                     azami_oran   = _meta(icerik4)
-                    aciklama     = _normalize(aciklama_el.get_text()) if aciklama_el else _meta(icerik5)
+                    tarih        = _meta(icerik5, cls="UHU_icerik_meta2")
+                    aciklama     = _normalize(aciklama_el.get_text()) if aciklama_el else ""
 
                     tum_satirlar.append(UcretSatiri(
                         kategori=tam_kategori,
@@ -146,7 +132,7 @@ def scrape_isbank(url: str = ISBANK_URL) -> List[UcretSatiri]:
                         azami_tutar=azami_tutar,
                         azami_oran=azami_oran,
                         aciklama=aciklama,
-                        site_guncelleme_tarihi="",
+                        site_guncelleme_tarihi=tarih,
                     ))
 
     if not tum_satirlar:
