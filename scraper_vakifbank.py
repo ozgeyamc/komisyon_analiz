@@ -48,80 +48,27 @@ def _normalize(val) -> str:
     return str(val).strip().replace("\xa0", " ").replace("\u200b", "").strip()
 
 
-def _parse_aciklama(raw_aciklama: str):
-    raw_aciklama = raw_aciklama.strip()
-    match = DATE_PATTERN.search(raw_aciklama)
-    tarih = match.group(1) if match else ""
-    temiz_aciklama = DATE_PATTERN.sub("", raw_aciklama).strip(" .")
-    return temiz_aciklama, tarih
-
-
-def _parse_json_response(data, satirlar: List[UcretSatiri]):
-    if isinstance(data, list):
-        for item in data:
-            _parse_json_response(item, satirlar)
-    elif isinstance(data, dict):
-        keys = [k.lower() for k in data.keys()]
-        has_fee = any(k in keys for k in [
-            "masraf", "ucret", "fee", "price", "tutar", "amount",
-            "servicename", "servisadi", "islemadi", "servisucretid",
-            "islemturu", "hizmetadi", "hizmetucret"
-        ])
-        if has_fee:
-            kategori = ""
-            masraf = ""
-            asg_tutar = ""
-            asg_oran = ""
-            azm_tutar = ""
-            azm_oran = ""
-            aciklama = ""
-            tarih = ""
-
-            for k, v in data.items():
-                kl = k.lower()
-                if any(x in kl for x in ["kategori", "category", "grup", "group", "baslik", "title"]):
-                    kategori = _normalize(v)
-                elif any(x in kl for x in ["masraf", "islemadi", "servicename", "servisadi", "hizmetadi", "islemturu"]):
-                    if not masraf:
-                        masraf = _normalize(v)
-                elif kl in ["ad", "name"]:
-                    if not masraf:
-                        masraf = _normalize(v)
-                elif any(x in kl for x in ["asgari", "min"]) and any(x in kl for x in ["tutar", "amount", "fiyat"]):
-                    asg_tutar = _normalize(v)
-                elif any(x in kl for x in ["asgari", "min"]) and any(x in kl for x in ["oran", "rate", "percent"]):
-                    asg_oran = _normalize(v)
-                elif any(x in kl for x in ["azami", "max"]) and any(x in kl for x in ["tutar", "amount", "fiyat"]):
-                    azm_tutar = _normalize(v)
-                elif any(x in kl for x in ["azami", "max"]) and any(x in kl for x in ["oran", "rate", "percent"]):
-                    azm_oran = _normalize(v)
-                elif any(x in kl for x in ["tutar", "amount", "fiyat", "ucret", "fee", "price"]):
-                    if not asg_tutar:
-                        asg_tutar = _normalize(v)
-                elif any(x in kl for x in ["oran", "rate", "percent"]):
-                    if not asg_oran:
-                        asg_oran = _normalize(v)
-                elif any(x in kl for x in ["aciklama", "description", "note", "bilgi"]):
-                    aciklama = _normalize(v)
-                elif any(x in kl for x in ["tarih", "date", "guncelleme"]):
-                    tarih = _normalize(v)
-
-            if masraf:
-                temiz_aciklama, parsed_tarih = _parse_aciklama(aciklama)
-                satirlar.append(UcretSatiri(
-                    kategori=kategori or "Genel",
-                    masraf=masraf,
-                    asgari_tutar=asg_tutar,
-                    asgari_oran=asg_oran,
-                    azami_tutar=azm_tutar,
-                    azami_oran=azm_oran,
-                    aciklama=temiz_aciklama,
-                    site_guncelleme_tarihi=tarih or parsed_tarih,
-                ))
-        else:
-            for v in data.values():
-                if isinstance(v, (dict, list)):
-                    _parse_json_response(v, satirlar)
+def _parse_vakifbank_fee_list(fee_list: list) -> List[UcretSatiri]:
+    satirlar = []
+    for item in fee_list:
+        if not isinstance(item, dict):
+            continue
+        masraf = _normalize(item.get("FeeName", ""))
+        if not masraf:
+            masraf = _normalize(item.get("ItemName", ""))
+        if not masraf:
+            continue
+        satirlar.append(UcretSatiri(
+            kategori=_normalize(item.get("MainTransactionGroupName", "Genel")),
+            masraf=masraf,
+            asgari_tutar=_normalize(item.get("MinimumAmount", "")),
+            asgari_oran=_normalize(item.get("MinimumRate", "")),
+            azami_tutar=_normalize(item.get("MaximumAmount", "")),
+            azami_oran=_normalize(item.get("MaximumRate", "")),
+            aciklama=_normalize(item.get("Description", "")),
+            site_guncelleme_tarihi=_normalize(item.get("UpdateDate", "")),
+        ))
+    return satirlar
 
 
 def scrape_vakifbank(page_url: str = VAKIFBANK_PAGE_URL) -> List[UcretSatiri]:
@@ -143,7 +90,6 @@ def scrape_vakifbank(page_url: str = VAKIFBANK_PAGE_URL) -> List[UcretSatiri]:
             )
             page = context.new_page()
 
-            # Handler goto'dan ÖNCE tanımlanmalı
             def handle_response(response):
                 url = response.url
                 if "getProductServicePrices" in url or "ProductServicePrice" in url:
@@ -155,7 +101,6 @@ def scrape_vakifbank(page_url: str = VAKIFBANK_PAGE_URL) -> List[UcretSatiri]:
                             if len(text) > 50:
                                 captured.append(text)
                                 print(f"[vakifbank] Yanıt yakalandı! ({len(text)} karakter)", file=sys.stderr)
-                                print(f"[vakifbank] İlk 300: {text[:300]}", file=sys.stderr)
                         except Exception as e:
                             print(f"[vakifbank] body() hatası: {e}", file=sys.stderr)
 
@@ -164,7 +109,6 @@ def scrape_vakifbank(page_url: str = VAKIFBANK_PAGE_URL) -> List[UcretSatiri]:
             print(f"[vakifbank] Sayfa yükleniyor...", file=sys.stderr)
             page.goto(page_url, timeout=120000, wait_until="domcontentloaded")
 
-            # API yanıtı gelene kadar max 30sn polling
             deadline = time.time() + 30
             while not captured and time.time() < deadline:
                 page.wait_for_timeout(1000)
@@ -190,19 +134,27 @@ def scrape_vakifbank(page_url: str = VAKIFBANK_PAGE_URL) -> List[UcretSatiri]:
         raise ScraperError("Vakıfbank API yanıtı JSON değil.")
 
     print(f"[vakifbank] JSON parse edildi. Tip: {type(data).__name__}", file=sys.stderr)
-    if isinstance(data, dict):
-        print(f"[vakifbank] JSON keys: {list(data.keys())[:20]}", file=sys.stderr)
-    elif isinstance(data, list):
-        print(f"[vakifbank] JSON liste uzunluğu: {len(data)}", file=sys.stderr)
-        if data:
-            print(f"[vakifbank] İlk eleman: {str(data[0])[:300]}", file=sys.stderr)
 
-    tum_satirlar = []
-    _parse_json_response(data, tum_satirlar)
+    # Vakıfbank yapısı: {"Header": {...}, "Data": {"Fee": [...]}}
+    fee_list = None
+    if isinstance(data, dict):
+        data_block = data.get("Data") or data.get("data")
+        if isinstance(data_block, dict):
+            fee_list = data_block.get("Fee") or data_block.get("fee")
+        elif isinstance(data_block, list):
+            fee_list = data_block
+    elif isinstance(data, list):
+        fee_list = data
+
+    if not fee_list:
+        print(f"[vakifbank] Ham JSON (ilk 3000):\n{full_response[:3000]}", file=sys.stderr)
+        raise ScraperError("Vakıfbank API'sinde Fee listesi bulunamadı.")
+
+    print(f"[vakifbank] Fee listesi uzunluğu: {len(fee_list)}", file=sys.stderr)
+    tum_satirlar = _parse_vakifbank_fee_list(fee_list)
 
     if not tum_satirlar:
-        print(f"[vakifbank] Ham JSON (ilk 3000):\n{full_response[:3000]}", file=sys.stderr)
-        raise ScraperError("Vakıfbank API'sinden veri parse edilemedi.")
+        raise ScraperError("Vakıfbank Fee listesi parse edilemedi.")
 
     print(f"[vakifbank] Toplam {len(tum_satirlar)} satır bulundu.", file=sys.stderr)
     return tum_satirlar
