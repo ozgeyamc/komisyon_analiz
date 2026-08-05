@@ -77,6 +77,9 @@ def satirlari_yaz(ws: Worksheet, satirlar: List[UcretSatiri], banka_adi: str) ->
     banka_fill = PatternFill(start_color=renk["bg"], end_color=renk["bg"], fill_type="solid")
     banka_font = Font(color=renk["fg"], bold=True)
 
+    # Kategori bazında sırala — tüm bankalar için tutarlı görünüm
+    satirlar = sorted(satirlar, key=lambda s: (s.kategori, s.masraf))
+    
     for satir in satirlar:
         yeni_row = ws.max_row + 1
 
