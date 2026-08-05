@@ -1,32 +1,27 @@
-from playwright.sync_api import sync_playwright
+import requests
 from bs4 import BeautifulSoup
 
-with sync_playwright() as p:
-    browser = p.chromium.launch(
-        headless=False,  # headless=False dene
-        args=[
-            "--no-sandbox",
-            "--disable-blink-features=AutomationControlled",
-        ]
-    )
-    context = browser.new_context(
-        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        viewport={"width": 1280, "height": 800},
-        locale="tr-TR",
-        timezone_id="Europe/Istanbul",
-    )
-    # webdriver izini sil
-    context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+headers = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+}
 
-    page = context.new_page()
-    page.goto("https://www.isbank.com.tr/urun-ve-hizmet-ucretleri", timeout=90000, wait_until="domcontentloaded")
-    page.wait_for_timeout(8000)
-    print("Gerçek URL:", page.url)
-    print("Başlık:", page.title())
-    html = page.content()
-    browser.close()
+session = requests.Session()
+resp = session.get("https://www.isbank.com.tr/urun-ve-hizmet-ucretleri", headers=headers, timeout=30)
+print("Status:", resp.status_code)
+print("Başlık:", resp.url)
 
-soup = BeautifulSoup(html, "lxml")
+soup = BeautifulSoup(resp.text, "lxml")
+print("Page title:", soup.title.get_text() if soup.title else "YOK")
+
 tables = soup.find_all("table")
 print(f"Toplam tablo: {len(tables)}")
 for i, table in enumerate(tables[:5]):
