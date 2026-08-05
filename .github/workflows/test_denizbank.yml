@@ -1,0 +1,38 @@
+name: Test DenizBank URL
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Python kur
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Bağımlılıkları yükle
+        run: |
+          pip install playwright beautifulsoup4 lxml
+          playwright install chromium
+
+      - name: DenizBank URL test
+        run: |
+          python -c "
+from playwright.sync_api import sync_playwright
+
+with sync_playwright() as p:
+    browser = p.chromium.launch(headless=True)
+    page = browser.new_page()
+    page.goto('https://www.denizbank.com/urun-ve-hizmet-ucretleri', timeout=90000, wait_until='domcontentloaded')
+    page.wait_for_timeout(5000)
+    print('Gercek URL:', page.url)
+    print('Baslik:', page.title())
+    links = page.evaluate('''() => Array.from(document.querySelectorAll(\"a[href]\")).map(a => a.href).filter(h => h.includes(\"ucret\") || h.includes(\"tarife\") || h.includes(\"fiyat\"))''')
+    for l in links[:30]:
+        print('Link:', l)
+    browser.close()
+"
