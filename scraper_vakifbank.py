@@ -5,6 +5,7 @@ Vakıfbank "Ürün ve Hizmet Ücretleri" - Playwright route intercept ile API ya
 import re
 import sys
 import json
+import time
 from dataclasses import dataclass
 from typing import List
 
@@ -142,13 +143,13 @@ def scrape_vakifbank(page_url: str = VAKIFBANK_PAGE_URL) -> List[UcretSatiri]:
             )
             page = context.new_page()
 
+            # Handler goto'dan ÖNCE tanımlanmalı
             def handle_response(response):
                 url = response.url
                 if "getProductServicePrices" in url or "ProductServicePrice" in url:
                     print(f"[vakifbank] Hedef URL: {url} ({response.status})", file=sys.stderr)
                     if response.status == 200:
                         try:
-                            response.finished()
                             body = response.body()
                             text = body.decode("utf-8")
                             if len(text) > 50:
@@ -161,8 +162,18 @@ def scrape_vakifbank(page_url: str = VAKIFBANK_PAGE_URL) -> List[UcretSatiri]:
             page.on("response", handle_response)
 
             print(f"[vakifbank] Sayfa yükleniyor...", file=sys.stderr)
-            page.goto(page_url, timeout=120000, wait_until="networkidle")
-            page.wait_for_timeout(3000)
+            page.goto(page_url, timeout=120000, wait_until="domcontentloaded")
+
+            # API yanıtı gelene kadar max 30sn polling
+            deadline = time.time() + 30
+            while not captured and time.time() < deadline:
+                page.wait_for_timeout(1000)
+                print(f"[vakifbank] Bekleniyor... ({int(deadline - time.time())}sn kaldı)", file=sys.stderr)
+
+            if captured:
+                print(f"[vakifbank] Yanıt alındı!", file=sys.stderr)
+            else:
+                print(f"[vakifbank] 30sn içinde yanıt gelmedi.", file=sys.stderr)
 
         finally:
             browser.close()
