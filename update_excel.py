@@ -49,6 +49,7 @@ BANKA_RENKLER = {
     "VAKIFBANK":  {"bg": "FFD700", "fg": "000000"},  # Altın + Siyah yazı
     "QNB":        {"bg": "6B0F8E", "fg": "FFFFFF"},  # Mor
     "DENİZBANK":  {"bg": "003DA5", "fg": "FFFFFF"},  # Mavi
+    "TEB":        {"bg": "003087", "fg": "FFFFFF"},  # Lacivert
 }
 
 
@@ -79,7 +80,6 @@ def satirlari_yaz(ws: Worksheet, satirlar: List[UcretSatiri], banka_adi: str) ->
     banka_fill = PatternFill(start_color=renk["bg"], end_color=renk["bg"], fill_type="solid")
     banka_font = Font(color=renk["fg"], bold=True)
 
-    # Kategori bazında sırala — tüm bankalar için tutarlı görünüm
     satirlar = sorted(satirlar, key=lambda s: (s.kategori, s.masraf))
 
     for satir in satirlar:
