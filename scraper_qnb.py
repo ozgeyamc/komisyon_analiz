@@ -104,6 +104,9 @@ def _extract_from_table(table, kategori: str) -> List[UcretSatiri]:
     col_aciklama  = find_col(["açıklama"])
     if col_aciklama == -1:
         col_aciklama = find_col(["aciklama"])
+    col_tarih     = find_col(["güncelleme"])
+    if col_tarih == -1:
+        col_tarih = find_col(["guncelleme"])
 
     if col_masraf == -1:
         col_masraf = 0; col_asg_tutar = 1; col_asg_oran = 2
@@ -122,7 +125,11 @@ def _extract_from_table(table, kategori: str) -> List[UcretSatiri]:
         if not masraf:
             continue
 
-        temiz_aciklama, site_tarihi = _parse_aciklama(get(col_aciklama))
+        site_tarihi = get(col_tarih) if col_tarih >= 0 else ""
+        temiz_aciklama, aciklama_tarihi = _parse_aciklama(get(col_aciklama))
+        if not site_tarihi:
+            site_tarihi = aciklama_tarihi
+
         satirlar.append(UcretSatiri(
             kategori=kategori, masraf=masraf,
             asgari_tutar=get(col_asg_tutar), asgari_oran=get(col_asg_oran),
