@@ -24,18 +24,20 @@ BASLIKLAR = [
     "AZAMİ TUTAR",
     "AZAMİ ORAN",
     "AÇIKLAMA",
-    "GÜNCELLEME TARİHİ",
+    "SİTE GÜNCELLEME TARİHİ",
+    "ÇALIŞTIRILMA TARİHİ",
 ]
 
-COL_BANKA = 1
-COL_KATEGORI = 2
-COL_MASRAF = 3
-COL_ASGARI_TUTAR = 4
-COL_ASGARI_ORAN = 5
-COL_AZAMI_TUTAR = 6
-COL_AZAMI_ORAN = 7
-COL_ACIKLAMA = 8
-COL_GUNCELLEME_TARIHI = 9
+COL_BANKA              = 1
+COL_KATEGORI           = 2
+COL_MASRAF             = 3
+COL_ASGARI_TUTAR       = 4
+COL_ASGARI_ORAN        = 5
+COL_AZAMI_TUTAR        = 6
+COL_AZAMI_ORAN         = 7
+COL_ACIKLAMA           = 8
+COL_SITE_TARIHI        = 9
+COL_CALISMA_TARIHI     = 10
 
 BASLIK_FILL = PatternFill(start_color="1F3864", end_color="1F3864", fill_type="solid")
 BASLIK_FONT = Font(color="FFFFFF", bold=True)
@@ -55,7 +57,7 @@ BANKA_RENKLER = {
 
 
 def _bugun_tarih_str() -> str:
-    return datetime.now().strftime("%d.%m.%Y")
+    return datetime.now().strftime("%d.%m.%Y %H:%M")
 
 
 def _yeni_workbook_olustur() -> Tuple[Workbook, Worksheet]:
@@ -69,14 +71,15 @@ def _yeni_workbook_olustur() -> Tuple[Workbook, Worksheet]:
         cell.font = BASLIK_FONT
         cell.alignment = Alignment(horizontal="center", vertical="center")
 
-    genislikler = [15, 40, 40, 14, 14, 14, 14, 60, 20]
+    genislikler = [15, 40, 40, 14, 14, 14, 14, 60, 22, 22]
     for idx, genislik in enumerate(genislikler, start=1):
         ws.column_dimensions[ws.cell(row=1, column=idx).column_letter].width = genislik
 
+    ws.freeze_panes = "A2"
     return wb, ws
 
 
-def satirlari_yaz(ws: Worksheet, satirlar: List[UcretSatiri], banka_adi: str) -> int:
+def _satirlari_yaz(ws: Worksheet, satirlar: List[UcretSatiri], banka_adi: str, calisma_tarihi: str) -> int:
     renk = BANKA_RENKLER.get(banka_adi, {"bg": "808080", "fg": "FFFFFF"})
     banka_fill = PatternFill(start_color=renk["bg"], end_color=renk["bg"], fill_type="solid")
     banka_font = Font(color=renk["fg"], bold=True)
@@ -91,14 +94,15 @@ def satirlari_yaz(ws: Worksheet, satirlar: List[UcretSatiri], banka_adi: str) ->
         banka_cell.font = banka_font
         banka_cell.alignment = Alignment(horizontal="center", vertical="center")
 
-        ws.cell(row=yeni_row, column=COL_KATEGORI, value=satir.kategori)
-        ws.cell(row=yeni_row, column=COL_MASRAF, value=satir.masraf)
-        ws.cell(row=yeni_row, column=COL_ASGARI_TUTAR, value=satir.asgari_tutar)
-        ws.cell(row=yeni_row, column=COL_ASGARI_ORAN, value=satir.asgari_oran)
-        ws.cell(row=yeni_row, column=COL_AZAMI_TUTAR, value=satir.azami_tutar)
-        ws.cell(row=yeni_row, column=COL_AZAMI_ORAN, value=satir.azami_oran)
-        ws.cell(row=yeni_row, column=COL_ACIKLAMA, value=satir.aciklama)
-        ws.cell(row=yeni_row, column=COL_GUNCELLEME_TARIHI, value=_bugun_tarih_str())
+        ws.cell(row=yeni_row, column=COL_KATEGORI,       value=satir.kategori)
+        ws.cell(row=yeni_row, column=COL_MASRAF,         value=satir.masraf)
+        ws.cell(row=yeni_row, column=COL_ASGARI_TUTAR,   value=satir.asgari_tutar)
+        ws.cell(row=yeni_row, column=COL_ASGARI_ORAN,    value=satir.asgari_oran)
+        ws.cell(row=yeni_row, column=COL_AZAMI_TUTAR,    value=satir.azami_tutar)
+        ws.cell(row=yeni_row, column=COL_AZAMI_ORAN,     value=satir.azami_oran)
+        ws.cell(row=yeni_row, column=COL_ACIKLAMA,       value=satir.aciklama)
+        ws.cell(row=yeni_row, column=COL_SITE_TARIHI,    value=satir.site_guncelleme_tarihi)
+        ws.cell(row=yeni_row, column=COL_CALISMA_TARIHI, value=calisma_tarihi)
 
     return len(satirlar)
 
@@ -108,10 +112,11 @@ def excel_guncelle_coklu(banka_verileri: Dict[str, List[UcretSatiri]], dosya_yol
         os.remove(dosya_yolu)
 
     wb, ws = _yeni_workbook_olustur()
+    calisma_tarihi = _bugun_tarih_str()
 
     toplam = 0
     for banka_adi, satirlar in banka_verileri.items():
-        toplam += satirlari_yaz(ws, satirlar, banka_adi)
+        toplam += _satirlari_yaz(ws, satirlar, banka_adi, calisma_tarihi)
 
     wb.save(dosya_yolu)
     return {"eklendi": toplam, "guncellendi": 0, "degismedi": 0}
