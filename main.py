@@ -1,8 +1,5 @@
 """
 Banka komisyon ücretleri takip botu - ana çalıştırma script'i.
-
-Kullanım:
-    python main.py
 """
 
 import sys
@@ -30,7 +27,6 @@ def main() -> int:
         ("GARANTİ", scrape_garanti_bbva),
     ]
 
-    # Opsiyonel scraper'ları dinamik import et (dosya yoksa atla)
     optional = [
         ("ZİRAAT",    "scraper_ziraat",    "scrape_ziraat"),
         ("HALKBANK",  "scraper_halkbank",  "scrape_halkbank"),
