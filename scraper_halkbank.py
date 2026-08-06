@@ -116,6 +116,9 @@ def _extract_rows_from_table(table, kategori: str) -> List[UcretSatiri]:
     col_aciklama  = find_col(["açıklama"])
     if col_aciklama == -1:
         col_aciklama = find_col(["aciklama"])
+    col_tarih     = find_col(["güncelleme"])
+    if col_tarih == -1:
+        col_tarih = find_col(["guncelleme"])
 
     if col_masraf == -1:
         col_masraf    = 0
@@ -139,8 +142,10 @@ def _extract_rows_from_table(table, kategori: str) -> List[UcretSatiri]:
         if not masraf:
             continue
 
-        raw_aciklama = get(col_aciklama)
-        temiz_aciklama, site_tarihi = _parse_aciklama(raw_aciklama)
+        site_tarihi = get(col_tarih) if col_tarih >= 0 else ""
+        temiz_aciklama, aciklama_tarihi = _parse_aciklama(get(col_aciklama))
+        if not site_tarihi:
+            site_tarihi = aciklama_tarihi
 
         satirlar.append(
             UcretSatiri(
@@ -159,10 +164,6 @@ def _extract_rows_from_table(table, kategori: str) -> List[UcretSatiri]:
 
 
 def _alt_sayfa_linklerini_bul(ana_url: str) -> List[tuple]:
-    """
-    Ana sayfayı açıp /tr/urun-ve-hizmet-ucretleri/ ile başlayan
-    tüm alt sayfa linklerini otomatik olarak toplar.
-    """
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as p:
@@ -183,19 +184,14 @@ def _alt_sayfa_linklerini_bul(ana_url: str) -> List[tuple]:
     bulunan = {}
     for a in soup.find_all("a", href=True):
         href = a["href"].strip()
-        # Tam URL veya relative URL olabilir
         if href.startswith(base):
             path = href.replace(base, "")
         else:
             path = href
 
-        # /tr/urun-ve-hizmet-ucretleri/ ile başlayan ve alt sayfa olan linkler
         if path.startswith(prefix) and len(path) > len(prefix):
-            # Fragment (#...) ve query string temizle
             clean_path = path.split("#")[0].split("?")[0].rstrip("/")
             full_url = base + clean_path
-
-            # Sadece bir seviye alt sayfa (içinde başka / yoksa)
             alt_kisim = clean_path.replace(prefix, "")
             if "/" not in alt_kisim and alt_kisim:
                 link_text = _normalize(a.get_text())
@@ -221,7 +217,6 @@ def _scrape_sayfa(url: str, sayfa_kategorisi: str) -> List[UcretSatiri]:
             page = browser.new_page(user_agent=HEADERS["User-Agent"])
             page.goto(url, timeout=60000, wait_until="networkidle")
 
-            # Tüm accordion/tab'ları aç
             for selector in [
                 "button[aria-expanded='false']",
                 ".accordion-button.collapsed",
@@ -263,14 +258,12 @@ def _scrape_sayfa(url: str, sayfa_kategorisi: str) -> List[UcretSatiri]:
 def scrape_halkbank(ana_url: str = HALKBANK_ANA_URL) -> List[UcretSatiri]:
     print(f"[halkbank] Alt sayfalar tespit ediliyor: {ana_url}", file=sys.stderr)
 
-    # 1. Ana sayfadan tüm alt sayfa linklerini otomatik bul
     try:
         alt_sayfalar = _alt_sayfa_linklerini_bul(ana_url)
     except Exception as exc:
         print(f"[halkbank] Alt sayfa tespiti başarısız: {exc}", file=sys.stderr)
         alt_sayfalar = []
 
-    # Alt sayfa bulunamazsa fallback liste
     if not alt_sayfalar:
         print(f"[halkbank] Fallback liste kullanılıyor...", file=sys.stderr)
         alt_sayfalar = [
@@ -285,7 +278,6 @@ def scrape_halkbank(ana_url: str = HALKBANK_ANA_URL) -> List[UcretSatiri]:
             ("Diğer İşlemler", f"{ana_url}/diger-islemler"),
         ]
 
-    # 2. Her alt sayfadan tabloları çek
     tum_satirlar: List[UcretSatiri] = []
     for sayfa_adi, url in alt_sayfalar:
         print(f"[halkbank] '{sayfa_adi}' çekiliyor...", file=sys.stderr)
