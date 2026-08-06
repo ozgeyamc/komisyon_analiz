@@ -102,6 +102,9 @@ def _extract_from_table(table, kategori: str) -> List[UcretSatiri]:
     col_aciklama  = find_col(["açıklama"])
     if col_aciklama == -1:
         col_aciklama = find_col(["aciklama"])
+    col_tarih     = find_col(["güncelleme"])
+    if col_tarih == -1:
+        col_tarih = find_col(["guncelleme"])
     if col_masraf == -1:
         col_masraf = find_col(["işlem"])
     if col_masraf == -1:
@@ -130,7 +133,11 @@ def _extract_from_table(table, kategori: str) -> List[UcretSatiri]:
         if not masraf:
             continue
 
-        temiz_aciklama, site_tarihi = _parse_aciklama(get(col_aciklama))
+        site_tarihi = get(col_tarih) if col_tarih >= 0 else ""
+        temiz_aciklama, aciklama_tarihi = _parse_aciklama(get(col_aciklama))
+        if not site_tarihi:
+            site_tarihi = aciklama_tarihi
+
         satirlar.append(UcretSatiri(
             kategori=kategori, masraf=masraf,
             asgari_tutar=get(col_asg_tutar), asgari_oran=get(col_asg_oran),
@@ -161,7 +168,7 @@ def scrape_yapikredi(url: str = YAPIKREDI_URL) -> List[UcretSatiri]:
             )
             page = context.new_page()
             page.goto(url, timeout=120000, wait_until="domcontentloaded")
-            page.wait_for_timeout(8000)  # Sadece bekle, accordion tıklama YOK
+            page.wait_for_timeout(8000)
 
             table_count = page.evaluate("() => document.querySelectorAll('table').length")
             print(f"[yapikredi] JS ile {table_count} <table> bulundu", file=sys.stderr)
