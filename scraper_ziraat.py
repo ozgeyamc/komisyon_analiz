@@ -13,12 +13,12 @@ from bs4 import BeautifulSoup
 ZIRAAT_URL = "https://www.ziraatbank.com.tr/tr/urun-ve-hizmet-ucretleri"
 
 DATE_PATTERN = re.compile(
-    r"G[üu]ncell[ei]nme\s*Tarihi\s*:\s*(\d{2}\.\d{2}\.\d{4}(?:\s+\d{2}:\d{2})?)",
+    r"G[üu]ncellenme\s*Tarihi\s*:\s*(\d{2}\.\d{2}\.\d{4}(?:\s+\d{2}:\d{2})?)",
     re.IGNORECASE,
 )
 
 DATE_PATTERN_TR = re.compile(
-    r"(?:son\s+)?g[üu]ncell[ei]nme\s+tarihi\s*:?\s*"
+    r"(?:son\s+)?g[üu]ncellenme\s+tarihi\s*:?\s*"
     r"(\d{1,2})\s+(ocak|şubat|mart|nisan|mayıs|haziran|temmuz|ağustos|eylül|ekim|kasım|aralık)\s+(\d{4})",
     re.IGNORECASE,
 )
