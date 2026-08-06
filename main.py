@@ -1,5 +1,8 @@
 """
 Banka komisyon ücretleri takip botu - ana çalıştırma script'i.
+
+Kullanım:
+    python main.py
 """
 
 import sys
