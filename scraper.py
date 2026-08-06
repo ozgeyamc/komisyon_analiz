@@ -17,6 +17,18 @@ DATE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+DATE_PATTERN_TR = re.compile(
+    r"(?:son\s+)?g[üu]ncell[ei]nme\s+tarihi\s*:?\s*"
+    r"(\d{1,2})\s+(ocak|şubat|mart|nisan|mayıs|haziran|temmuz|ağustos|eylül|ekim|kasım|aralık)\s+(\d{4})",
+    re.IGNORECASE,
+)
+
+TURKCE_AYLAR = {
+    "ocak": "01", "şubat": "02", "mart": "03", "nisan": "04",
+    "mayıs": "05", "haziran": "06", "temmuz": "07", "ağustos": "08",
+    "eylül": "09", "ekim": "10", "kasım": "11", "aralık": "12",
+}
+
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -44,10 +56,23 @@ class ScraperError(Exception):
 
 def _parse_aciklama(raw_aciklama: str):
     raw_aciklama = raw_aciklama.strip()
+
     match = DATE_PATTERN.search(raw_aciklama)
-    tarih = match.group(1) if match else ""
-    temiz_aciklama = DATE_PATTERN.sub("", raw_aciklama).strip(" .")
-    return temiz_aciklama, tarih
+    if match:
+        tarih = match.group(1)
+        temiz_aciklama = DATE_PATTERN.sub("", raw_aciklama).strip(" .")
+        return temiz_aciklama, tarih
+
+    match_tr = DATE_PATTERN_TR.search(raw_aciklama)
+    if match_tr:
+        gun = match_tr.group(1).zfill(2)
+        ay = TURKCE_AYLAR.get(match_tr.group(2).lower(), "00")
+        yil = match_tr.group(3)
+        tarih = f"{gun}.{ay}.{yil}"
+        temiz_aciklama = DATE_PATTERN_TR.sub("", raw_aciklama).strip(" .")
+        return temiz_aciklama, tarih
+
+    return raw_aciklama, ""
 
 
 def _normalize(val: str) -> str:
