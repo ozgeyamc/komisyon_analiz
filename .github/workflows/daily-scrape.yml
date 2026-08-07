@@ -36,8 +36,8 @@ jobs:
 
       - name: Eski Excel'i yedekle
         run: |
-          if [ -f garanti_komisyonlar.xlsx ]; then
-            cp garanti_komisyonlar.xlsx garanti_komisyonlar_eski.xlsx
+          if [ -f komisyonlar_guncel.xlsx ]; then
+            cp komisyonlar_guncel.xlsx komisyonlar_guncel_eski.xlsx
           fi
 
       - name: Scraper'ı çalıştır ve Excel'i güncelle
@@ -53,12 +53,12 @@ jobs:
           if [ "$TEST_MODE" = "true" ]; then
             python -c "
           from notify import check_and_notify
-          check_and_notify('garanti_komisyonlar_eski.xlsx', 'garanti_komisyonlar.xlsx', test_mode=True)
+          check_and_notify('komisyonlar_guncel_eski.xlsx', 'komisyonlar_guncel.xlsx', test_mode=True)
           "
-          elif [ -f garanti_komisyonlar_eski.xlsx ]; then
+          elif [ -f komisyonlar_guncel_eski.xlsx ]; then
             python -c "
           from notify import check_and_notify
-          check_and_notify('garanti_komisyonlar_eski.xlsx', 'garanti_komisyonlar.xlsx')
+          check_and_notify('komisyonlar_guncel_eski.xlsx', 'komisyonlar_guncel.xlsx')
           "
           else
             echo "[notify] İlk çalışma, karşılaştırma yapılmadı."
@@ -68,13 +68,13 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: komisyon-raporu
-          path: garanti_komisyonlar.xlsx
+          path: komisyonlar_guncel.xlsx
           retention-days: 30
 
       - name: Değişiklik var mı kontrol et
         id: git_check
         run: |
-          if [ -n "$(git status --porcelain garanti_komisyonlar.xlsx)" ]; then
+          if [ -n "$(git status --porcelain komisyonlar_guncel.xlsx)" ]; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
           else
             echo "changed=false" >> "$GITHUB_OUTPUT"
@@ -85,6 +85,6 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add garanti_komisyonlar.xlsx
+          git add komisyonlar_guncel.xlsx
           git commit -m "Komisyon ücretleri güncellendi ($(TZ='Europe/Istanbul' date +'%d.%m.%Y %H:%M'))"
           git push
