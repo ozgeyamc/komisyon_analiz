@@ -2,7 +2,7 @@ name: Günlük Komisyon Güncelleme
 
 on:
   schedule:
-    - cron: "0 5 * * *"
+    - cron: "45 8 * * *"   # 11:45 Türkiye saati (UTC+3)
   workflow_dispatch: {}
 
 permissions:
@@ -54,5 +54,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add garanti_komisyonlar.xlsx
-          git commit -m "Komisyon ücretleri güncellendi ($(date +'%d.%m.%Y'))"
+          git commit -m "Komisyon ücretleri güncellendi ($(TZ='Europe/Istanbul' date +'%d.%m.%Y %H:%M'))"
           git push
