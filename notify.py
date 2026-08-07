@@ -54,11 +54,11 @@ def detect_changes(old_df: pd.DataFrame, new_df: pd.DataFrame) -> pd.DataFrame:
                 row["DEĞİŞİKLİK"] = " | ".join(farklar)
                 degisiklikler.append(row)
 
-        if not degisiklikler:
+    if not degisiklikler:
         return pd.DataFrame()
 
     try:
-        result = pd.concat([d.to_frame().T if isinstance(d, pd.Series) else pd.DataFrame([d]) 
+        result = pd.concat([d.to_frame().T if isinstance(d, pd.Series) else pd.DataFrame([d])
                            for d in degisiklikler], ignore_index=True)
         return result
     except Exception as e:
@@ -121,7 +121,6 @@ def send_mail(changes_df: pd.DataFrame, new_excel_path: str, test_mode: bool = F
     msg["Subject"] = konu
     msg.attach(MIMEText(html_body, "html", "utf-8"))
 
-    # Excel eki — sadece değişiklik varsa veya test modunda ekle
     if os.path.exists(new_excel_path):
         with open(new_excel_path, "rb") as f:
             part = MIMEBase("application", "octet-stream")
