@@ -13,12 +13,17 @@ from bs4 import BeautifulSoup
 ZIRAAT_URL = "https://www.ziraatbank.com.tr/tr/urun-ve-hizmet-ucretleri"
 
 DATE_PATTERN = re.compile(
-    r"G[üu]ncellenme\s*Tarihi\s*:\s*(\d{2}\.\d{2}\.\d{4}(?:\s+\d{2}:\d{2})?)",
+    r"G[üu]ncellenme\s*Tarihi\s*:\s*[\s\xa0]*(\d{2}[./]\d{2}[./]\d{4}(?:[\s\xa0]+\d{2}:\d{2})?)",
+    re.IGNORECASE,
+)
+
+DATE_PATTERN_ITIBAR = re.compile(
+    r"(\d{2}[./]\d{2}[./]\d{4})\s+tarihi\s+itibar",
     re.IGNORECASE,
 )
 
 DATE_PATTERN_TR = re.compile(
-    r"(?:son\s+)?g[üu]ncellenme\s+tarihi\s*:?\s*"
+    r"(?:son\s+)?g[üu]ncellenme\s+tarihi\s*:?\s*[\s\xa0]*"
     r"(\d{1,2})\s+(ocak|şubat|mart|nisan|mayıs|haziran|temmuz|ağustos|eylül|ekim|kasım|aralık)\s+(\d{4})",
     re.IGNORECASE,
 )
@@ -54,14 +59,46 @@ class ScraperError(Exception):
     pass
 
 
+def _normalize(val: str) -> str:
+    return val.strip().replace("\xa0", " ").replace("\u200b", "").strip()
+
+
+def _normalize_tutar(val) -> str:
+    """Sayısal veya string 0 değerlerini boş döner, diğerlerini string yapar."""
+    if val is None:
+        return ""
+    # Sayısal tip ise direkt kontrol
+    if isinstance(val, (int, float)):
+        if val == 0:
+            return ""
+        if isinstance(val, float) and val == int(val):
+            return str(int(val))
+        return str(val)
+    # String ise
+    v = str(val).strip().replace("\xa0", " ").replace("\u200b", "").strip()
+    if not v or v in ("0", "0.0", "0.00", "-"):
+        return ""
+    try:
+        if float(v.replace(",", ".")) == 0:
+            return ""
+    except (ValueError, TypeError):
+        pass
+    return v
+
+
 def _parse_aciklama(raw_aciklama: str):
     raw_aciklama = raw_aciklama.strip()
 
     match = DATE_PATTERN.search(raw_aciklama)
     if match:
-        tarih = match.group(1)
-        temiz_aciklama = DATE_PATTERN.sub("", raw_aciklama).strip(" .")
-        return temiz_aciklama, tarih
+        tarih = match.group(1).replace("/", ".").strip()
+        temiz = DATE_PATTERN.sub("", raw_aciklama).strip(" .")
+        return _normalize(temiz), tarih
+
+    match2 = DATE_PATTERN_ITIBAR.search(raw_aciklama)
+    if match2:
+        tarih = match2.group(1).replace("/", ".").strip()
+        return _normalize(raw_aciklama), tarih
 
     match_tr = DATE_PATTERN_TR.search(raw_aciklama)
     if match_tr:
@@ -69,14 +106,10 @@ def _parse_aciklama(raw_aciklama: str):
         ay = TURKCE_AYLAR.get(match_tr.group(2).lower(), "00")
         yil = match_tr.group(3)
         tarih = f"{gun}.{ay}.{yil}"
-        temiz_aciklama = DATE_PATTERN_TR.sub("", raw_aciklama).strip(" .")
-        return temiz_aciklama, tarih
+        temiz = DATE_PATTERN_TR.sub("", raw_aciklama).strip(" .")
+        return _normalize(temiz), tarih
 
-    return raw_aciklama, ""
-
-
-def _normalize(val: str) -> str:
-    return val.strip().replace("\xa0", " ").replace("\u200b", "").strip()
+    return _normalize(raw_aciklama), ""
 
 
 def _find_category_title(table) -> str:
@@ -126,8 +159,6 @@ def _extract_rows_from_table(table, kategori: str) -> List[UcretSatiri]:
             ]
         data_rows = all_rows[1:]
 
-    print(f"  [ziraat debug] Kategori: {kategori}, Başlık: {header_texts}", file=sys.stderr)
-
     def find_col(keywords):
         for i, h in enumerate(header_texts):
             if all(k in h for k in keywords):
@@ -145,6 +176,8 @@ def _extract_rows_from_table(table, kategori: str) -> List[UcretSatiri]:
     col_tarih     = find_col(["güncelleme"])
     if col_tarih == -1:
         col_tarih = find_col(["guncelleme"])
+    if col_tarih == -1:
+        col_tarih = find_col(["tarih"])
 
     if col_masraf == -1:
         col_masraf    = 0
@@ -168,7 +201,7 @@ def _extract_rows_from_table(table, kategori: str) -> List[UcretSatiri]:
         if not masraf:
             continue
 
-        site_tarihi = get(col_tarih) if col_tarih >= 0 else ""
+        site_tarihi = get(col_tarih).replace("/", ".") if col_tarih >= 0 else ""
         temiz_aciklama, aciklama_tarihi = _parse_aciklama(get(col_aciklama))
         if not site_tarihi:
             site_tarihi = aciklama_tarihi
@@ -177,10 +210,10 @@ def _extract_rows_from_table(table, kategori: str) -> List[UcretSatiri]:
             UcretSatiri(
                 kategori=kategori,
                 masraf=masraf,
-                asgari_tutar=get(col_asg_tutar),
-                asgari_oran=get(col_asg_oran),
-                azami_tutar=get(col_azm_tutar),
-                azami_oran=get(col_azm_oran),
+                asgari_tutar=_normalize_tutar(get(col_asg_tutar)),
+                asgari_oran=_normalize_tutar(get(col_asg_oran)),
+                azami_tutar=_normalize_tutar(get(col_azm_tutar)),
+                azami_oran=_normalize_tutar(get(col_azm_oran)),
                 aciklama=temiz_aciklama,
                 site_guncelleme_tarihi=site_tarihi,
             )
@@ -227,15 +260,6 @@ def _scrape_with_playwright(url: str = ZIRAAT_URL) -> List[UcretSatiri]:
 
     soup = BeautifulSoup(html, "lxml")
     tables = soup.find_all("table")
-
-    print(f"\n[ziraat] TOPLAM {len(tables)} TABLO BULUNDU", file=sys.stderr)
-    for t_idx, table in enumerate(tables[:5]):
-        rows = table.find_all("tr")
-        print(f"  Tablo {t_idx+1} ({len(rows)} satır):", file=sys.stderr)
-        for r_idx, row in enumerate(rows[:3]):
-            cells = row.find_all(["th", "td"])
-            vals = [f"[{c.name}]'{_normalize(c.get_text(strip=True))}'" for c in cells]
-            print(f"    Satır {r_idx+1}: {vals}", file=sys.stderr)
 
     if not tables:
         raise ScraperError("Playwright ile tablo bulunamadı.")
