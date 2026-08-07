@@ -54,10 +54,16 @@ def detect_changes(old_df: pd.DataFrame, new_df: pd.DataFrame) -> pd.DataFrame:
                 row["DEĞİŞİKLİK"] = " | ".join(farklar)
                 degisiklikler.append(row)
 
-    if not degisiklikler:
+        if not degisiklikler:
         return pd.DataFrame()
 
-    return pd.DataFrame(degisiklikler).reset_index()
+    try:
+        result = pd.concat([d.to_frame().T if isinstance(d, pd.Series) else pd.DataFrame([d]) 
+                           for d in degisiklikler], ignore_index=True)
+        return result
+    except Exception as e:
+        print(f"[notify] DataFrame oluşturma hatası: {e}")
+        return pd.DataFrame()
 
 
 def build_html_table(df: pd.DataFrame) -> str:
