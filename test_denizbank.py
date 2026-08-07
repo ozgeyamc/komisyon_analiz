@@ -6,9 +6,11 @@ DATE_PATTERN = re.compile(
     r"G[üu]ncellenme\s*Tarihi\s*:\s*[\s\xa0]*(\d{2}[./]\d{2}[./]\d{4}(?:[\s\xa0]+\d{2}:\d{2})?)",
     re.IGNORECASE,
 )
+DATE_PATTERN_ITIBAR = re.compile(
+    r"(\d{2}[./]\d{2}[./]\d{4})\s+tarihi\s+itibar",
+    re.IGNORECASE,
+)
 
-# ── GARANTİ ──────────────────────────────────────────────
-print("\n=== GARANTİ — boş kalan satırlar ===")
 with sync_playwright() as p:
     browser = p.chromium.launch(headless=True)
     page = browser.new_page(user_agent="Mozilla/5.0")
@@ -24,38 +26,11 @@ for table in soup.find_all("table"):
         cells = row.find_all(["th","td"])
         if not cells: continue
         aciklama = cells[-1].get_text(strip=False)
-        if not DATE_PATTERN.search(aciklama):
-            bos.append(repr(aciklama[:120]))
+        if not DATE_PATTERN.search(aciklama) and not DATE_PATTERN_ITIBAR.search(aciklama):
+            bos.append(repr(aciklama[:200]))
 
 print(f"Tarih bulunamayan satır sayısı: {len(bos)}")
-for b in bos[:10]:
+# Benzersiz pattern'leri göster
+unique = list(dict.fromkeys(bos))
+for b in unique[:20]:
     print(" ", b)
-
-# ── DENİZBANK ────────────────────────────────────────────
-print("\n=== DENİZBANK — ilk 5 tablonun tam yapısı ===")
-with sync_playwright() as p:
-    browser = p.chromium.launch(headless=True)
-    page = browser.new_page(user_agent="Mozilla/5.0")
-    page.goto("https://www.denizbank.com/urun-ve-hizmet-ucretleri", timeout=90000, wait_until="domcontentloaded")
-    page.wait_for_timeout(5000)
-    page.evaluate("""
-        () => document.querySelectorAll('.tab-pane').forEach(el => {
-            el.classList.add('active','show');
-            el.style.display='block';
-        })
-    """)
-    page.wait_for_timeout(2000)
-    html = page.content()
-    browser.close()
-
-soup = BeautifulSoup(html, "lxml")
-tb1 = soup.find(id="tb-1")
-if tb1:
-    tables = tb1.find_all("table")
-    print(f"tb-1 içinde {len(tables)} tablo")
-    for i, t in enumerate(tables[:5]):
-        rows = t.find_all("tr")
-        print(f"\n  Tablo {i+1} ({len(rows)} satır):")
-        for row in rows[:4]:
-            cells = [repr(c.get_text(strip=False)[:60]) for c in row.find_all(["th","td"])]
-            print(f"    {cells}")
