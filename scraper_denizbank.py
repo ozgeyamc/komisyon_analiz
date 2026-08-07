@@ -10,9 +10,21 @@ from typing import List
 DENIZBANK_URL = "https://www.denizbank.com/urun-ve-hizmet-ucretleri"
 
 DATE_PATTERN = re.compile(
-    r"G[üu]ncell[ei]nme\s*Tarihi\s*:\s*(\d{2}\.\d{2}\.\d{4}(?:\s+\d{2}:\d{2})?)",
+    r"G[üu]ncellenme\s*Tarihi\s*:\s*[\s\xa0]*(\d{2}[./]\d{2}[./]\d{4}(?:[\s\xa0]+\d{2}:\d{2})?)",
     re.IGNORECASE,
 )
+
+DATE_PATTERN_TR = re.compile(
+    r"(?:son\s+)?g[üu]ncellenme\s+tarihi\s*:?\s*[\s\xa0]*"
+    r"(\d{1,2})\s+(ocak|şubat|mart|nisan|mayıs|haziran|temmuz|ağustos|eylül|ekim|kasım|aralık)\s+(\d{4})",
+    re.IGNORECASE,
+)
+
+TURKCE_AYLAR = {
+    "ocak": "01", "şubat": "02", "mart": "03", "nisan": "04",
+    "mayıs": "05", "haziran": "06", "temmuz": "07", "ağustos": "08",
+    "eylül": "09", "ekim": "10", "kasım": "11", "aralık": "12",
+}
 
 HEADERS = {
     "User-Agent": (
@@ -47,18 +59,29 @@ def _normalize(val: str) -> str:
 
 def _parse_aciklama(raw_aciklama: str):
     raw_aciklama = raw_aciklama.strip()
+
     match = DATE_PATTERN.search(raw_aciklama)
-    tarih = match.group(1) if match else ""
-    temiz_aciklama = DATE_PATTERN.sub("", raw_aciklama).strip(" .")
-    return temiz_aciklama, tarih
+    if match:
+        tarih = match.group(1).replace("/", ".").strip()
+        temiz_aciklama = DATE_PATTERN.sub("", raw_aciklama).strip(" .")
+        return _normalize(temiz_aciklama), tarih
+
+    match_tr = DATE_PATTERN_TR.search(raw_aciklama)
+    if match_tr:
+        gun = match_tr.group(1).zfill(2)
+        ay = TURKCE_AYLAR.get(match_tr.group(2).lower(), "00")
+        yil = match_tr.group(3)
+        tarih = f"{gun}.{ay}.{yil}"
+        temiz_aciklama = DATE_PATTERN_TR.sub("", raw_aciklama).strip(" .")
+        return _normalize(temiz_aciklama), tarih
+
+    return _normalize(raw_aciklama), ""
 
 
 def _find_category_title(el, fallback: str) -> str:
-    # Önce tb-X bölüm başlığını bul
     parent = el.parent
     depth = 0
     while parent is not None and depth < 15:
-        # tb-X div'inin başlığını ara
         baslik = parent.find(["h1", "h2", "h3", "h4", "h5"], recursive=False)
         if baslik:
             text = _normalize(baslik.get_text())
@@ -74,6 +97,35 @@ def _find_category_title(el, fallback: str) -> str:
 
 
 def _extract_from_table(table, kategori: str) -> List[UcretSatiri]:
+    """
+    DenizBank iki farklı tablo yapısı kullanıyor:
+    Tip 1: Standart — başlık satırı + veri satırları (Masraf, Asgari Tutar, ...)
+    Tip 2: Dikey — ilk satır başlık, ikinci satır+ veri, tek kolonda 'Güncelleme Tarihi' başlığı var
+    """
+    satirlar = []
+    rows = table.find_all("tr")
+    if not rows:
+        return satirlar
+
+    # Tüm satırları al
+    all_rows = rows
+    if not all_rows:
+        return satirlar
+
+    # İlk satır başlık mı kontrol et
+    first_row_cells = all_rows[0].find_all(["th", "td"])
+    header_texts = [_normalize(c.get_text(strip=True)).lower() for c in first_row_cells]
+
+    # Tip 2 tespiti: başlık satırında "güncelleme tarihi" veya tek kolon var
+    if len(header_texts) <= 2 or "güncelleme tarihi" in " ".join(header_texts) or "guncelleme tarihi" in " ".join(header_texts):
+        return _extract_denizbank_tip2(table, kategori)
+
+    # Tip 1: standart tablo
+    return _extract_denizbank_tip1(table, kategori)
+
+
+def _extract_denizbank_tip1(table, kategori: str) -> List[UcretSatiri]:
+    """Standart tablo: Masraf | Asgari Tutar | ... | Açıklama"""
     satirlar = []
     thead = table.find("thead")
     tbody = table.find("tbody")
@@ -97,15 +149,12 @@ def _extract_from_table(table, kategori: str) -> List[UcretSatiri]:
             header_texts = [_normalize(c.get_text(strip=True)).lower() for c in all_rows[0].find_all(["th", "td"])]
         data_rows = all_rows[1:]
 
-    print(f"[denizbank]   Header: {header_texts}", file=sys.stderr)
-
     def find_col(keywords):
         for i, h in enumerate(header_texts):
             if all(k in h for k in keywords):
                 return i
         return -1
 
-    # DenizBank sütun isimleri: "şube", "işlem türü", "asgari tutar", "asgari oran (%)", "azami tutar", "azami oran (%)", "açıklama", "güncelleme tarihi"
     col_masraf    = find_col(["işlem"])
     if col_masraf == -1:
         col_masraf = find_col(["masraf"])
@@ -119,8 +168,9 @@ def _extract_from_table(table, kategori: str) -> List[UcretSatiri]:
     col_tarih     = find_col(["güncelleme"])
     if col_tarih == -1:
         col_tarih = find_col(["guncelleme"])
+    if col_tarih == -1:
+        col_tarih = find_col(["tarih"])
 
-    # Kategori için "şube" sütununu da kullan
     col_sube = find_col(["şube"])
     if col_sube == -1:
         col_sube = find_col(["sube"])
@@ -142,12 +192,11 @@ def _extract_from_table(table, kategori: str) -> List[UcretSatiri]:
         if not masraf:
             continue
 
-        # Şube varsa kategoriyi zenginleştir
         sube = get(col_sube) if col_sube >= 0 else ""
         gercek_kategori = f"{kategori} - {sube}" if sube and sube != masraf else kategori
 
-        # Güncelleme tarihini doğrudan sütundan al
         site_tarihi = get(col_tarih) if col_tarih >= 0 else ""
+        site_tarihi = site_tarihi.replace("/", ".")
         temiz_aciklama, aciklama_tarihi = _parse_aciklama(get(col_aciklama))
         if not site_tarihi:
             site_tarihi = aciklama_tarihi
@@ -158,6 +207,52 @@ def _extract_from_table(table, kategori: str) -> List[UcretSatiri]:
             azami_tutar=get(col_azm_tutar), azami_oran=get(col_azm_oran),
             aciklama=temiz_aciklama, site_guncelleme_tarihi=site_tarihi,
         ))
+    return satirlar
+
+
+def _extract_denizbank_tip2(table, kategori: str) -> List[UcretSatiri]:
+    """
+    DenizBank Tip 2 tablo:
+    Satır 1: başlık adı (tek hücre, tablo adı)
+    Satır 2+: [Masraf adı] [değer] [değer] ... [Güncelleme Tarihi] [tarih]
+    veya dikey key-value çiftleri
+    """
+    satirlar = []
+    rows = table.find_all("tr")
+    if len(rows) < 2:
+        return satirlar
+
+    # Başlık satırını atla, veri satırlarını işle
+    masraf_adi = _normalize(rows[0].get_text(strip=True))
+    if not masraf_adi or len(masraf_adi) < 3:
+        masraf_adi = kategori
+
+    # Tüm satırlarda key-value çiftlerini ara
+    site_tarihi = ""
+    for row in rows[1:]:
+        cells = row.find_all(["th", "td"])
+        if not cells:
+            continue
+        texts = [_normalize(c.get_text(strip=True)) for c in cells]
+
+        # "Güncelleme Tarihi" - tarih çifti
+        for i, t in enumerate(texts):
+            if "güncelleme" in t.lower() or "guncelleme" in t.lower():
+                if i + 1 < len(texts):
+                    tarih_val = texts[i + 1].replace("/", ".")
+                    if re.match(r"\d{2}\.\d{2}\.\d{4}", tarih_val):
+                        site_tarihi = tarih_val
+                elif re.match(r"\d{2}[./]\d{2}[./]\d{4}", t):
+                    site_tarihi = t.replace("/", ".")
+
+    # Tarih satırından başka bir şey çekilemiyorsa masraf_adi ile tek satır ekle
+    if site_tarihi and masraf_adi != kategori:
+        satirlar.append(UcretSatiri(
+            kategori=kategori,
+            masraf=masraf_adi,
+            site_guncelleme_tarihi=site_tarihi,
+        ))
+
     return satirlar
 
 
@@ -174,7 +269,6 @@ def scrape_denizbank(url: str = DENIZBANK_URL) -> List[UcretSatiri]:
             page.goto(url, timeout=90000, wait_until="domcontentloaded")
             page.wait_for_timeout(5000)
 
-            # Tab içeriklerini JS ile görünür yap
             page.evaluate("""
                 () => {
                     document.querySelectorAll('.tab-pane').forEach(el => {
@@ -191,13 +285,11 @@ def scrape_denizbank(url: str = DENIZBANK_URL) -> List[UcretSatiri]:
 
     soup = BeautifulSoup(html, "lxml")
 
-    # tb-1 den tb-9 a kadar bölümleri işle
     tum_satirlar = []
     for i in range(1, 10):
         bolum = soup.find(id=f"tb-{i}")
         if not bolum:
             continue
-        # Bölüm başlığını bul
         baslik_el = bolum.find(["h1", "h2", "h3", "h4", "h5"])
         kategori = _normalize(baslik_el.get_text()) if baslik_el else f"Bölüm {i}"
         print(f"[denizbank] tb-{i} kategorisi: {kategori}", file=sys.stderr)
