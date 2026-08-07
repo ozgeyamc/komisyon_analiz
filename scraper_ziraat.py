@@ -64,17 +64,14 @@ def _normalize(val: str) -> str:
 
 
 def _normalize_tutar(val) -> str:
-    """Sayısal veya string 0 değerlerini boş döner, diğerlerini string yapar."""
     if val is None:
         return ""
-    # Sayısal tip ise direkt kontrol
     if isinstance(val, (int, float)):
         if val == 0:
             return ""
         if isinstance(val, float) and val == int(val):
             return str(int(val))
         return str(val)
-    # String ise
     v = str(val).strip().replace("\xa0", " ").replace("\u200b", "").strip()
     if not v or v in ("0", "0.0", "0.00", "-"):
         return ""
@@ -83,6 +80,46 @@ def _normalize_tutar(val) -> str:
             return ""
     except (ValueError, TypeError):
         pass
+    return v
+
+
+def _normalize_tarih(val) -> str:
+    """
+    Ziraat tarih formatını dd.mm.yyyy HH:MM'e çevirir.
+      "08.05.202613:58:49"  → "08.05.2026 13:58"
+      "08.05.2026 13:58:49" → "08.05.2026 13:58"
+      "08.05.2026 13:58"    → "08.05.2026 13:58"
+      "08.05.2026"          → "08.05.2026"
+    """
+    v = str(val).strip().replace("\xa0", " ").replace("\u200b", "").strip() if val else ""
+    if not v:
+        return ""
+
+    # ISO format: "2026-04-28T10:10:41"
+    m = re.match(r"(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})", v)
+    if m:
+        return f"{m.group(3)}.{m.group(2)}.{m.group(1)} {m.group(4)}:{m.group(5)}"
+
+    # "dd.mm.yyyyHH:MM" — boşluksuz yapışık
+    m = re.match(r"(\d{2}[./]\d{2}[./]\d{4})(\d{2}:\d{2})", v)
+    if m:
+        return f"{m.group(1)} {m.group(2)}"
+
+    # "dd.mm.yyyy HH:MM:SS" — saniyeyi at
+    m = re.match(r"(\d{2}[./]\d{2}[./]\d{4})\s+(\d{2}:\d{2}):\d{2}", v)
+    if m:
+        return f"{m.group(1)} {m.group(2)}"
+
+    # "dd.mm.yyyy HH:MM" — zaten temiz
+    m = re.match(r"(\d{2}[./]\d{2}[./]\d{4})\s+(\d{2}:\d{2})", v)
+    if m:
+        return f"{m.group(1)} {m.group(2)}"
+
+    # "dd.mm.yyyy" — sadece tarih
+    m = re.match(r"(\d{2}[./]\d{2}[./]\d{4})$", v)
+    if m:
+        return m.group(1)
+
     return v
 
 
@@ -201,7 +238,7 @@ def _extract_rows_from_table(table, kategori: str) -> List[UcretSatiri]:
         if not masraf:
             continue
 
-        site_tarihi = get(col_tarih).replace("/", ".") if col_tarih >= 0 else ""
+        site_tarihi = _normalize_tarih(get(col_tarih)) if col_tarih >= 0 else ""
         temiz_aciklama, aciklama_tarihi = _parse_aciklama(get(col_aciklama))
         if not site_tarihi:
             site_tarihi = aciklama_tarihi
