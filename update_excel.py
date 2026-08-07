@@ -12,7 +12,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 
 from scraper import UcretSatiri
 
-EXCEL_DOSYA_ADI = "garanti_komisyonlar.xlsx"
+EXCEL_DOSYA_ADI = "komisyonlar_guncel.xlsx"
 SHEET_ADI = "KOMISYONLAR"
 
 BASLIKLAR = [
