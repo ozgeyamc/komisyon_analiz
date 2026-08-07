@@ -12,8 +12,15 @@ from bs4 import BeautifulSoup
 
 GARANTI_URL = "https://www.garantibbva.com.tr/urun-ve-hizmet-ucretleri"
 
+# "Güncellenme Tarihi: 01.03.2020 00:00"
 DATE_PATTERN = re.compile(
     r"G[üu]ncellenme\s*Tarihi\s*:\s*[\s\xa0]*(\d{2}[./]\d{2}[./]\d{4}(?:[\s\xa0]+\d{2}:\d{2})?)",
+    re.IGNORECASE,
+)
+
+# "18.05.2026 tarihi itibarıyla"
+DATE_PATTERN_ITIBAR = re.compile(
+    r"(\d{2}[./]\d{2}[./]\d{4})\s+tarihi\s+itibar",
     re.IGNORECASE,
 )
 
@@ -61,20 +68,28 @@ def _normalize(val: str) -> str:
 def _parse_aciklama(raw_aciklama: str):
     raw_aciklama = raw_aciklama.strip()
 
+    # "Güncellenme Tarihi: dd.mm.yyyy"
     match = DATE_PATTERN.search(raw_aciklama)
     if match:
         tarih = match.group(1).replace("/", ".").strip()
-        temiz_aciklama = DATE_PATTERN.sub("", raw_aciklama).strip(" .")
-        return _normalize(temiz_aciklama), tarih
+        temiz = DATE_PATTERN.sub("", raw_aciklama).strip(" .")
+        return _normalize(temiz), tarih
 
+    # "dd.mm.yyyy tarihi itibarıyla"
+    match2 = DATE_PATTERN_ITIBAR.search(raw_aciklama)
+    if match2:
+        tarih = match2.group(1).replace("/", ".").strip()
+        return _normalize(raw_aciklama), tarih  # açıklamayı silme, bilgi içeriyor
+
+    # Türkçe ay formatı
     match_tr = DATE_PATTERN_TR.search(raw_aciklama)
     if match_tr:
         gun = match_tr.group(1).zfill(2)
         ay = TURKCE_AYLAR.get(match_tr.group(2).lower(), "00")
         yil = match_tr.group(3)
         tarih = f"{gun}.{ay}.{yil}"
-        temiz_aciklama = DATE_PATTERN_TR.sub("", raw_aciklama).strip(" .")
-        return _normalize(temiz_aciklama), tarih
+        temiz = DATE_PATTERN_TR.sub("", raw_aciklama).strip(" .")
+        return _normalize(temiz), tarih
 
     return _normalize(raw_aciklama), ""
 
