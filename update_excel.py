@@ -24,7 +24,7 @@ BASLIKLAR = [
     "AZAMİ TUTAR",
     "AZAMİ ORAN",
     "AÇIKLAMA",
-    "SİTE GÜNCELLEME TARİHİ",
+    "KOMİSYON GÜNCELLEME TARİHİ",
     "ÇALIŞTIRILMA TARİHİ",
 ]
 
@@ -71,11 +71,15 @@ def _yeni_workbook_olustur() -> Tuple[Workbook, Worksheet]:
         cell.font = BASLIK_FONT
         cell.alignment = Alignment(horizontal="center", vertical="center")
 
-    genislikler = [15, 40, 40, 14, 14, 14, 14, 60, 22, 22]
+    genislikler = [15, 40, 40, 14, 14, 14, 14, 60, 26, 22]
     for idx, genislik in enumerate(genislikler, start=1):
         ws.column_dimensions[ws.cell(row=1, column=idx).column_letter].width = genislik
 
     ws.freeze_panes = "A2"
+
+    # Tüm kolonlara AutoFilter (dropdown filtre) ekle
+    ws.auto_filter.ref = f"A1:J1"
+
     return wb, ws
 
 
