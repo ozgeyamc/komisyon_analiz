@@ -52,14 +52,12 @@ def _normalize_tutar(val) -> str:
     """Sayısal veya string 0 değerlerini boş döner, diğerlerini string yapar."""
     if val is None:
         return ""
-    # Sayısal tip ise direkt kontrol
     if isinstance(val, (int, float)):
         if val == 0:
             return ""
         if isinstance(val, float) and val == int(val):
             return str(int(val))
         return str(val)
-    # String ise
     v = str(val).strip().replace("\xa0", " ").replace("\u200b", "").strip()
     if not v or v in ("0", "0.0", "0.00", "-"):
         return ""
@@ -73,29 +71,43 @@ def _normalize_tutar(val) -> str:
 
 def _normalize_tarih(val) -> str:
     """
-    Vakıfbank UpdateDate değerini temizler.
-    Örnek: "24.04.202609:27:39" → "24.04.2026 09:27"
+    Vakıfbank tarih formatlarını dd.mm.yyyy HH:MM'e çevirir.
+    Desteklenen formatlar:
+      "2026-04-28T10:10:41"   → "28.04.2026 10:10"
+      "2026-04-28T10:10:41Z"  → "28.04.2026 10:10"
+      "24.04.202609:27:39"    → "24.04.2026 09:27"
+      "24.04.2026 09:27:39"   → "24.04.2026 09:27"
+      "24.04.2026 09:27"      → "24.04.2026 09:27"
+      "24.04.2026"            → "24.04.2026"
     """
     v = _normalize(val)
     if not v:
         return ""
 
-    # "dd.mm.yyyyHH:MM:SS" — yıl ile saat birleşik
+    # ISO format: "2026-04-28T10:10:41" veya "2026-04-28T10:10:41Z"
+    m = re.match(r"(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})", v)
+    if m:
+        return f"{m.group(3)}.{m.group(2)}.{m.group(1)} {m.group(4)}:{m.group(5)}"
+
+    # "dd.mm.yyyyHH:MM" — yıl ile saat birleşik (boşluksuz)
     m = re.match(r"(\d{2}[./]\d{2}[./]\d{4})(\d{2}:\d{2})", v)
     if m:
         return f"{m.group(1)} {m.group(2)}"
 
     # "dd.mm.yyyy HH:MM:SS" — saniyeyi at
-    m2 = re.match(r"(\d{2}[./]\d{2}[./]\d{4})\s+(\d{2}:\d{2}):\d{2}", v)
-    if m2:
-        return f"{m2.group(1)} {m2.group(2)}"
+    m = re.match(r"(\d{2}[./]\d{2}[./]\d{4})\s+(\d{2}:\d{2}):\d{2}", v)
+    if m:
+        return f"{m.group(1)} {m.group(2)}"
 
     # "dd.mm.yyyy HH:MM" — zaten temiz
-    m3 = re.match(r"(\d{2}[./]\d{2}[./]\d{4})(?:\s+(\d{2}:\d{2}))?", v)
-    if m3:
-        if m3.group(2):
-            return f"{m3.group(1)} {m3.group(2)}"
-        return m3.group(1)
+    m = re.match(r"(\d{2}[./]\d{2}[./]\d{4})\s+(\d{2}:\d{2})", v)
+    if m:
+        return f"{m.group(1)} {m.group(2)}"
+
+    # "dd.mm.yyyy" — sadece tarih
+    m = re.match(r"(\d{2}[./]\d{2}[./]\d{4})$", v)
+    if m:
+        return m.group(1)
 
     return v
 
