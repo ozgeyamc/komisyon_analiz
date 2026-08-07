@@ -43,7 +43,6 @@ def detect_changes(old_df: pd.DataFrame, new_df: pd.DataFrame) -> pd.DataFrame:
                 raw = raw.iloc[0]
             row = raw.copy()
             row["DEĞİŞİKLİK"] = "YENİ EKLENDI"
-            # index değerlerini (BANKA, KATEGORİ, MASRAF) satıra ekle
             if isinstance(idx, tuple):
                 for k, v in zip(key_cols, idx):
                     row[k] = v
@@ -65,7 +64,6 @@ def detect_changes(old_df: pd.DataFrame, new_df: pd.DataFrame) -> pd.DataFrame:
             if farklar:
                 row = new_raw.copy()
                 row["DEĞİŞİKLİK"] = " | ".join(farklar)
-                # index değerlerini (BANKA, KATEGORİ, MASRAF) satıra ekle
                 if isinstance(idx, tuple):
                     for k, v in zip(key_cols, idx):
                         row[k] = v
@@ -79,7 +77,6 @@ def detect_changes(old_df: pd.DataFrame, new_df: pd.DataFrame) -> pd.DataFrame:
     try:
         result = pd.concat([d.to_frame().T if isinstance(d, pd.Series) else pd.DataFrame([d])
                            for d in degisiklikler], ignore_index=True)
-        # Önemli sütunları öne al
         all_cols = result.columns.tolist()
         front_cols = [c for c in key_cols + value_cols + ["DEĞİŞİKLİK"] if c in all_cols]
         other_cols = [c for c in all_cols if c not in front_cols]
@@ -151,7 +148,7 @@ def send_mail(changes_df: pd.DataFrame, new_excel_path: str, test_mode: bool = F
             part.set_payload(f.read())
             encoders.encode_base64(part)
             part.add_header("Content-Disposition",
-                            f'attachment; filename="garanti_komisyonlar.xlsx"')
+                            f'attachment; filename="komisyonlar_guncel.xlsx"')
             msg.attach(part)
 
     try:
