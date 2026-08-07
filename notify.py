@@ -39,30 +39,38 @@ def detect_changes(old_df: pd.DataFrame, new_df: pd.DataFrame) -> pd.DataFrame:
     for idx in new_indexed.index:
         if idx not in old_indexed.index:
             raw = new_indexed.loc[idx]
-            # DataFrame döndüyse ilk satırı al
             if isinstance(raw, pd.DataFrame):
                 raw = raw.iloc[0]
             row = raw.copy()
             row["DEĞİŞİKLİK"] = "YENİ EKLENDI"
+            # index değerlerini (BANKA, KATEGORİ, MASRAF) satıra ekle
+            if isinstance(idx, tuple):
+                for k, v in zip(key_cols, idx):
+                    row[k] = v
+            else:
+                row[key_cols[0]] = idx
             degisiklikler.append(row)
         else:
             old_raw = old_indexed.loc[idx]
             new_raw = new_indexed.loc[idx]
-            # DataFrame döndüyse ilk satırı al
             if isinstance(old_raw, pd.DataFrame):
                 old_raw = old_raw.iloc[0]
             if isinstance(new_raw, pd.DataFrame):
                 new_raw = new_raw.iloc[0]
-            old_row = old_raw
-            new_row = new_raw
             farklar = []
             for col in value_cols:
-                if col in old_row and col in new_row:
-                    if str(old_row[col]).strip() != str(new_row[col]).strip():
-                        farklar.append(f"{col}: {old_row[col]} → {new_row[col]}")
+                if col in old_raw and col in new_raw:
+                    if str(old_raw[col]).strip() != str(new_raw[col]).strip():
+                        farklar.append(f"{col}: {old_raw[col]} → {new_raw[col]}")
             if farklar:
-                row = new_row.copy()
+                row = new_raw.copy()
                 row["DEĞİŞİKLİK"] = " | ".join(farklar)
+                # index değerlerini (BANKA, KATEGORİ, MASRAF) satıra ekle
+                if isinstance(idx, tuple):
+                    for k, v in zip(key_cols, idx):
+                        row[k] = v
+                else:
+                    row[key_cols[0]] = idx
                 degisiklikler.append(row)
 
     if not degisiklikler:
@@ -71,6 +79,11 @@ def detect_changes(old_df: pd.DataFrame, new_df: pd.DataFrame) -> pd.DataFrame:
     try:
         result = pd.concat([d.to_frame().T if isinstance(d, pd.Series) else pd.DataFrame([d])
                            for d in degisiklikler], ignore_index=True)
+        # Önemli sütunları öne al
+        all_cols = result.columns.tolist()
+        front_cols = [c for c in key_cols + value_cols + ["DEĞİŞİKLİK"] if c in all_cols]
+        other_cols = [c for c in all_cols if c not in front_cols]
+        result = result[front_cols + other_cols]
         return result
     except Exception as e:
         print(f"[notify] DataFrame oluşturma hatası: {e}")
