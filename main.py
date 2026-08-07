@@ -24,36 +24,34 @@ def _try_scrape(banka_adi, fn):
 def main() -> int:
     print("=== Banka Komisyon Ücretleri Takip Botu ===")
 
+    # İstenen sıra: Garanti, Yapı Kredi, İş Bankası, Akbank, QNB, DenizBank, Halkbank, Vakıfbank, TEB, Ziraat
+    BANKA_SIRASI = [
+        ("GARANTİ",   "scraper",          "scrape_garanti_bbva"),
+        ("YAPIKREDI", "scraper_yapikredi","scrape_yapikredi"),
+        ("İŞBANKASI", "scraper_isbank",   "scrape_isbank"),
+        ("AKBANK",    "scraper_akbank",   "scrape_akbank"),
+        ("QNB",       "scraper_qnb",      "scrape_qnb"),
+        ("DENİZBANK", "scraper_denizbank","scrape_denizbank"),
+        ("HALKBANK",  "scraper_halkbank", "scrape_halkbank"),
+        ("VAKIFBANK", "scraper_vakifbank","scrape_vakifbank"),
+        ("TEB",       "scraper_teb",      "scrape_teb"),
+        ("ZİRAAT",    "scraper_ziraat",   "scrape_ziraat"),
+    ]
+
     banka_verileri = {}
 
-    scrapers = [
-        ("GARANTİ", scrape_garanti_bbva),
-    ]
-
-    optional = [
-        ("ZİRAAT",    "scraper_ziraat",    "scrape_ziraat"),
-        ("HALKBANK",  "scraper_halkbank",  "scrape_halkbank"),
-        ("AKBANK",    "scraper_akbank",    "scrape_akbank"),
-        ("YAPIKREDI", "scraper_yapikredi", "scrape_yapikredi"),
-        ("VAKIFBANK", "scraper_vakifbank", "scrape_vakifbank"),
-        ("QNB",       "scraper_qnb",       "scrape_qnb"),
-        ("DENİZBANK", "scraper_denizbank", "scrape_denizbank"),
-        ("TEB",       "scraper_teb",       "scrape_teb"),
-        ("İŞBANKASI", "scraper_isbank",    "scrape_isbank"),
-    ]
-
-    for label, module, func in optional:
+    for banka_adi, module, func in BANKA_SIRASI:
+        print(f"\n--- {banka_adi} çekiliyor ---")
         try:
             mod = __import__(module)
-            scrapers.append((label, getattr(mod, func)))
+            fn = getattr(mod, func)
+            satirlar = _try_scrape(banka_adi, fn)
+            if satirlar:
+                banka_verileri[banka_adi] = satirlar
         except ImportError:
-            pass
-
-    for banka_adi, fn in scrapers:
-        print(f"\n--- {banka_adi} çekiliyor ---")
-        satirlar = _try_scrape(banka_adi, fn)
-        if satirlar:
-            banka_verileri[banka_adi] = satirlar
+            print(f"[UYARI] {banka_adi} modülü bulunamadı, atlanıyor.", file=sys.stderr)
+        except Exception as exc:
+            print(f"[HATA] {banka_adi}: {exc}", file=sys.stderr)
 
     if not banka_verileri:
         print("[HATA] Hiçbir bankadan veri çekilemedi!", file=sys.stderr)
