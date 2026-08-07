@@ -2,7 +2,7 @@ name: Günlük Komisyon Güncelleme
 
 on:
   schedule:
-    - cron: "45 8 * * *"
+    - cron: "0 12 * * *"   # 12:00 Türkiye saati (UTC+3)
   workflow_dispatch:
     inputs:
       test_mail:
