@@ -130,12 +130,16 @@ def send_mail(changes_df: pd.DataFrame, new_excel_path: str, test_mode: bool = F
                             f'attachment; filename="garanti_komisyonlar.xlsx"')
             msg.attach(part)
 
-    with smtplib.SMTP("smtp.gmail.com", 587) as server:
-        server.starttls()
-        server.login(mail_user, mail_pass)
-        server.sendmail(mail_user, mail_to, msg.as_string())
-
-    print(f"[notify] Mail gönderildi. Alıcılar: {mail_to}")
+    try:
+        print(f"[notify] SMTP bağlantısı kuruluyor... Kullanıcı: {mail_user}")
+        with smtplib.SMTP("smtp.gmail.com", 587) as server:
+            server.starttls()
+            server.login(mail_user, mail_pass)
+            server.sendmail(mail_user, mail_to, msg.as_string())
+        print(f"[notify] Mail gönderildi. Alıcılar: {mail_to}")
+    except Exception as e:
+        print(f"[notify] MAIL HATASI: {e}")
+        raise
 
 
 def check_and_notify(old_excel: str, new_excel: str, test_mode: bool = False):
