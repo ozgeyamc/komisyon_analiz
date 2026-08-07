@@ -13,12 +13,12 @@ from bs4 import BeautifulSoup
 GARANTI_URL = "https://www.garantibbva.com.tr/urun-ve-hizmet-ucretleri"
 
 DATE_PATTERN = re.compile(
-    r"G[üu]ncellenme\s*Tarihi\s*:\s*(\d{2}\.\d{2}\.\d{4}(?:\s+\d{2}:\d{2})?)",
+    r"G[üu]ncellenme\s*Tarihi\s*:\s*[\s\xa0]*(\d{2}[./]\d{2}[./]\d{4}(?:[\s\xa0]+\d{2}:\d{2})?)",
     re.IGNORECASE,
 )
 
 DATE_PATTERN_TR = re.compile(
-    r"(?:son\s+)?g[üu]ncellenme\s+tarihi\s*:?\s*"
+    r"(?:son\s+)?g[üu]ncellenme\s+tarihi\s*:?\s*[\s\xa0]*"
     r"(\d{1,2})\s+(ocak|şubat|mart|nisan|mayıs|haziran|temmuz|ağustos|eylül|ekim|kasım|aralık)\s+(\d{4})",
     re.IGNORECASE,
 )
@@ -54,14 +54,18 @@ class ScraperError(Exception):
     pass
 
 
+def _normalize(val: str) -> str:
+    return val.strip().replace("\xa0", " ").replace("\u200b", "").strip()
+
+
 def _parse_aciklama(raw_aciklama: str):
     raw_aciklama = raw_aciklama.strip()
 
     match = DATE_PATTERN.search(raw_aciklama)
     if match:
-        tarih = match.group(1)
+        tarih = match.group(1).replace("/", ".").strip()
         temiz_aciklama = DATE_PATTERN.sub("", raw_aciklama).strip(" .")
-        return temiz_aciklama, tarih
+        return _normalize(temiz_aciklama), tarih
 
     match_tr = DATE_PATTERN_TR.search(raw_aciklama)
     if match_tr:
@@ -70,13 +74,9 @@ def _parse_aciklama(raw_aciklama: str):
         yil = match_tr.group(3)
         tarih = f"{gun}.{ay}.{yil}"
         temiz_aciklama = DATE_PATTERN_TR.sub("", raw_aciklama).strip(" .")
-        return temiz_aciklama, tarih
+        return _normalize(temiz_aciklama), tarih
 
-    return raw_aciklama, ""
-
-
-def _normalize(val: str) -> str:
-    return val.strip().replace("\xa0", " ").replace("\u200b", "").strip()
+    return _normalize(raw_aciklama), ""
 
 
 def _find_category_title(table) -> str:
@@ -143,6 +143,8 @@ def _extract_rows_from_table(table, kategori: str) -> List[UcretSatiri]:
     col_tarih     = find_col(["güncelleme"])
     if col_tarih == -1:
         col_tarih = find_col(["guncelleme"])
+    if col_tarih == -1:
+        col_tarih = find_col(["tarih"])
 
     if col_masraf == -1:
         col_masraf    = 0
@@ -167,6 +169,7 @@ def _extract_rows_from_table(table, kategori: str) -> List[UcretSatiri]:
             continue
 
         site_tarihi = get(col_tarih) if col_tarih >= 0 else ""
+        site_tarihi = site_tarihi.replace("/", ".")
         temiz_aciklama, aciklama_tarihi = _parse_aciklama(get(col_aciklama))
         if not site_tarihi:
             site_tarihi = aciklama_tarihi
