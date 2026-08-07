@@ -13,7 +13,7 @@ VAKIFBANK_API_URL = "https://inbound.apigateway.vakifbank.com.tr:8443/getProduct
 VAKIFBANK_PAGE_URL = "https://www.vakifbank.com.tr/tr/urun-ve-hizmet-ucretleri"
 
 DATE_PATTERN = re.compile(
-    r"G[üu]ncell[ei]nme\s*Tarihi\s*:\s*(\d{2}\.\d{2}\.\d{4}(?:\s+\d{2}:\d{2})?)",
+    r"G[üu]ncellenme\s*Tarihi\s*:\s*[\s\xa0]*(\d{2}[./]\d{2}[./]\d{4}(?:[\s\xa0]+\d{2}:\d{2})?)",
     re.IGNORECASE,
 )
 
@@ -48,6 +48,58 @@ def _normalize(val) -> str:
     return str(val).strip().replace("\xa0", " ").replace("\u200b", "").strip()
 
 
+def _normalize_tutar(val) -> str:
+    """Sayısal veya string 0 değerlerini boş döner, diğerlerini string yapar."""
+    if val is None:
+        return ""
+    # Sayısal tip ise direkt kontrol
+    if isinstance(val, (int, float)):
+        if val == 0:
+            return ""
+        if isinstance(val, float) and val == int(val):
+            return str(int(val))
+        return str(val)
+    # String ise
+    v = str(val).strip().replace("\xa0", " ").replace("\u200b", "").strip()
+    if not v or v in ("0", "0.0", "0.00", "-"):
+        return ""
+    try:
+        if float(v.replace(",", ".")) == 0:
+            return ""
+    except (ValueError, TypeError):
+        pass
+    return v
+
+
+def _normalize_tarih(val) -> str:
+    """
+    Vakıfbank UpdateDate değerini temizler.
+    Örnek: "24.04.202609:27:39" → "24.04.2026 09:27"
+    """
+    v = _normalize(val)
+    if not v:
+        return ""
+
+    # "dd.mm.yyyyHH:MM:SS" — yıl ile saat birleşik
+    m = re.match(r"(\d{2}[./]\d{2}[./]\d{4})(\d{2}:\d{2})", v)
+    if m:
+        return f"{m.group(1)} {m.group(2)}"
+
+    # "dd.mm.yyyy HH:MM:SS" — saniyeyi at
+    m2 = re.match(r"(\d{2}[./]\d{2}[./]\d{4})\s+(\d{2}:\d{2}):\d{2}", v)
+    if m2:
+        return f"{m2.group(1)} {m2.group(2)}"
+
+    # "dd.mm.yyyy HH:MM" — zaten temiz
+    m3 = re.match(r"(\d{2}[./]\d{2}[./]\d{4})(?:\s+(\d{2}:\d{2}))?", v)
+    if m3:
+        if m3.group(2):
+            return f"{m3.group(1)} {m3.group(2)}"
+        return m3.group(1)
+
+    return v
+
+
 def _parse_vakifbank_fee_list(fee_list: list) -> List[UcretSatiri]:
     satirlar = []
     for item in fee_list:
@@ -61,12 +113,12 @@ def _parse_vakifbank_fee_list(fee_list: list) -> List[UcretSatiri]:
         satirlar.append(UcretSatiri(
             kategori=_normalize(item.get("MainTransactionGroupName", "Genel")),
             masraf=masraf,
-            asgari_tutar=_normalize(item.get("MinimumAmount", "")),
-            asgari_oran=_normalize(item.get("MinimumRate", "")),
-            azami_tutar=_normalize(item.get("MaximumAmount", "")),
-            azami_oran=_normalize(item.get("MaximumRate", "")),
+            asgari_tutar=_normalize_tutar(item.get("MinimumAmount", "")),
+            asgari_oran=_normalize_tutar(item.get("MinimumRate", "")),
+            azami_tutar=_normalize_tutar(item.get("MaximumAmount", "")),
+            azami_oran=_normalize_tutar(item.get("MaximumRate", "")),
             aciklama=_normalize(item.get("Description", "")),
-            site_guncelleme_tarihi=_normalize(item.get("UpdateDate", "")),
+            site_guncelleme_tarihi=_normalize_tarih(item.get("UpdateDate", "")),
         ))
     return satirlar
 
@@ -135,7 +187,6 @@ def scrape_vakifbank(page_url: str = VAKIFBANK_PAGE_URL) -> List[UcretSatiri]:
 
     print(f"[vakifbank] JSON parse edildi. Tip: {type(data).__name__}", file=sys.stderr)
 
-    # Vakıfbank yapısı: {"Header": {...}, "Data": {"Fee": [...]}}
     fee_list = None
     if isinstance(data, dict):
         data_block = data.get("Data") or data.get("data")
