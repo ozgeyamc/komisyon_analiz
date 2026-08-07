@@ -1,5 +1,10 @@
 """
 DenizBank "Ürün ve Hizmet Ücretleri" sayfasını çeken scraper modülü.
+
+Tablo yapısı:
+  Satır 1 : tek hücre — şube/kanal adı  (ör. "Şube", "İnternet-Mobil")
+  Satır 2 : başlıklar  (İşlem Türü | Asgari Tutar | ... | Güncelleme Tarihi)
+  Satır 3+: veri
 """
 
 import re
@@ -11,6 +16,11 @@ DENIZBANK_URL = "https://www.denizbank.com/urun-ve-hizmet-ucretleri"
 
 DATE_PATTERN = re.compile(
     r"G[üu]ncellenme\s*Tarihi\s*:\s*[\s\xa0]*(\d{2}[./]\d{2}[./]\d{4}(?:[\s\xa0]+\d{2}:\d{2})?)",
+    re.IGNORECASE,
+)
+
+DATE_PATTERN_ITIBAR = re.compile(
+    r"(\d{2}[./]\d{2}[./]\d{4})\s+tarihi\s+itibar",
     re.IGNORECASE,
 )
 
@@ -63,8 +73,13 @@ def _parse_aciklama(raw_aciklama: str):
     match = DATE_PATTERN.search(raw_aciklama)
     if match:
         tarih = match.group(1).replace("/", ".").strip()
-        temiz_aciklama = DATE_PATTERN.sub("", raw_aciklama).strip(" .")
-        return _normalize(temiz_aciklama), tarih
+        temiz = DATE_PATTERN.sub("", raw_aciklama).strip(" .")
+        return _normalize(temiz), tarih
+
+    match2 = DATE_PATTERN_ITIBAR.search(raw_aciklama)
+    if match2:
+        tarih = match2.group(1).replace("/", ".").strip()
+        return _normalize(raw_aciklama), tarih
 
     match_tr = DATE_PATTERN_TR.search(raw_aciklama)
     if match_tr:
@@ -72,8 +87,8 @@ def _parse_aciklama(raw_aciklama: str):
         ay = TURKCE_AYLAR.get(match_tr.group(2).lower(), "00")
         yil = match_tr.group(3)
         tarih = f"{gun}.{ay}.{yil}"
-        temiz_aciklama = DATE_PATTERN_TR.sub("", raw_aciklama).strip(" .")
-        return _normalize(temiz_aciklama), tarih
+        temiz = DATE_PATTERN_TR.sub("", raw_aciklama).strip(" .")
+        return _normalize(temiz), tarih
 
     return _normalize(raw_aciklama), ""
 
@@ -96,58 +111,38 @@ def _find_category_title(el, fallback: str) -> str:
     return fallback
 
 
-def _extract_from_table(table, kategori: str) -> List[UcretSatiri]:
+def _extract_from_table(table, ana_kategori: str) -> List[UcretSatiri]:
     """
-    DenizBank iki farklı tablo yapısı kullanıyor:
-    Tip 1: Standart — başlık satırı + veri satırları (Masraf, Asgari Tutar, ...)
-    Tip 2: Dikey — ilk satır başlık, ikinci satır+ veri, tek kolonda 'Güncelleme Tarihi' başlığı var
+    DenizBank tablo yapısı:
+      Satır 0 : tek hücre = şube/kanal adı  → kategori zenginleştirir
+      Satır 1 : başlık satırı
+      Satır 2+: veri satırları
     """
     satirlar = []
     rows = table.find_all("tr")
-    if not rows:
+    if len(rows) < 2:
         return satirlar
 
-    # Tüm satırları al
-    all_rows = rows
-    if not all_rows:
-        return satirlar
-
-    # İlk satır başlık mı kontrol et
-    first_row_cells = all_rows[0].find_all(["th", "td"])
-    header_texts = [_normalize(c.get_text(strip=True)).lower() for c in first_row_cells]
-
-    # Tip 2 tespiti: başlık satırında "güncelleme tarihi" veya tek kolon var
-    if len(header_texts) <= 2 or "güncelleme tarihi" in " ".join(header_texts) or "guncelleme tarihi" in " ".join(header_texts):
-        return _extract_denizbank_tip2(table, kategori)
-
-    # Tip 1: standart tablo
-    return _extract_denizbank_tip1(table, kategori)
-
-
-def _extract_denizbank_tip1(table, kategori: str) -> List[UcretSatiri]:
-    """Standart tablo: Masraf | Asgari Tutar | ... | Açıklama"""
-    satirlar = []
-    thead = table.find("thead")
-    tbody = table.find("tbody")
-
-    header_texts = []
-    if thead:
-        hr = thead.find("tr")
-        if hr:
-            header_texts = [_normalize(c.get_text(strip=True)).lower() for c in hr.find_all(["th", "td"])]
-
-    if tbody:
-        data_rows = tbody.find_all("tr")
-        if not header_texts and data_rows:
-            header_texts = [_normalize(c.get_text(strip=True)).lower() for c in data_rows[0].find_all(["th", "td"])]
-            data_rows = data_rows[1:]
+    # Satır 0 — tek hücreli ise şube adı
+    ilk_cells = rows[0].find_all(["th", "td"])
+    if len(ilk_cells) == 1:
+        sube_adi = _normalize(ilk_cells[0].get_text(strip=True))
+        baslik_rows = rows[1:]
     else:
-        all_rows = table.find_all("tr")
-        if not all_rows:
-            return satirlar
-        if not header_texts:
-            header_texts = [_normalize(c.get_text(strip=True)).lower() for c in all_rows[0].find_all(["th", "td"])]
-        data_rows = all_rows[1:]
+        sube_adi = ""
+        baslik_rows = rows
+
+    if not baslik_rows:
+        return satirlar
+
+    # Başlık satırı
+    header_cells = baslik_rows[0].find_all(["th", "td"])
+    header_texts = [_normalize(c.get_text(strip=True)).lower() for c in header_cells]
+    data_rows = baslik_rows[1:]
+
+    # Başlık yoksa veya tek hücreliyse atla
+    if len(header_texts) < 2:
+        return satirlar
 
     def find_col(keywords):
         for i, h in enumerate(header_texts):
@@ -171,13 +166,12 @@ def _extract_denizbank_tip1(table, kategori: str) -> List[UcretSatiri]:
     if col_tarih == -1:
         col_tarih = find_col(["tarih"])
 
-    col_sube = find_col(["şube"])
-    if col_sube == -1:
-        col_sube = find_col(["sube"])
-
     if col_masraf == -1:
         col_masraf = 0; col_asg_tutar = 1; col_asg_oran = 2
         col_azm_tutar = 3; col_azm_oran = 4; col_aciklama = 5
+
+    # Kategori = ana kategori + şube adı
+    kategori = f"{ana_kategori} - {sube_adi}" if sube_adi else ana_kategori
 
     for row in data_rows:
         cells = row.find_all(["th", "td"])
@@ -192,64 +186,19 @@ def _extract_denizbank_tip1(table, kategori: str) -> List[UcretSatiri]:
         if not masraf:
             continue
 
-        sube = get(col_sube) if col_sube >= 0 else ""
-        gercek_kategori = f"{kategori} - {sube}" if sube and sube != masraf else kategori
-
-        site_tarihi = get(col_tarih) if col_tarih >= 0 else ""
-        site_tarihi = site_tarihi.replace("/", ".")
+        site_tarihi = get(col_tarih).replace("/", ".") if col_tarih >= 0 else ""
         temiz_aciklama, aciklama_tarihi = _parse_aciklama(get(col_aciklama))
         if not site_tarihi:
             site_tarihi = aciklama_tarihi
 
         satirlar.append(UcretSatiri(
-            kategori=gercek_kategori, masraf=masraf,
-            asgari_tutar=get(col_asg_tutar), asgari_oran=get(col_asg_oran),
-            azami_tutar=get(col_azm_tutar), azami_oran=get(col_azm_oran),
-            aciklama=temiz_aciklama, site_guncelleme_tarihi=site_tarihi,
-        ))
-    return satirlar
-
-
-def _extract_denizbank_tip2(table, kategori: str) -> List[UcretSatiri]:
-    """
-    DenizBank Tip 2 tablo:
-    Satır 1: başlık adı (tek hücre, tablo adı)
-    Satır 2+: [Masraf adı] [değer] [değer] ... [Güncelleme Tarihi] [tarih]
-    veya dikey key-value çiftleri
-    """
-    satirlar = []
-    rows = table.find_all("tr")
-    if len(rows) < 2:
-        return satirlar
-
-    # Başlık satırını atla, veri satırlarını işle
-    masraf_adi = _normalize(rows[0].get_text(strip=True))
-    if not masraf_adi or len(masraf_adi) < 3:
-        masraf_adi = kategori
-
-    # Tüm satırlarda key-value çiftlerini ara
-    site_tarihi = ""
-    for row in rows[1:]:
-        cells = row.find_all(["th", "td"])
-        if not cells:
-            continue
-        texts = [_normalize(c.get_text(strip=True)) for c in cells]
-
-        # "Güncelleme Tarihi" - tarih çifti
-        for i, t in enumerate(texts):
-            if "güncelleme" in t.lower() or "guncelleme" in t.lower():
-                if i + 1 < len(texts):
-                    tarih_val = texts[i + 1].replace("/", ".")
-                    if re.match(r"\d{2}\.\d{2}\.\d{4}", tarih_val):
-                        site_tarihi = tarih_val
-                elif re.match(r"\d{2}[./]\d{2}[./]\d{4}", t):
-                    site_tarihi = t.replace("/", ".")
-
-    # Tarih satırından başka bir şey çekilemiyorsa masraf_adi ile tek satır ekle
-    if site_tarihi and masraf_adi != kategori:
-        satirlar.append(UcretSatiri(
             kategori=kategori,
-            masraf=masraf_adi,
+            masraf=masraf,
+            asgari_tutar=get(col_asg_tutar),
+            asgari_oran=get(col_asg_oran),
+            azami_tutar=get(col_azm_tutar),
+            azami_oran=get(col_azm_oran),
+            aciklama=temiz_aciklama,
             site_guncelleme_tarihi=site_tarihi,
         ))
 
