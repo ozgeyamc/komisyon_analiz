@@ -3,7 +3,7 @@
 """
 
 import os
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Tuple
 
 from openpyxl import Workbook
@@ -57,7 +57,8 @@ BANKA_RENKLER = {
 
 
 def _bugun_tarih_str() -> str:
-    return datetime.now().strftime("%d.%m.%Y %H:%M")
+    turkey_tz = timezone(timedelta(hours=3))
+    return datetime.now(turkey_tz).strftime("%d.%m.%Y %H:%M")
 
 
 def _yeni_workbook_olustur() -> Tuple[Workbook, Worksheet]:
@@ -76,9 +77,7 @@ def _yeni_workbook_olustur() -> Tuple[Workbook, Worksheet]:
         ws.column_dimensions[ws.cell(row=1, column=idx).column_letter].width = genislik
 
     ws.freeze_panes = "A2"
-
-    # Tüm kolonlara AutoFilter (dropdown filtre) ekle
-    ws.auto_filter.ref = f"A1:J1"
+    ws.auto_filter.ref = "A1:J1"
 
     return wb, ws
 
