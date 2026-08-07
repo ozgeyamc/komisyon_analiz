@@ -13,9 +13,9 @@ DATE_PATTERN_ITIBAR = re.compile(
 
 with sync_playwright() as p:
     browser = p.chromium.launch(headless=True)
-    page = browser.new_page(user_agent="Mozilla/5.0")
-    page.goto("https://www.garantibbva.com.tr/urun-ve-hizmet-ucretleri", timeout=60000, wait_until="networkidle")
-    page.wait_for_timeout(3000)
+    page = browser.new_page(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+    page.goto("https://www.garantibbva.com.tr/urun-ve-hizmet-ucretleri", timeout=120000, wait_until="domcontentloaded")
+    page.wait_for_timeout(8000)
     html = page.content()
     browser.close()
 
@@ -30,7 +30,6 @@ for table in soup.find_all("table"):
             bos.append(repr(aciklama[:200]))
 
 print(f"Tarih bulunamayan satır sayısı: {len(bos)}")
-# Benzersiz pattern'leri göster
 unique = list(dict.fromkeys(bos))
 for b in unique[:20]:
     print(" ", b)
