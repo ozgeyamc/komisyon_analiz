@@ -38,12 +38,23 @@ def detect_changes(old_df: pd.DataFrame, new_df: pd.DataFrame) -> pd.DataFrame:
 
     for idx in new_indexed.index:
         if idx not in old_indexed.index:
-            row = new_indexed.loc[idx].copy()
+            raw = new_indexed.loc[idx]
+            # DataFrame döndüyse ilk satırı al
+            if isinstance(raw, pd.DataFrame):
+                raw = raw.iloc[0]
+            row = raw.copy()
             row["DEĞİŞİKLİK"] = "YENİ EKLENDI"
             degisiklikler.append(row)
         else:
-            old_row = old_indexed.loc[idx]
-            new_row = new_indexed.loc[idx]
+            old_raw = old_indexed.loc[idx]
+            new_raw = new_indexed.loc[idx]
+            # DataFrame döndüyse ilk satırı al
+            if isinstance(old_raw, pd.DataFrame):
+                old_raw = old_raw.iloc[0]
+            if isinstance(new_raw, pd.DataFrame):
+                new_raw = new_raw.iloc[0]
+            old_row = old_raw
+            new_row = new_raw
             farklar = []
             for col in value_cols:
                 if col in old_row and col in new_row:
