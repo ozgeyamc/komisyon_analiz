@@ -1,11 +1,12 @@
 """
 Yapı Kredi "Bireysel Ürün ve Hizmet Ücretleri" sayfasını çeken scraper modülü.
+Filtre: sadece EFT / Gönderim / SWIFT / Havale / Para gönderme tipindeki tabloları işler.
 """
 
 import re
 import sys
 from dataclasses import dataclass
-from typing import List
+from typing import List, Tuple, Optional, Set
 
 YAPIKREDI_URL = "https://www.yapikredi.com.tr/bireysel-bankacilik/hesaplama-araclari/bireysel-urun-ve-hizmet-ucretleri"
 
@@ -89,14 +90,42 @@ def _find_category_title(el, fallback: str) -> str:
     return fallback
 
 
+def _get_table_headers(table) -> Tuple[List[str], List[str]]:
+    """
+    Return (original_header_texts, normalized_header_texts)
+    normalized: parantez çıkarılmış, % silinmiş, küçültülmüş hali.
+    """
+    header_texts = []
+    thead = table.find("thead")
+    if thead:
+        header_rows = thead.find_all("tr")
+        hr = header_rows[-1] if header_rows else None
+        if hr:
+            header_texts = [_normalize(c.get_text(strip=True)) for c in hr.find_all(["th", "td"])]
+    if not header_texts:
+        # try first tr
+        first_tr = table.find("tr")
+        if first_tr:
+            header_texts = [_normalize(c.get_text(strip=True)) for c in first_tr.find_all(["th", "td"])]
+    def normalize_header_text(h: str) -> str:
+        h = h or ""
+        h2 = re.sub(r"\(.*?\)", "", h)
+        h2 = h2.replace("%", " ").strip()
+        return re.sub(r"\s+", " ", h2).lower()
+    header_texts_norm = [normalize_header_text(h) for h in header_texts]
+    return header_texts, header_texts_norm
+
+
 def _extract_from_table(table, kategori: str) -> List[UcretSatiri]:
+    """
+    Var olan esnek sütun eşlemeyi korur. table içindeki satırları parse eder.
+    """
     satirlar = []
     thead = table.find("thead")
     tbody = table.find("tbody")
 
     header_texts = []
     if thead:
-        # Eğer birden fazla header satırı varsa sonunu kullan (çoğu durumda en spesifik başlık orada olur)
         header_rows = thead.find_all("tr")
         hr = header_rows[-1] if header_rows else None
         if hr:
@@ -105,7 +134,6 @@ def _extract_from_table(table, kategori: str) -> List[UcretSatiri]:
     if tbody:
         data_rows = tbody.find_all("tr")
         if not header_texts and data_rows:
-            # tbody içinde ilk satırı header olarak kullan (bazı siteler thead kullanmaz)
             header_texts = [_normalize(c.get_text(strip=True)) for c in data_rows[0].find_all(["th", "td"])]
             data_rows = data_rows[1:]
     else:
@@ -116,7 +144,6 @@ def _extract_from_table(table, kategori: str) -> List[UcretSatiri]:
             header_texts = [_normalize(c.get_text(strip=True)) for c in all_rows[0].find_all(["th", "td"])]
         data_rows = all_rows[1:]
 
-    # Normalize header text: kaldır parantez içlerini, '%' işaretini, fazlalıkları
     def normalize_header_text(h: str) -> str:
         h = h or ""
         h2 = re.sub(r"\(.*?\)", "", h)
@@ -124,8 +151,6 @@ def _extract_from_table(table, kategori: str) -> List[UcretSatiri]:
         return re.sub(r"\s+", " ", h2).lower()
 
     header_texts_norm = [normalize_header_text(h) for h in header_texts]
-
-    # Debug: header'ları stderr'e yaz (test ederken bak)
     if header_texts_norm:
         print(f"[yapikredi][debug] Header'lar: {header_texts_norm}", file=sys.stderr)
 
@@ -135,19 +160,17 @@ def _extract_from_table(table, kategori: str) -> List[UcretSatiri]:
                 return i
         return -1
 
-    # daha fazla keyword dene, EFT tablosu örnek: 'eft gönderimi' gibi başlıklar olabilir
     col_masraf = find_col(["masraf"])
     if col_masraf == -1:
         col_masraf = find_col(["işlem"])
     if col_masraf == -1:
         col_masraf = find_col(["ücret"])
     if col_masraf == -1:
-        # direkt eft/gönderim başlığı da olabilir
         candidate = find_col(["eft"])
         if candidate != -1:
             col_masraf = candidate
         else:
-            candidate2 = find_col(["gönderim"]) or find_col(["gönderimi"])
+            candidate2 = find_col(["gönderim"]) or find_col(["gönderimi"]) or find_col(["havale"])
             if candidate2 != -1:
                 col_masraf = candidate2
 
@@ -163,9 +186,7 @@ def _extract_from_table(table, kategori: str) -> List[UcretSatiri]:
     if col_tarih == -1:
         col_tarih = find_col(["guncelleme"]) or find_col(["tarih"])
 
-    # fallback: bazı tablolar farklı sütun sırasına sahip olabilir, temel bir varsayılan haritalama yap
     if col_masraf == -1:
-        # eğer header sayısı azsa, varsayılan olarak ilk sütunu masraf kabul et
         col_masraf = 0
         col_asg_tutar = col_asg_tutar if col_asg_tutar != -1 else 1
         col_asg_oran = col_asg_oran if col_asg_oran != -1 else 2
@@ -173,11 +194,10 @@ def _extract_from_table(table, kategori: str) -> List[UcretSatiri]:
         col_azm_oran = col_azm_oran if col_azm_oran != -1 else 4
         col_aciklama = col_aciklama if col_aciklama != -1 else 5
 
-    # --- eğer bulunan sütun başlığı 'eft'/'gönderim' içeriyorsa, hücreyi işlemeleri
     header_is_category = False
     header_label_for_masraf = ""
     if 0 <= col_masraf < len(header_texts_norm):
-        if "eft" in header_texts_norm[col_masraf] or "gönderim" in header_texts_norm[col_masraf]:
+        if "eft" in header_texts_norm[col_masraf] or "gönderim" in header_texts_norm[col_masraf] or "havale" in header_texts_norm[col_masraf] or "swift" in header_texts_norm[col_masraf]:
             header_is_category = True
             header_label_for_masraf = header_texts[col_masraf].strip()
 
@@ -192,17 +212,13 @@ def _extract_from_table(table, kategori: str) -> List[UcretSatiri]:
 
         masraf = get(col_masraf)
 
-        # Yeni davranış: eğer sütun EFT/Gönderim başlığıysa, hücre metni anlamlıysa direkt kullan
         if header_is_category:
             cell_val = (masraf or "").strip()
             if cell_val and cell_val not in ["-", "—"]:
-                # hücre kendi başına açıklayıcıysa sadece hücreyi al (ör. "İnternet/Mobil – 0 - 8.300 TL")
                 masraf = cell_val
             else:
-                # hücre boş veya anlamsızsa başlığı kullan
                 masraf = f"{header_label_for_masraf}".strip()
 
-        # fallback: hücre boşsa satırdaki herhangi bir hücrede 'eft' ara
         if not masraf:
             for v in values:
                 if v and "eft" in v.lower():
@@ -223,6 +239,26 @@ def _extract_from_table(table, kategori: str) -> List[UcretSatiri]:
             aciklama=temiz_aciklama, site_guncelleme_tarihi=site_tarihi,
         ))
     return satirlar
+
+
+def _table_is_relevant(header_texts_norm: List[str], kategori: str) -> bool:
+    """
+    Hangi tabloları işleyeceğimizi belirle (EFT/Havale/SWIFT/Para gönderme vb).
+    header_texts_norm: normalize edilmiş header'lar
+    kategori: bulunan üst başlık (h1/h2/h3 vb)
+    """
+    keywords = ["eft", "gönderim", "gönder", "havale", "swift", "para gönderme", "eft gönderimi", "gönderimleri", "gönderim ücret"]
+    # check headers
+    for h in header_texts_norm:
+        for k in keywords:
+            if k in h:
+                return True
+    # check category title (bazen başlık yakınında yer alır)
+    kat = (kategori or "").lower()
+    for k in keywords:
+        if k in kat:
+            return True
+    return False
 
 
 def scrape_yapikredi(url: str = YAPIKREDI_URL) -> List[UcretSatiri]:
@@ -247,14 +283,10 @@ def scrape_yapikredi(url: str = YAPIKREDI_URL) -> List[UcretSatiri]:
             page = context.new_page()
             page.goto(url, timeout=120000, wait_until="domcontentloaded")
 
-            # Daha güvenli bekleme: önce belirli bir tablo seçicisini bekle
             try:
                 page.wait_for_selector("table", timeout=20000)
             except Exception:
-                # Eğer selector gelmezse biraz daha bekle (sayfa JS ile yüklüyor olabilir)
                 page.wait_for_timeout(8000)
-
-            # Ekstra kısa bekleme JS işlemleri için
             page.wait_for_timeout(2000)
 
             table_count = page.evaluate("() => document.querySelectorAll('table').length")
@@ -271,14 +303,36 @@ def scrape_yapikredi(url: str = YAPIKREDI_URL) -> List[UcretSatiri]:
     if not tables:
         raise ScraperError("Yapı Kredi sayfasında hiç <table> bulunamadı.")
 
-    tum_satirlar = []
+    tum_satirlar: List[UcretSatiri] = []
+    seen: Set[Tuple[str, str, str, str]] = set()
+    processed = 0
+    skipped = 0
+
     for table in tables:
         kategori = _find_category_title(table, "Genel")
+        _, header_texts_norm = _get_table_headers(table)
+
+        # Debug: hangi header'lar var (kısa)
+        if header_texts_norm:
+            print(f"[yapikredi][debug] table headers preview: {header_texts_norm[:6]}", file=sys.stderr)
+
+        if not _table_is_relevant(header_texts_norm, kategori):
+            skipped += 1
+            continue
+
+        processed += 1
         rows = _extract_from_table(table, kategori)
-        tum_satirlar.extend(rows)
+        for r in rows:
+            key = (r.kategori, r.masraf, r.asgari_tutar or "", r.azami_tutar or "")
+            if key in seen:
+                continue
+            seen.add(key)
+            tum_satirlar.append(r)
+
+    print(f"[yapikredi] İşlenen tablo sayısı: {processed}, atlanan tablo sayısı: {skipped}", file=sys.stderr)
 
     if not tum_satirlar:
-        raise ScraperError("Yapı Kredi sayfasında tablo var ama hiç veri satırı çekilemedi.")
+        raise ScraperError("Yapı Kredi sayfasında ilgili tablolar bulundu ama hiç veri satırı çekilemedi.")
 
     print(f"[yapikredi] Toplam {len(tum_satirlar)} satır bulundu.", file=sys.stderr)
     return tum_satirlar
@@ -286,6 +340,6 @@ def scrape_yapikredi(url: str = YAPIKREDI_URL) -> List[UcretSatiri]:
 
 if __name__ == "__main__":
     veriler = scrape_yapikredi()
-    for v in veriler[:30]:
+    for v in veriler[:50]:
         print(v)
     print(f"Toplam {len(veriler)} satır bulundu.")
