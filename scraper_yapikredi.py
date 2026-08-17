@@ -52,7 +52,7 @@ class ScraperError(Exception):
 
 
 def _parse_aciklama(raw_aciklama: str):
-    raw_aciklama = raw_aciklama.strip()
+    raw_aciklama = (raw_aciklama or "").strip()
 
     match = DATE_PATTERN.search(raw_aciklama)
     if match:
@@ -73,7 +73,7 @@ def _parse_aciklama(raw_aciklama: str):
 
 
 def _normalize(val: str) -> str:
-    return val.strip().replace("\xa0", " ").replace("\u200b", "").strip()
+    return (val or "").strip().replace("\xa0", " ").replace("\u200b", "").strip()
 
 
 def _find_category_title(el, fallback: str) -> str:
@@ -100,25 +100,26 @@ def _extract_from_table(table, kategori: str) -> List[UcretSatiri]:
         header_rows = thead.find_all("tr")
         hr = header_rows[-1] if header_rows else None
         if hr:
-            header_texts = [_normalize(c.get_text(strip=True)).lower() for c in hr.find_all(["th", "td"])]
+            header_texts = [_normalize(c.get_text(strip=True)) for c in hr.find_all(["th", "td"])]
 
     if tbody:
         data_rows = tbody.find_all("tr")
         if not header_texts and data_rows:
             # tbody içinde ilk satırı header olarak kullan (bazı siteler thead kullanmaz)
-            header_texts = [_normalize(c.get_text(strip=True)).lower() for c in data_rows[0].find_all(["th", "td"])]
+            header_texts = [_normalize(c.get_text(strip=True)) for c in data_rows[0].find_all(["th", "td"])]
             data_rows = data_rows[1:]
     else:
         all_rows = table.find_all("tr")
         if not all_rows:
             return satirlar
         if not header_texts:
-            header_texts = [_normalize(c.get_text(strip=True)).lower() for c in all_rows[0].find_all(["th", "td"])]
+            header_texts = [_normalize(c.get_text(strip=True)) for c in all_rows[0].find_all(["th", "td"])]
         data_rows = all_rows[1:]
 
     # Normalize header text: kaldır parantez içlerini, '%' işaretini, fazlalıkları
     def normalize_header_text(h: str) -> str:
-        h2 = re.sub(r"\(.*?\)", "", h)        # parantez içlerini sil
+        h = h or ""
+        h2 = re.sub(r"\(.*?\)", "", h)
         h2 = h2.replace("%", " ").strip()
         return re.sub(r"\s+", " ", h2).lower()
 
@@ -135,7 +136,7 @@ def _extract_from_table(table, kategori: str) -> List[UcretSatiri]:
         return -1
 
     # daha fazla keyword dene, EFT tablosu örnek: 'eft gönderimi' gibi başlıklar olabilir
-    col_masraf    = find_col(["masraf"])
+    col_masraf = find_col(["masraf"])
     if col_masraf == -1:
         col_masraf = find_col(["işlem"])
     if col_masraf == -1:
@@ -151,14 +152,14 @@ def _extract_from_table(table, kategori: str) -> List[UcretSatiri]:
                 col_masraf = candidate2
 
     col_asg_tutar = find_col(["asgari", "tutar"]) or find_col(["asgari"]) or find_col(["tutar"])
-    col_asg_oran  = find_col(["asgari", "oran"]) or find_col(["asgari oran"]) or find_col(["oran"])
+    col_asg_oran = find_col(["asgari", "oran"]) or find_col(["asgari oran"]) or find_col(["oran"])
     col_azm_tutar = find_col(["azami", "tutar"]) or find_col(["azami"]) or find_col(["tutar"])
-    col_azm_oran  = find_col(["azami", "oran"]) or find_col(["azami oran"]) or find_col(["oran"])
-    col_aciklama  = find_col(["açıklama"])
+    col_azm_oran = find_col(["azami", "oran"]) or find_col(["azami oran"]) or find_col(["oran"])
+    col_aciklama = find_col(["açıklama"])
     if col_aciklama == -1:
-        col_aciklama = find_col(["aciklama"]) or find_col(["açıklama/ açıklama".strip()])
+        col_aciklama = find_col(["aciklama"])
 
-    col_tarih     = find_col(["güncelleme"])
+    col_tarih = find_col(["güncelleme"])
     if col_tarih == -1:
         col_tarih = find_col(["guncelleme"]) or find_col(["tarih"])
 
@@ -167,13 +168,12 @@ def _extract_from_table(table, kategori: str) -> List[UcretSatiri]:
         # eğer header sayısı azsa, varsayılan olarak ilk sütunu masraf kabul et
         col_masraf = 0
         col_asg_tutar = col_asg_tutar if col_asg_tutar != -1 else 1
-        col_asg_oran  = col_asg_oran  if col_asg_oran  != -1 else 2
+        col_asg_oran = col_asg_oran if col_asg_oran != -1 else 2
         col_azm_tutar = col_azm_tutar if col_azm_tutar != -1 else 3
-        col_azm_oran  = col_azm_oran  if col_azm_oran  != -1 else 4
-        col_aciklama  = col_aciklama if col_aciklama != -1 else 5
+        col_azm_oran = col_azm_oran if col_azm_oran != -1 else 4
+        col_aciklama = col_aciklama if col_aciklama != -1 else 5
 
-    # --- YENİ: eğer bulunan sütun başlığı 'eft'/'gönderim' içeriyorsa,
-    # satır hücresini başlıkla birleştirerek masraf oluşturmak için flag:
+    # --- eğer bulunan sütun başlığı 'eft'/'gönderim' içeriyorsa, hücreyi işlemeleri
     header_is_category = False
     header_label_for_masraf = ""
     if 0 <= col_masraf < len(header_texts_norm):
@@ -191,16 +191,21 @@ def _extract_from_table(table, kategori: str) -> List[UcretSatiri]:
             return values[idx] if 0 <= idx < len(values) else ""
 
         masraf = get(col_masraf)
-        # Eğer sütun bir "EFT/Gönderim" başlığıysa, hücre değerini başlıkla birleştir
+
+        # Yeni davranış: eğer sütun EFT/Gönderim başlığıysa, hücre metni anlamlıysa direkt kullan
         if header_is_category:
-            cell_val = masraf or ""
-            if cell_val.strip() and "eft" not in cell_val.lower():
-                masraf = f"{header_label_for_masraf} - {cell_val}".strip(" -")
+            cell_val = (masraf or "").strip()
+            if cell_val and cell_val not in ["-", "—"]:
+                # hücre kendi başına açıklayıcıysa sadece hücreyi al (ör. "İnternet/Mobil – 0 - 8.300 TL")
+                masraf = cell_val
+            else:
+                # hücre boş veya anlamsızsa başlığı kullan
+                masraf = f"{header_label_for_masraf}".strip()
 
         # fallback: hücre boşsa satırdaki herhangi bir hücrede 'eft' ara
         if not masraf:
             for v in values:
-                if "eft" in v.lower():
+                if v and "eft" in v.lower():
                     masraf = v
                     break
         if not masraf:
@@ -242,14 +247,14 @@ def scrape_yapikredi(url: str = YAPIKREDI_URL) -> List[UcretSatiri]:
             page = context.new_page()
             page.goto(url, timeout=120000, wait_until="domcontentloaded")
 
-            # Daha güvenli bekleme: önce belirli bir tablo seçicisini bekle (uygulamaya göre değiştir)
+            # Daha güvenli bekleme: önce belirli bir tablo seçicisini bekle
             try:
                 page.wait_for_selector("table", timeout=20000)
             except Exception:
                 # Eğer selector gelmezse biraz daha bekle (sayfa JS ile yüklüyor olabilir)
                 page.wait_for_timeout(8000)
 
-            # Ekstra bekleme küçük animasyonlar/JS için
+            # Ekstra kısa bekleme JS işlemleri için
             page.wait_for_timeout(2000)
 
             table_count = page.evaluate("() => document.querySelectorAll('table').length")
@@ -281,6 +286,6 @@ def scrape_yapikredi(url: str = YAPIKREDI_URL) -> List[UcretSatiri]:
 
 if __name__ == "__main__":
     veriler = scrape_yapikredi()
-    for v in veriler[:20]:
+    for v in veriler[:30]:
         print(v)
     print(f"Toplam {len(veriler)} satır bulundu.")
