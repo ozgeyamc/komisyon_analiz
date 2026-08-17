@@ -96,13 +96,16 @@ def _extract_from_table(table, kategori: str) -> List[UcretSatiri]:
 
     header_texts = []
     if thead:
-        hr = thead.find("tr")
+        # Eğer birden fazla header satırı varsa sonunu kullan (çoğu durumda en spesifik başlık orada olur)
+        header_rows = thead.find_all("tr")
+        hr = header_rows[-1] if header_rows else None
         if hr:
             header_texts = [_normalize(c.get_text(strip=True)).lower() for c in hr.find_all(["th", "td"])]
 
     if tbody:
         data_rows = tbody.find_all("tr")
         if not header_texts and data_rows:
+            # tbody içinde ilk satırı header olarak kullan (bazı siteler thead kullanmaz)
             header_texts = [_normalize(c.get_text(strip=True)).lower() for c in data_rows[0].find_all(["th", "td"])]
             data_rows = data_rows[1:]
     else:
@@ -113,41 +116,65 @@ def _extract_from_table(table, kategori: str) -> List[UcretSatiri]:
             header_texts = [_normalize(c.get_text(strip=True)).lower() for c in all_rows[0].find_all(["th", "td"])]
         data_rows = all_rows[1:]
 
+    # Normalize header text: kaldır parantez içlerini, '%' işaretini, fazlalıkları
+    def normalize_header_text(h: str) -> str:
+        h2 = re.sub(r"\(.*?\)", "", h)        # parantez içlerini sil
+        h2 = h2.replace("%", " ").strip()
+        return re.sub(r"\s+", " ", h2).lower()
+
+    header_texts_norm = [normalize_header_text(h) for h in header_texts]
+
+    # Debug: header'ları stderr'e yaz (test ederken bak)
+    if header_texts_norm:
+        print(f"[yapikredi][debug] Header'lar: {header_texts_norm}", file=sys.stderr)
+
     def find_col(keywords):
-        for i, h in enumerate(header_texts):
+        for i, h in enumerate(header_texts_norm):
             if all(k in h for k in keywords):
                 return i
         return -1
 
+    # daha fazla keyword dene, EFT tablosu örnek: 'eft gönderimi' gibi başlıklar olabilir
     col_masraf    = find_col(["masraf"])
-    col_asg_tutar = find_col(["asgari", "tutar"])
-    col_asg_oran  = find_col(["asgari", "oran"])
-    col_azm_tutar = find_col(["azami", "tutar"])
-    col_azm_oran  = find_col(["azami", "oran"])
-    col_aciklama  = find_col(["açıklama"])
-    if col_aciklama == -1:
-        col_aciklama = find_col(["aciklama"])
-    col_tarih     = find_col(["güncelleme"])
-    if col_tarih == -1:
-        col_tarih = find_col(["guncelleme"])
     if col_masraf == -1:
         col_masraf = find_col(["işlem"])
     if col_masraf == -1:
         col_masraf = find_col(["ücret"])
-    if col_asg_tutar == -1:
-        col_asg_tutar = find_col(["tutar"])
-    if col_azm_tutar == -1:
-        col_azm_tutar = find_col(["azami"])
-    if col_asg_oran == -1:
-        col_asg_oran = find_col(["oran"])
-
     if col_masraf == -1:
-        col_masraf = 0; col_asg_tutar = 1; col_asg_oran = 2
-        col_azm_tutar = 3; col_azm_oran = 4; col_aciklama = 5
+        # direkt eft/gönderim başlığı da olabilir
+        candidate = find_col(["eft"])
+        if candidate != -1:
+            col_masraf = candidate
+        else:
+            candidate2 = find_col(["gönderim"]) or find_col(["gönderimi"])
+            if candidate2 != -1:
+                col_masraf = candidate2
+
+    col_asg_tutar = find_col(["asgari", "tutar"]) or find_col(["asgari"]) or find_col(["tutar"])
+    col_asg_oran  = find_col(["asgari", "oran"]) or find_col(["asgari oran"]) or find_col(["oran"])
+    col_azm_tutar = find_col(["azami", "tutar"]) or find_col(["azami"]) or find_col(["tutar"])
+    col_azm_oran  = find_col(["azami", "oran"]) or find_col(["azami oran"]) or find_col(["oran"])
+    col_aciklama  = find_col(["açıklama"])
+    if col_aciklama == -1:
+        col_aciklama = find_col(["aciklama"]) or find_col(["açıklama/ açıklama".strip()])
+
+    col_tarih     = find_col(["güncelleme"])
+    if col_tarih == -1:
+        col_tarih = find_col(["guncelleme"]) or find_col(["tarih"])
+
+    # fallback: bazı tablolar farklı sütun sırasına sahip olabilir, temel bir varsayılan haritalama yap
+    if col_masraf == -1:
+        # eğer header sayısı azsa, varsayılan olarak ilk sütunu masraf kabul et
+        col_masraf = 0
+        col_asg_tutar = col_asg_tutar if col_asg_tutar != -1 else 1
+        col_asg_oran  = col_asg_oran  if col_asg_oran  != -1 else 2
+        col_azm_tutar = col_azm_tutar if col_azm_tutar != -1 else 3
+        col_azm_oran  = col_azm_oran  if col_azm_oran  != -1 else 4
+        col_aciklama  = col_aciklama if col_aciklama != -1 else 5
 
     for row in data_rows:
         cells = row.find_all(["th", "td"])
-        if not cells or len(cells) < 2:
+        if not cells or len(cells) < 1:
             continue
         values = [_normalize(c.get_text(strip=True)) for c in cells]
 
@@ -155,6 +182,12 @@ def _extract_from_table(table, kategori: str) -> List[UcretSatiri]:
             return values[idx] if 0 <= idx < len(values) else ""
 
         masraf = get(col_masraf)
+        if not masraf:
+            # alternatif: eğer masraf boşsa, satırda 'eft' geçen hücreyi bul
+            for v in values:
+                if "eft" in v.lower():
+                    masraf = v
+                    break
         if not masraf:
             continue
 
@@ -183,7 +216,7 @@ def scrape_yapikredi(url: str = YAPIKREDI_URL) -> List[UcretSatiri]:
         try:
             context = browser.new_context(
                 user_agent=HEADERS["User-Agent"],
-                viewport={"width": 1280, "height": 800},
+                viewport={"width": 1280, "height": 1000},
                 locale="tr-TR",
                 extra_http_headers={
                     "Accept-Language": "tr-TR,tr;q=0.9,en;q=0.8",
@@ -193,7 +226,16 @@ def scrape_yapikredi(url: str = YAPIKREDI_URL) -> List[UcretSatiri]:
             )
             page = context.new_page()
             page.goto(url, timeout=120000, wait_until="domcontentloaded")
-            page.wait_for_timeout(8000)
+
+            # Daha güvenli bekleme: önce belirli bir tablo seçicisini bekle (uygulamaya göre değiştir)
+            try:
+                page.wait_for_selector("table", timeout=20000)
+            except Exception:
+                # Eğer selector gelmezse biraz daha bekle (sayfa JS ile yüklüyor olabilir)
+                page.wait_for_timeout(8000)
+
+            # Ekstra bekleme küçük animasyonlar/JS için
+            page.wait_for_timeout(2000)
 
             table_count = page.evaluate("() => document.querySelectorAll('table').length")
             print(f"[yapikredi] JS ile {table_count} <table> bulundu", file=sys.stderr)
@@ -224,6 +266,6 @@ def scrape_yapikredi(url: str = YAPIKREDI_URL) -> List[UcretSatiri]:
 
 if __name__ == "__main__":
     veriler = scrape_yapikredi()
-    for v in veriler[:5]:
+    for v in veriler[:10]:
         print(v)
     print(f"Toplam {len(veriler)} satır bulundu.")
