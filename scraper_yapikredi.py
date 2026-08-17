@@ -172,6 +172,15 @@ def _extract_from_table(table, kategori: str) -> List[UcretSatiri]:
         col_azm_oran  = col_azm_oran  if col_azm_oran  != -1 else 4
         col_aciklama  = col_aciklama if col_aciklama != -1 else 5
 
+    # --- YENİ: eğer bulunan sütun başlığı 'eft'/'gönderim' içeriyorsa,
+    # satır hücresini başlıkla birleştirerek masraf oluşturmak için flag:
+    header_is_category = False
+    header_label_for_masraf = ""
+    if 0 <= col_masraf < len(header_texts_norm):
+        if "eft" in header_texts_norm[col_masraf] or "gönderim" in header_texts_norm[col_masraf]:
+            header_is_category = True
+            header_label_for_masraf = header_texts[col_masraf].strip()
+
     for row in data_rows:
         cells = row.find_all(["th", "td"])
         if not cells or len(cells) < 1:
@@ -182,8 +191,14 @@ def _extract_from_table(table, kategori: str) -> List[UcretSatiri]:
             return values[idx] if 0 <= idx < len(values) else ""
 
         masraf = get(col_masraf)
+        # Eğer sütun bir "EFT/Gönderim" başlığıysa, hücre değerini başlıkla birleştir
+        if header_is_category:
+            cell_val = masraf or ""
+            if cell_val.strip() and "eft" not in cell_val.lower():
+                masraf = f"{header_label_for_masraf} - {cell_val}".strip(" -")
+
+        # fallback: hücre boşsa satırdaki herhangi bir hücrede 'eft' ara
         if not masraf:
-            # alternatif: eğer masraf boşsa, satırda 'eft' geçen hücreyi bul
             for v in values:
                 if "eft" in v.lower():
                     masraf = v
@@ -266,6 +281,6 @@ def scrape_yapikredi(url: str = YAPIKREDI_URL) -> List[UcretSatiri]:
 
 if __name__ == "__main__":
     veriler = scrape_yapikredi()
-    for v in veriler[:10]:
+    for v in veriler[:20]:
         print(v)
     print(f"Toplam {len(veriler)} satır bulundu.")
