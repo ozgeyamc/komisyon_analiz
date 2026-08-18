@@ -2,8 +2,8 @@
 Yapı Kredi Bireysel Ürün ve Hizmet Ücretleri scraper.
 
 Sayfadaki tüm HTML tablolarını Playwright ile toplar,
-tablo başlıklarını analiz eder ve bütün ücret satırlarını
-standart UcretSatiri formatına dönüştürür.
+rowspan / colspan yapılarını çözer, tablo başlıklarını analiz eder
+ve bütün ücret satırlarını standart UcretSatiri formatına dönüştürür.
 """
 
 import re
@@ -25,9 +25,9 @@ USER_AGENT = (
 )
 
 
-# ---------------------------------------------------------
+# =========================================================
 # VERİ YAPISI
-# ---------------------------------------------------------
+# =========================================================
 
 @dataclass
 class UcretSatiri:
@@ -45,9 +45,9 @@ class ScraperError(Exception):
     pass
 
 
-# ---------------------------------------------------------
+# =========================================================
 # TARİH
-# ---------------------------------------------------------
+# =========================================================
 
 TURKCE_AYLAR = {
     "ocak": "01",
@@ -108,13 +108,16 @@ def parse_aciklama(raw_aciklama: str):
 
     if match:
         gun = match.group(1).zfill(2)
+
         ay = TURKCE_AYLAR.get(
             match.group(2).lower(),
             ""
         )
+
         yil = match.group(3)
 
         if ay:
+
             tarih = f"{gun}.{ay}.{yil}"
 
             temiz = DATE_PATTERN_TR.sub("", raw)
@@ -125,9 +128,9 @@ def parse_aciklama(raw_aciklama: str):
     return raw, ""
 
 
-# ---------------------------------------------------------
+# =========================================================
 # GENEL YARDIMCI FONKSİYONLAR
-# ---------------------------------------------------------
+# =========================================================
 
 def normalize(value: Optional[str]) -> str:
     """
@@ -170,10 +173,17 @@ def normalize_header(value: Optional[str]) -> str:
 
     value = value.replace("%", " ")
 
-    # Parantez içlerini temizle
-    value = re.sub(r"\([^)]*\)", " ", value)
+    value = re.sub(
+        r"\([^)]*\)",
+        " ",
+        value
+    )
 
-    value = re.sub(r"\s+", " ", value)
+    value = re.sub(
+        r"\s+",
+        " ",
+        value
+    )
 
     return value.strip()
 
@@ -188,7 +198,11 @@ def looks_like_amount(value: str) -> bool:
     if not value:
         return False
 
-    if value in {"-", "—", "–"}:
+    if value in {
+        "-",
+        "—",
+        "–",
+    }:
         return True
 
     if "tl" in value:
@@ -197,10 +211,6 @@ def looks_like_amount(value: str) -> bool:
     if "%" in value:
         return True
 
-    # 10
-    # 10,50
-    # 1.000
-    # 0,275
     if re.fullmatch(
         r"[-+]?\d+(?:[.,]\d+)?",
         value
@@ -210,7 +220,10 @@ def looks_like_amount(value: str) -> bool:
     return False
 
 
-def get_cell(row: List[str], index: int) -> str:
+def get_cell(
+    row: List[str],
+    index: int
+) -> str:
     """
     Güvenli hücre alma.
     """
@@ -224,9 +237,9 @@ def get_cell(row: List[str], index: int) -> str:
     return normalize(row[index])
 
 
-# ---------------------------------------------------------
+# =========================================================
 # HEADER ANALİZİ
-# ---------------------------------------------------------
+# =========================================================
 
 def find_col(
     headers: List[str],
@@ -234,10 +247,6 @@ def find_col(
 ) -> int:
     """
     Header içerisinde verilen kelimelerin tamamını arar.
-
-    ÖNEMLİ:
-    Bulamazsa -1 döner.
-    0 index'i özel olarak korunur.
     """
 
     for index, header in enumerate(headers):
@@ -277,9 +286,14 @@ def find_header_index(
 ) -> int:
     """
     Tablodaki gerçek header satırını bulur.
+
+    İlk 10 satırı kontrol eder.
     """
 
-    for index, row in enumerate(rows[:8]):
+    best_index = 0
+    best_score = 0
+
+    for index, row in enumerate(rows[:10]):
 
         text = " ".join(
             normalize_header(cell)
@@ -301,14 +315,18 @@ def find_header_index(
             "masraf",
             "ucret",
             "islem",
+            "komisyon",
         ]:
+
             if keyword in text:
                 score += 1
 
-        if score >= 2:
-            return index
+        if score > best_score:
 
-    return 0
+            best_score = score
+            best_index = index
+
+    return best_index
 
 
 def find_columns(
@@ -342,8 +360,8 @@ def find_columns(
         [
             ["masraf"],
             ["ucret"],
-            ["islem"],
             ["komisyon"],
+            ["islem"],
         ]
     )
 
@@ -399,6 +417,7 @@ def find_columns(
         headers,
         [
             ["aciklama"],
+            ["aciklamalar"],
         ]
     )
 
@@ -419,21 +438,22 @@ def find_columns(
     return result
 
 
-# ---------------------------------------------------------
+# =========================================================
 # MASRAF BULMA
-# ---------------------------------------------------------
+# =========================================================
 
 def find_best_masraf(
     row: List[str],
     column_map: Dict[str, int]
 ) -> str:
     """
-    Masraf kolonu bulunamazsa satırdaki en mantıklı
-    açıklayıcı hücreyi bulur.
+    Masraf kolonunu mümkün olduğunca güvenilir şekilde bulur.
     """
 
     masraf_index = column_map["masraf"]
 
+    # Gerçek masraf kolonu bulunduysa
+    # doğrudan onu kullan.
     if masraf_index >= 0:
 
         value = get_cell(
@@ -441,10 +461,10 @@ def find_best_masraf(
             masraf_index
         )
 
-        if value and not looks_like_amount(value):
+        if value:
             return value
 
-    # Kullanılmış kolonları çıkar
+    # Kullanılmış kolonlar
     used_indices = {
         index
         for index in column_map.values()
@@ -469,32 +489,37 @@ def find_best_masraf(
         header_like = normalize_header(cell)
 
         if header_like in {
+            "asgari",
             "asgari tutar",
             "asgari oran",
+            "azami",
             "azami tutar",
             "azami oran",
             "aciklama",
+            "aciklamalar",
             "guncelleme tarihi",
+            "guncelleme",
         }:
             continue
 
-        candidates.append(cell)
-
-    if candidates:
-        # En uzun anlamlı metni seç
-        return max(
-            candidates,
-            key=len
+        candidates.append(
+            (index, cell)
         )
 
-    return ""
+    if not candidates:
+        return ""
+
+    # En uzun metni seçmek yerine ilk anlamlı
+    # açıklayıcı hücreyi tercih ediyoruz.
+    return candidates[0][1]
 
 
-# ---------------------------------------------------------
+# =========================================================
 # PLAYWRIGHT İLE TABLOLARI TOPLA
-# ---------------------------------------------------------
+# =========================================================
 
 def collect_tables(url: str):
+
     from playwright.sync_api import sync_playwright
 
     print(
@@ -525,33 +550,36 @@ def collect_tables(url: str):
 
         try:
 
+            # =================================================
+            # SAYFAYI AÇ
+            # =================================================
+
             page.goto(
                 url,
                 timeout=120000,
                 wait_until="domcontentloaded"
             )
 
-            page.wait_for_timeout(2500)
+            page.wait_for_timeout(4000)
 
-            # -------------------------------------------------
+            # =================================================
             # COOKIE
-            # -------------------------------------------------
+            # =================================================
 
             cookie_buttons = [
                 "Tümünü Kabul Et",
                 "Tümünü Kabul",
                 "Kabul Et",
                 "Kabul",
-                "Kapat",
             ]
 
             for text in cookie_buttons:
 
                 try:
 
-                    locator = page.locator(
-                        f"button:has-text('{text}'), "
-                        f"a:has-text('{text}')"
+                    locator = page.get_by_text(
+                        text,
+                        exact=True
                     ).first
 
                     if locator.is_visible(
@@ -559,7 +587,7 @@ def collect_tables(url: str):
                     ):
 
                         locator.click(
-                            timeout=2000
+                            timeout=3000
                         )
 
                         print(
@@ -568,72 +596,201 @@ def collect_tables(url: str):
                             file=sys.stderr
                         )
 
-                        page.wait_for_timeout(500)
+                        page.wait_for_timeout(1000)
+
+                        break
 
                 except Exception:
                     pass
 
-            # -------------------------------------------------
-            # ARIA ACCORDION
-            # -------------------------------------------------
+            # =================================================
+            # TÜM ACCORDION'LARI AÇ
+            # =================================================
 
             print(
                 "[yapikredi] Accordion'lar açılıyor...",
                 file=sys.stderr
             )
 
-            for _ in range(3):
+            accordion_selectors = [
 
-                try:
+                "[aria-expanded='false']",
 
-                    elements = page.locator(
-                        "[aria-expanded='false']"
-                    )
+                "button[data-toggle='collapse']",
 
-                    count = elements.count()
+                "a[data-toggle='collapse']",
 
-                    if count == 0:
-                        break
+                "[data-bs-toggle='collapse']",
 
-                    for i in range(count):
+                ".accordion-title",
 
-                        try:
+                ".accordionItem-title",
 
-                            item = elements.nth(i)
+                ".accordion-header",
 
-                            if item.is_visible(
-                                timeout=300
-                            ):
+                ".collapsible-header",
 
-                                item.click(
-                                    timeout=1500
+                ".js-accordion-title",
+
+            ]
+
+            for round_no in range(6):
+
+                opened = 0
+
+                for selector in accordion_selectors:
+
+                    try:
+
+                        elements = page.locator(
+                            selector
+                        )
+
+                        count = elements.count()
+
+                        for i in range(count):
+
+                            try:
+
+                                element = elements.nth(i)
+
+                                if not element.is_visible(
+                                    timeout=200
+                                ):
+                                    continue
+
+                                aria_expanded = (
+                                    element.get_attribute(
+                                        "aria-expanded"
+                                    )
                                 )
+
+                                if (
+                                    aria_expanded == "true"
+                                ):
+                                    continue
+
+                                element.scroll_into_view_if_needed(
+                                    timeout=1000
+                                )
+
+                                element.click(
+                                    timeout=2000,
+                                    force=True
+                                )
+
+                                opened += 1
 
                                 page.wait_for_timeout(
                                     150
                                 )
 
-                        except Exception:
-                            pass
+                            except Exception:
+                                continue
 
-                except Exception:
+                    except Exception:
+                        continue
+
+                if opened == 0:
                     break
 
-            # -------------------------------------------------
-            # BİLİNEN ACCORDION'LAR
-            # -------------------------------------------------
+                print(
+                    f"[yapikredi] "
+                    f"Accordion turu "
+                    f"{round_no + 1}: "
+                    f"{opened} adet açıldı.",
+                    file=sys.stderr
+                )
 
-            selectors = [
-                ".accordion-title",
-                ".accordionItem-title",
-                ".collapsible-header",
-                "a[data-toggle='collapse']",
-                ".js-accordion-title",
-                "h2.title",
-                "h3.title",
-            ]
+                page.wait_for_timeout(500)
 
-            for selector in selectors:
+            # =================================================
+            # LAZY LOAD İÇİN PARÇALI SCROLL
+            # =================================================
+
+            print(
+                "[yapikredi] Sayfa taranıyor...",
+                file=sys.stderr
+            )
+
+            previous_height = 0
+            stable_count = 0
+
+            for _ in range(120):
+
+                current_height = page.evaluate(
+                    "document.body.scrollHeight"
+                )
+
+                page.evaluate(
+                    """
+                    window.scrollBy(
+                        0,
+                        Math.max(
+                            window.innerHeight * 0.8,
+                            600
+                        )
+                    );
+                    """
+                )
+
+                page.wait_for_timeout(300)
+
+                new_height = page.evaluate(
+                    "document.body.scrollHeight"
+                )
+
+                at_bottom = page.evaluate(
+                    """
+                    () =>
+                        window.innerHeight +
+                        window.scrollY >=
+                        document.body.scrollHeight - 50
+                    """
+                )
+
+                if (
+                    new_height == previous_height
+                    and at_bottom
+                ):
+
+                    stable_count += 1
+
+                else:
+
+                    stable_count = 0
+
+                previous_height = new_height
+
+                # Sayfa aşağıda yeni içerik üretmiyorsa
+                # 3 kez üst üste bekleyip çık.
+                if stable_count >= 3:
+                    break
+
+            # =================================================
+            # EN ALTA GİT
+            # =================================================
+
+            page.evaluate(
+                """
+                window.scrollTo(
+                    0,
+                    document.body.scrollHeight
+                );
+                """
+            )
+
+            page.wait_for_timeout(1500)
+
+            # =================================================
+            # TEKRAR ACCORDION KONTROLÜ
+            # =================================================
+
+            for selector in [
+                "[aria-expanded='false']",
+                "[data-bs-toggle='collapse']",
+                "[data-toggle='collapse']",
+            ]:
 
                 try:
 
@@ -649,17 +806,19 @@ def collect_tables(url: str):
 
                             element = elements.nth(i)
 
-                            if element.is_visible(
-                                timeout=300
+                            if not element.is_visible(
+                                timeout=200
                             ):
+                                continue
 
-                                element.click(
-                                    timeout=1000
-                                )
+                            element.click(
+                                timeout=1500,
+                                force=True
+                            )
 
-                                page.wait_for_timeout(
-                                    150
-                                )
+                            page.wait_for_timeout(
+                                100
+                            )
 
                         except Exception:
                             pass
@@ -667,35 +826,9 @@ def collect_tables(url: str):
                 except Exception:
                     pass
 
-            # -------------------------------------------------
-            # TAM SAYFA SCROLL
-            # -------------------------------------------------
-
-            print(
-                "[yapikredi] Sayfa taranıyor...",
-                file=sys.stderr
-            )
-
-            last_height = 0
-
-            for _ in range(40):
-
-                height = page.evaluate(
-                    "document.body.scrollHeight"
-                )
-
-                if height == last_height:
-                    break
-
-                last_height = height
-
-                page.evaluate(
-                    "window.scrollTo("
-                    "0, document.body.scrollHeight"
-                    ")"
-                )
-
-                page.wait_for_timeout(500)
+            # =================================================
+            # BAŞA DÖN
+            # =================================================
 
             page.evaluate(
                 "window.scrollTo(0, 0)"
@@ -703,9 +836,9 @@ def collect_tables(url: str):
 
             page.wait_for_timeout(1000)
 
-            # -------------------------------------------------
-            # TABLE + KATEGORİ
-            # -------------------------------------------------
+            # =================================================
+            # JAVASCRIPT TABLO TOPLAMA
+            # =================================================
 
             javascript = r"""
             () => {
@@ -715,117 +848,281 @@ def collect_tables(url: str):
                     return (value || "")
                         .replace(/\u00a0/g, " ")
                         .replace(/\u200b/g, "")
+                        .replace(/\r/g, " ")
+                        .replace(/\n/g, " ")
                         .replace(/\s+/g, " ")
                         .trim();
                 }
 
-                function getRows(table) {
 
-                    const rows = [];
+                // =================================================
+                // ROWSPAN / COLSPAN DESTEKLİ TABLO OKUYUCU
+                // =================================================
+
+                function getRows(table) {
 
                     const trs =
                         Array.from(
-                            table.querySelectorAll("tr")
+                            table.querySelectorAll(
+                                "tr"
+                            )
                         );
 
-                    for (const tr of trs) {
+                    const matrix = [];
+
+                    const pending = {};
+
+                    for (
+                        let rowIndex = 0;
+                        rowIndex < trs.length;
+                        rowIndex++
+                    ) {
+
+                        const tr = trs[rowIndex];
+
+                        // Nested table içindeki tr'leri
+                        // dış tabloya dahil etme.
+                        if (
+                            tr.closest("table") !== table
+                        ) {
+                            continue;
+                        }
 
                         const cells =
                             Array.from(
-                                tr.querySelectorAll(
-                                    "th, td"
-                                )
+                                tr.children
+                            ).filter(
+                                element =>
+                                    element.tagName === "TD" ||
+                                    element.tagName === "TH"
                             );
 
-                        if (!cells.length)
+                        if (!cells.length) {
                             continue;
+                        }
 
-                        rows.push(
-                            cells.map(
-                                cell =>
-                                    clean(
-                                        cell.innerText
-                                    )
-                            )
-                        );
+                        if (!matrix[rowIndex]) {
+                            matrix[rowIndex] = [];
+                        }
+
+                        let colIndex = 0;
+
+                        for (
+                            const cell of cells
+                        ) {
+
+                            // Önceden rowspan ile
+                            // doldurulmuş kolonları geç.
+                            while (
+                                pending[
+                                    `${rowIndex}:${colIndex}`
+                                ]
+                            ) {
+
+                                colIndex++;
+                            }
+
+                            const text = clean(
+                                cell.innerText
+                            );
+
+                            const colspan = Math.max(
+                                parseInt(
+                                    cell.getAttribute(
+                                        "colspan"
+                                    ) || "1",
+                                    10
+                                ),
+                                1
+                            );
+
+                            const rowspan = Math.max(
+                                parseInt(
+                                    cell.getAttribute(
+                                        "rowspan"
+                                    ) || "1",
+                                    10
+                                ),
+                                1
+                            );
+
+                            for (
+                                let r = 0;
+                                r < rowspan;
+                                r++
+                            ) {
+
+                                for (
+                                    let c = 0;
+                                    c < colspan;
+                                    c++
+                                ) {
+
+                                    const targetRow =
+                                        rowIndex + r;
+
+                                    const targetCol =
+                                        colIndex + c;
+
+                                    if (
+                                        !matrix[targetRow]
+                                    ) {
+                                        matrix[targetRow] = [];
+                                    }
+
+                                    matrix[targetRow][
+                                        targetCol
+                                    ] = text;
+
+                                    if (r > 0) {
+
+                                        pending[
+                                            `${targetRow}:${targetCol}`
+                                        ] = true;
+                                    }
+                                }
+                            }
+
+                            colIndex += colspan;
+                        }
                     }
 
-                    return rows;
+                    return matrix
+                        .map(
+                            row =>
+                                row.map(
+                                    cell =>
+                                        clean(
+                                            cell || ""
+                                        )
+                                )
+                        )
+                        .filter(
+                            row =>
+                                row.some(
+                                    cell =>
+                                        cell !== ""
+                                )
+                        );
                 }
+
+
+                // =================================================
+                // KATEGORİ BUL
+                // =================================================
 
                 function getCategory(table) {
 
                     let current = table;
 
-                    for (let level = 0;
-                         level < 8;
-                         level++) {
+                    for (
+                        let level = 0;
+                        level < 10;
+                        level++
+                    ) {
 
-                        if (!current.parentElement)
+                        if (
+                            !current.parentElement
+                        ) {
                             break;
+                        }
 
                         current =
                             current.parentElement;
 
-                        const headings =
+                        const candidates =
                             current.querySelectorAll(
-                                "h1,h2,h3,h4,h5,h6,"
-                                + "button,"
-                                + ".accordion-title,"
-                                + ".title"
+                                ":scope > h1, " +
+                                ":scope > h2, " +
+                                ":scope > h3, " +
+                                ":scope > h4, " +
+                                ":scope > h5, " +
+                                ":scope > h6, " +
+                                ":scope > button, " +
+                                ":scope > .title, " +
+                                ":scope > .accordion-title, " +
+                                ":scope > .accordionItem-title"
                             );
 
                         for (
-                            const heading
-                            of headings
+                            const element
+                            of candidates
                         ) {
 
-                            const text =
-                                clean(
-                                    heading.innerText
+                            const text = clean(
+                                element.innerText
+                            );
+
+                            if (
+                                !text ||
+                                text.length > 150
+                            ) {
+                                continue;
+                            }
+
+                            const lower =
+                                text.toLocaleLowerCase(
+                                    "tr-TR"
                                 );
 
                             if (
-                                text &&
-                                text.length < 150
+                                lower.includes(
+                                    "asgari tutar"
+                                ) ||
+                                lower.includes(
+                                    "azami tutar"
+                                )
                             ) {
-
-                                const lower =
-                                    text.toLowerCase();
-
-                                if (
-                                    !lower.includes(
-                                        "asgari tutar"
-                                    ) &&
-                                    !lower.includes(
-                                        "azami tutar"
-                                    )
-                                ) {
-                                    return text;
-                                }
+                                continue;
                             }
+
+                            return text;
                         }
                     }
 
                     return "Yapı Kredi";
                 }
 
-                const tables =
+
+                // =================================================
+                // TABLE'LARI BUL
+                // =================================================
+
+                const allTables =
                     Array.from(
                         document.querySelectorAll(
                             "table"
                         )
                     );
 
+                /*
+                 * Nested table'ları ayrıca almıyoruz.
+                 */
+                const tables =
+                    allTables.filter(
+                        table =>
+                            !table.parentElement.closest(
+                                "table"
+                            )
+                    );
+
+
+                // =================================================
+                // SONUÇ
+                // =================================================
+
                 return tables.map(
                     (table, index) => {
 
                         return {
                             index: index,
+
                             kategori:
                                 getCategory(table),
+
                             rows:
-                                getRows(table)
+                                getRows(table),
+
                         };
 
                     }
@@ -843,6 +1140,27 @@ def collect_tables(url: str):
                 file=sys.stderr
             )
 
+            # =================================================
+            # DEBUG SATIR SAYISI
+            # =================================================
+
+            total_rows = sum(
+                len(
+                    table.get(
+                        "rows",
+                        []
+                    )
+                )
+                for table in tables
+            )
+
+            print(
+                f"[yapikredi] "
+                f"Toplam tablo satırı: "
+                f"{total_rows}",
+                file=sys.stderr
+            )
+
             return tables
 
         finally:
@@ -851,9 +1169,9 @@ def collect_tables(url: str):
             browser.close()
 
 
-# ---------------------------------------------------------
+# =========================================================
 # TABLOLARI PARSE ET
-# ---------------------------------------------------------
+# =========================================================
 
 def parse_tables(
     tables
@@ -861,9 +1179,9 @@ def parse_tables(
 
     sonuc = []
 
-    # Daha detaylı duplicate anahtarı
     seen: Set[
         Tuple[
+            str,
             str,
             str,
             str,
@@ -899,22 +1217,31 @@ def parse_tables(
         if not kategori:
             kategori = "Yapı Kredi"
 
-        # -------------------------------------------------
+        # =================================================
         # HEADER
-        # -------------------------------------------------
+        # =================================================
 
         header_index = find_header_index(
             rows
         )
 
+        if (
+            header_index < 0
+            or header_index >= len(rows)
+        ):
+            atlanan_tablo += 1
+            continue
+
         header = rows[header_index]
 
-        # Gerçek header değilse tabloyu kaybetmeden
-        # yine de kontrol ediyoruz.
         header_text = " ".join(
             normalize_header(x)
             for x in header
         )
+
+        # =================================================
+        # HEADER KONTROL
+        # =================================================
 
         if not any(
             keyword in header_text
@@ -930,6 +1257,7 @@ def parse_tables(
                 "masraf",
                 "ucret",
                 "islem",
+                "komisyon",
             ]
         ):
 
@@ -940,11 +1268,39 @@ def parse_tables(
             header
         )
 
-        # -------------------------------------------------
-        # DATA
-        # -------------------------------------------------
+        # =================================================
+        # HEADER YOKSA / SADE TABLOLAR
+        # =================================================
 
-        for row in rows[header_index + 1:]:
+        # Masraf kolonu yoksa bazı tabloların
+        # yine de alınmasına izin veriyoruz.
+        has_value_columns = any(
+            column_map[key] >= 0
+            for key in [
+                "asgari_tutar",
+                "asgari_oran",
+                "azami_tutar",
+                "azami_oran",
+                "aciklama",
+                "tarih",
+            ]
+        )
+
+        if (
+            column_map["masraf"] == -1
+            and not has_value_columns
+        ):
+
+            atlanan_tablo += 1
+            continue
+
+        # =================================================
+        # DATA SATIRLARI
+        # =================================================
+
+        for row in rows[
+            header_index + 1:
+        ]:
 
             if not row:
                 continue
@@ -957,7 +1313,10 @@ def parse_tables(
             if not any(row):
                 continue
 
-            # Header tekrar etmişse atla
+            # =================================================
+            # TEKRAR EDEN HEADER
+            # =================================================
+
             row_text = " ".join(
                 normalize_header(x)
                 for x in row
@@ -966,13 +1325,16 @@ def parse_tables(
             if (
                 "asgari" in row_text
                 and "azami" in row_text
-                and "tutar" in row_text
+                and (
+                    "tutar" in row_text
+                    or "oran" in row_text
+                )
             ):
                 continue
 
-            # -------------------------------------------------
+            # =================================================
             # MASRAF
-            # -------------------------------------------------
+            # =================================================
 
             masraf = find_best_masraf(
                 row,
@@ -982,62 +1344,78 @@ def parse_tables(
             if not masraf:
                 continue
 
-            # -------------------------------------------------
-            # ÜCRETLER
-            # -------------------------------------------------
+            # =================================================
+            # ÜCRET KOLONLARI
+            # =================================================
 
             asgari_tutar = get_cell(
                 row,
-                column_map["asgari_tutar"]
+                column_map[
+                    "asgari_tutar"
+                ]
             )
 
             asgari_oran = get_cell(
                 row,
-                column_map["asgari_oran"]
+                column_map[
+                    "asgari_oran"
+                ]
             )
 
             azami_tutar = get_cell(
                 row,
-                column_map["azami_tutar"]
+                column_map[
+                    "azami_tutar"
+                ]
             )
 
             azami_oran = get_cell(
                 row,
-                column_map["azami_oran"]
+                column_map[
+                    "azami_oran"
+                ]
             )
 
-            # -------------------------------------------------
+            # =================================================
             # AÇIKLAMA
-            # -------------------------------------------------
+            # =================================================
 
             aciklama_raw = get_cell(
                 row,
-                column_map["aciklama"]
+                column_map[
+                    "aciklama"
+                ]
             )
 
-            aciklama, tarih = parse_aciklama(
-                aciklama_raw
+            aciklama, tarih = (
+                parse_aciklama(
+                    aciklama_raw
+                )
             )
 
-            # -------------------------------------------------
-            # TARİH
-            # -------------------------------------------------
+            # =================================================
+            # TABLO TARİHİ
+            # =================================================
 
             tablo_tarihi = get_cell(
                 row,
-                column_map["tarih"]
+                column_map[
+                    "tarih"
+                ]
             )
 
             if tablo_tarihi:
                 tarih = tablo_tarihi
 
-            # -------------------------------------------------
+            # =================================================
             # AÇIKLAMA KOLONU YOKSA
-            # -------------------------------------------------
+            # =================================================
 
             if (
                 not aciklama
-                and column_map["aciklama"] == -1
+                and column_map[
+                    "aciklama"
+                ] == -1
             ):
 
                 used = {
@@ -1056,7 +1434,9 @@ def parse_tables(
                     if not cell:
                         continue
 
-                    if looks_like_amount(cell):
+                    if looks_like_amount(
+                        cell
+                    ):
                         continue
 
                     extra.append(cell)
@@ -1067,18 +1447,19 @@ def parse_tables(
                         extra
                     )
 
-                    aciklama, extra_date = (
-                        parse_aciklama(
-                            aciklama
-                        )
+                    (
+                        aciklama,
+                        extra_date
+                    ) = parse_aciklama(
+                        aciklama
                     )
 
                     if not tarih:
                         tarih = extra_date
 
-            # -------------------------------------------------
-            # SADECE TAMAMEN BOŞ ÜCRET SATIRIYSA ATLA
-            # -------------------------------------------------
+            # =================================================
+            # SATIRDA HİÇBİR ÜCRET BİLGİSİ YOKSA ATLA
+            # =================================================
 
             if not any([
                 asgari_tutar,
@@ -1090,9 +1471,9 @@ def parse_tables(
             ]):
                 continue
 
-            # -------------------------------------------------
+            # =================================================
             # DUPLICATE
-            # -------------------------------------------------
+            # =================================================
 
             key = (
                 kategori,
@@ -1102,12 +1483,17 @@ def parse_tables(
                 azami_tutar,
                 azami_oran,
                 aciklama,
+                tarih,
             )
 
             if key in seen:
                 continue
 
             seen.add(key)
+
+            # =================================================
+            # SONUCA EKLE
+            # =================================================
 
             sonuc.append(
                 UcretSatiri(
@@ -1121,6 +1507,10 @@ def parse_tables(
                     site_guncelleme_tarihi=tarih,
                 )
             )
+
+    # =========================================================
+    # LOG
+    # =========================================================
 
     print(
         f"[yapikredi] İşlenen tablo: "
@@ -1143,19 +1533,23 @@ def parse_tables(
     return sonuc
 
 
-# ---------------------------------------------------------
+# =========================================================
 # ANA FONKSİYON
-# ---------------------------------------------------------
+# =========================================================
 
 def scrape_yapikredi(
     url: str = YAPIKREDI_URL
 ) -> List[UcretSatiri]:
 
-    tables = collect_tables(url)
+    tables = collect_tables(
+        url
+    )
 
     if not tables:
+
         raise ScraperError(
-            "Yapı Kredi sayfasından tablo alınamadı."
+            "Yapı Kredi sayfasından "
+            "tablo alınamadı."
         )
 
     sonuc = parse_tables(
@@ -1163,17 +1557,18 @@ def scrape_yapikredi(
     )
 
     if not sonuc:
+
         raise ScraperError(
-            "Tablolar bulundu fakat ücret satırı "
-            "oluşturulamadı."
+            "Tablolar bulundu fakat "
+            "ücret satırı oluşturulamadı."
         )
 
     return sonuc
 
 
-# ---------------------------------------------------------
+# =========================================================
 # TEST
-# ---------------------------------------------------------
+# =========================================================
 
 if __name__ == "__main__":
 
@@ -1187,7 +1582,8 @@ if __name__ == "__main__":
         print("=" * 70)
 
         print(
-            f"Toplam çekilen ücret: {len(sonuc)}"
+            f"Toplam çekilen ücret: "
+            f"{len(sonuc)}"
         )
 
         print()
@@ -1238,7 +1634,8 @@ if __name__ == "__main__":
     except Exception as exc:
 
         print(
-            f"[yapikredi][HATA] {exc}",
+            f"[yapikredi][HATA] "
+            f"{exc}",
             file=sys.stderr
         )
 
