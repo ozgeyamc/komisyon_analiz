@@ -1,12 +1,13 @@
 """
 Yapı Kredi Ürün ve Hizmet Ücretleri scraper.
 
-Amaç:
-- Sayfadaki ücret tablolarını Playwright ile toplamak
-- En yakın H2 başlığını kategori olarak kullanmak
-- Standart 7 kolonlu ücret tablolarını güvenilir biçimde parse etmek
-- İlgisiz tabloları (ör. kredi ödeme planı) dışarıda bırakmak
-- Sonucu main.py / update_excel.py ile uyumlu UcretSatiri listesi olarak döndürmek
+- Playwright ile ücret sayfasındaki tüm tabloları toplar.
+- Ana H2 başlığını kategori olarak kullanır.
+- Accordion/alt başlık + tablo başlığı + satır adını MASRAF alanında birleştirir.
+- FAST / EFT / Havale / SWIFT gibi başlıkların Excel filtresinde kaybolmasını engeller.
+- Gerçek veri satırlarını yanlışlıkla tekrar header sanıp atlamaz.
+- Aynı isimli ücretleri farklı alt kategorilerde yanlışlıkla duplicate saymaz.
+- main.py / update_excel.py ile uyumlu UcretSatiri listesi döndürür.
 """
 
 import re
@@ -14,6 +15,8 @@ import sys
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Set, Tuple
 
+
+SCRAPER_VERSION = "2026-08-18-v8-complete-fee-hierarchy"
 
 YAPIKREDI_URL = (
     "https://www.yapikredi.com.tr/"
@@ -74,10 +77,14 @@ DATE_PATTERN_TR = re.compile(
 )
 
 
+# =========================================================
+# METİN YARDIMCILARI
+# =========================================================
+
+
 def normalize(value: Optional[str]) -> str:
     if value is None:
         return ""
-
     value = str(value)
     value = value.replace("\xa0", " ")
     value = value.replace("\u200b", "")
@@ -89,7 +96,6 @@ def normalize(value: Optional[str]) -> str:
 
 def normalize_header(value: Optional[str]) -> str:
     value = normalize(value).lower()
-
     replacements = {
         "ı": "i",
         "ğ": "g",
@@ -98,19 +104,21 @@ def normalize_header(value: Optional[str]) -> str:
         "ö": "o",
         "ç": "c",
     }
-
     for old, new in replacements.items():
         value = value.replace(old, new)
-
     value = value.replace("%", " ")
     value = re.sub(r"\([^)]*\)", " ", value)
     value = re.sub(r"\s+", " ", value)
     return value.strip()
 
 
+def identity(value: Optional[str]) -> str:
+    """Duplicate / başlık karşılaştırması için daha hafif normalize."""
+    return normalize_header(value)
+
+
 def parse_aciklama(raw_aciklama: str) -> Tuple[str, str]:
     raw = normalize(raw_aciklama)
-
     if not raw:
         return "", ""
 
@@ -125,7 +133,6 @@ def parse_aciklama(raw_aciklama: str) -> Tuple[str, str]:
         gun = match.group(1).zfill(2)
         ay = TURKCE_AYLAR.get(match.group(2).lower(), "")
         yil = match.group(3)
-
         if ay:
             tarih = f"{gun}.{ay}.{yil}"
             temiz = normalize(DATE_PATTERN_TR.sub("", raw)).strip(" .:-")
@@ -140,6 +147,11 @@ def get_cell(row: List[str], index: int) -> str:
     return normalize(row[index])
 
 
+# =========================================================
+# HEADER / KOLON TESPİTİ
+# =========================================================
+
+
 def find_col(headers: List[str], keywords: List[str]) -> int:
     for index, header in enumerate(headers):
         if all(keyword in header for keyword in keywords):
@@ -148,6 +160,12 @@ def find_col(headers: List[str], keywords: List[str]) -> int:
 
 
 def header_score(row: List[str]) -> int:
+    """
+    Yalnızca HEADER hücrelerinin kendisini puanlar.
+    Data satırındaki uzun açıklamada geçen 'asgari tutar' vb.
+    ifadeler yüzünden satırın header sayılmasını önlemek için bu fonksiyon
+    sadece find_header_index sırasında kullanılır.
+    """
     headers = [normalize_header(cell) for cell in row]
 
     tests = [
@@ -164,7 +182,6 @@ def header_score(row: List[str]) -> int:
     for keywords in tests:
         if any(all(k in h for k in keywords) for h in headers):
             score += 1
-
     return score
 
 
@@ -178,9 +195,7 @@ def find_header_index(rows: List[List[str]]) -> int:
             best_index = index
             best_score = score
 
-    # Gerçek Yapı Kredi ücret tablolarında standart başlıklardan
-    # birden fazlası bulunur. Düşük skorlu tabloları ücret tablosu
-    # kabul etmiyoruz.
+    # Standart ücret tablosu olduğunu anlamak için en az 3 header sinyali.
     if best_score < 3:
         return -1
 
@@ -191,28 +206,19 @@ def find_columns(header_row: List[str]) -> Dict[str, int]:
     headers = [normalize_header(h) for h in header_row]
 
     result = {
-        "masraf": -1,
+        "masraf": 0 if header_row else -1,
         "asgari_tutar": find_col(headers, ["asgari", "tutar"]),
         "asgari_oran": find_col(headers, ["asgari", "oran"]),
         "azami_tutar": find_col(headers, ["azami", "tutar"]),
         "azami_oran": find_col(headers, ["azami", "oran"]),
         "aciklama": find_col(headers, ["aciklama"]),
-        "tarih": -1,
+        "tarih": find_col(headers, ["guncelleme", "tarihi"]),
     }
 
-    result["tarih"] = find_col(headers, ["guncelleme", "tarihi"])
     if result["tarih"] == -1:
         result["tarih"] = find_col(headers, ["guncellenme", "tarihi"])
 
-    # İlk kolonun başlığı çoğu tabloda "Masraf" değil;
-    # ör. "FAST Gönderim", "EFT Gönderimi", "Para Yatırma".
-    # Bu nedenle ücret tablosu doğrulandıktan sonra ilk kolonu
-    # masraf/işlem adı olarak kullanıyoruz.
-    if header_row:
-        result["masraf"] = 0
-
-    # Yapı Kredi'nin standart ücret tabloları 7 kolonlu.
-    # Header metninde ufak bir değişiklik olursa pozisyonel fallback.
+    # Yapı Kredi standart ücret tablosunda kolonlar bu sırada.
     if len(header_row) >= 7:
         fallbacks = {
             "masraf": 0,
@@ -223,7 +229,6 @@ def find_columns(header_row: List[str]) -> Dict[str, int]:
             "aciklama": 5,
             "tarih": 6,
         }
-
         for key, fallback_index in fallbacks.items():
             if result[key] == -1:
                 result[key] = fallback_index
@@ -231,14 +236,111 @@ def find_columns(header_row: List[str]) -> Dict[str, int]:
     return result
 
 
+def is_repeated_header(row: List[str], header: List[str]) -> bool:
+    """
+    Gerçek veri satırlarını yanlışlıkla header diye silmez.
+
+    Eski mantık header_score(row) >= 3 idi. Bu, örneğin YP Teminat
+    Mektubu açıklamasında 'azami oran' ve 'asgari tutar' geçtiği için
+    gerçek veri satırını atabiliyordu.
+    """
+    row_norm = [identity(x) for x in row]
+    header_norm = [identity(x) for x in header]
+
+    # Birebir aynı satırsa kesin header tekrarı.
+    if row_norm == header_norm:
+        return True
+
+    exact_header_cells = {
+        "asgari tutar",
+        "asgari oran",
+        "azami tutar",
+        "azami oran",
+        "aciklama",
+        "guncelleme tarihi",
+        "guncellenme tarihi",
+    }
+
+    exact_matches = sum(1 for cell in row_norm if cell in exact_header_cells)
+    return exact_matches >= 4
+
+
+# =========================================================
+# MASRAF ADI OLUŞTURMA
+# =========================================================
+
+
+def _add_unique_component(parts: List[str], value: str) -> None:
+    value = normalize(value).strip(" -–—|")
+    if not value:
+        return
+
+    value_id = identity(value)
+    if not value_id:
+        return
+
+    # Aynı başlığı iki kez ekleme.
+    for existing in parts:
+        existing_id = identity(existing)
+        if value_id == existing_id:
+            return
+
+        # Örn. alt başlık 'EFT', tablo başlığı 'EFT Gönderimi'.
+        # Daha açıklayıcı olan uzun metin zaten EFT içeriyorsa kısa olanı
+        # ayrıca eklemek zorunda değiliz.
+        if value_id in existing_id and len(value_id) < len(existing_id):
+            return
+
+    # Yeni parça, var olan kısa parçayı kapsıyorsa kısa parçayı çıkar.
+    parts[:] = [
+        existing
+        for existing in parts
+        if not (
+            identity(existing) in value_id
+            and len(identity(existing)) < len(value_id)
+        )
+    ]
+
+    parts.append(value)
+
+
+def build_masraf_name(
+    alt_kategori: str,
+    tablo_basligi: str,
+    satir_masrafi: str,
+) -> str:
+    """
+    Excel'deki MASRAF alanına anlamlı hiyerarşi koyar.
+
+    Örnekler:
+      FAST Gönderim - İnternet/Mobil – 0 - 8.300 TL
+      EFT Gönderimi - Geç - İnternet/Mobil – 0 - 8.300 TL
+      Havale Gönderimi - ATM – 0 - 8.300 TL
+      Uluslararası Fon Transferi ve Mesajlaşma Ücreti / SWIFT -
+          Döviz Havale Gönderimi - Şubeden - Aynı Gün Valörlü
+    """
+    parts: List[str] = []
+
+    _add_unique_component(parts, alt_kategori)
+    _add_unique_component(parts, tablo_basligi)
+    _add_unique_component(parts, satir_masrafi)
+
+    return " - ".join(parts)
+
+
+# =========================================================
+# PLAYWRIGHT / DOM
+# =========================================================
+
+
 def collect_tables(url: str):
     from playwright.sync_api import sync_playwright
 
+    print(f"[yapikredi] SÜRÜM: {SCRAPER_VERSION}", file=sys.stderr)
     print(f"[yapikredi] Sayfa açılıyor: {url}", file=sys.stderr)
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-
         context = browser.new_context(
             user_agent=USER_AGENT,
             viewport={"width": 1440, "height": 1080},
@@ -247,15 +349,10 @@ def collect_tables(url: str):
                 "Accept-Language": "tr-TR,tr;q=0.9,en;q=0.8",
             },
         )
-
         page = context.new_page()
 
         try:
-            page.goto(
-                url,
-                timeout=120000,
-                wait_until="domcontentloaded",
-            )
+            page.goto(url, timeout=120000, wait_until="domcontentloaded")
             page.wait_for_timeout(3500)
 
             # Cookie
@@ -280,9 +377,7 @@ def collect_tables(url: str):
 
             print("[yapikredi] Accordion'lar açılıyor...", file=sys.stderr)
 
-            # Sadece kapalı aria-expanded elemanlarını aç.
-            # Genel .accordion container'larını force-click etmiyoruz;
-            # aksi halde daha önce açılan bölümler yeniden kapanabiliyor.
+            # Sadece gerçekten kapalı accordion kontrollerini aç.
             for round_no in range(10):
                 opened = 0
                 elements = page.locator("[aria-expanded='false']")
@@ -293,7 +388,6 @@ def collect_tables(url: str):
                         element = elements.nth(i)
                         if not element.is_visible(timeout=150):
                             continue
-
                         element.scroll_into_view_if_needed(timeout=1000)
                         element.click(timeout=1500, force=True)
                         opened += 1
@@ -313,7 +407,7 @@ def collect_tables(url: str):
 
             print("[yapikredi] Sayfa taranıyor...", file=sys.stderr)
 
-            # Lazy load için kademeli scroll
+            # Lazy load için kademeli scroll.
             stable = 0
             previous_height = 0
 
@@ -335,7 +429,6 @@ def collect_tables(url: str):
                     stable = 0
 
                 previous_height = height
-
                 if stable >= 5:
                     break
 
@@ -367,8 +460,6 @@ def collect_tables(url: str):
                 }
 
                 function getCategory(table) {
-                    // Sayfadaki gerçek ana ücret kategorileri H2 olarak geliyor:
-                    // Para Aktarma, Mevduat Hesapları, ATM, Diğer, Kobi Kredileri...
                     const h2 = nearestPreviousHeading(table, "h2");
                     if (h2) {
                         const text = clean(h2.innerText);
@@ -385,8 +476,9 @@ def collect_tables(url: str):
                 }
 
                 function getSubcategory(table) {
-                    // Debug amaçlı: tabloya en yakın buton / H5 başlığı.
-                    const xpath = "preceding::*[self::h5 or self::button][1]";
+                    // Tabloya en yakın önceki accordion başlığı / buton / h5.
+                    const xpath =
+                        "preceding::*[self::h5 or self::h4 or self::button][1]";
                     const result = document.evaluate(
                         xpath,
                         table,
@@ -399,27 +491,74 @@ def collect_tables(url: str):
                 }
 
                 function getRows(table) {
-                    const trs = Array.from(table.querySelectorAll(":scope > thead > tr, :scope > tbody > tr, :scope > tr"));
-                    const rows = [];
+                    const trs = Array.from(table.querySelectorAll("tr"))
+                        .filter(tr => tr.closest("table") === table);
+
+                    const matrix = [];
+                    const spans = new Map();
+                    let rowIndex = 0;
 
                     for (const tr of trs) {
                         const cells = Array.from(tr.children).filter(
                             el => el.tagName === "TD" || el.tagName === "TH"
                         );
-
                         if (!cells.length) continue;
 
-                        rows.push(
-                            cells.map(cell => clean(cell.innerText))
-                        );
+                        if (!matrix[rowIndex]) matrix[rowIndex] = [];
+                        let colIndex = 0;
+
+                        function fillPending() {
+                            while (spans.has(`${rowIndex}:${colIndex}`)) {
+                                const val = spans.get(`${rowIndex}:${colIndex}`);
+                                matrix[rowIndex][colIndex] = val;
+                                colIndex++;
+                            }
+                        }
+
+                        fillPending();
+
+                        for (const cell of cells) {
+                            fillPending();
+
+                            const text = clean(cell.innerText);
+                            const rowspan = Math.max(
+                                parseInt(cell.getAttribute("rowspan") || "1", 10),
+                                1
+                            );
+                            const colspan = Math.max(
+                                parseInt(cell.getAttribute("colspan") || "1", 10),
+                                1
+                            );
+
+                            for (let c = 0; c < colspan; c++) {
+                                matrix[rowIndex][colIndex + c] = text;
+                            }
+
+                            if (rowspan > 1) {
+                                for (let r = 1; r < rowspan; r++) {
+                                    for (let c = 0; c < colspan; c++) {
+                                        spans.set(
+                                            `${rowIndex + r}:${colIndex + c}`,
+                                            text
+                                        );
+                                    }
+                                }
+                            }
+
+                            colIndex += colspan;
+                        }
+
+                        // Satırın sonundaki pending rowspan hücrelerini de ekle.
+                        fillPending();
+                        rowIndex++;
                     }
 
-                    return rows;
+                    return matrix
+                        .map(row => row.map(cell => clean(cell || "")))
+                        .filter(row => row.some(cell => cell !== ""));
                 }
 
                 const allTables = Array.from(document.querySelectorAll("table"));
-
-                // İç içe tablolar varsa sadece kök tabloyu al.
                 const rootTables = allTables.filter(
                     table => !table.parentElement.closest("table")
                 );
@@ -453,11 +592,17 @@ def collect_tables(url: str):
             browser.close()
 
 
+# =========================================================
+# PARSE
+# =========================================================
+
+
 def parse_tables(tables) -> List[UcretSatiri]:
     sonuc: List[UcretSatiri] = []
 
+    # alt_kategori + tablo başlığı duplicate anahtarına dahil.
     seen: Set[
-        Tuple[str, str, str, str, str, str, str, str]
+        Tuple[str, str, str, str, str, str, str, str, str, str]
     ] = set()
 
     kategori_sayilari: Dict[str, int] = {}
@@ -465,6 +610,13 @@ def parse_tables(tables) -> List[UcretSatiri]:
     fee_table_count = 0
     ignored_table_count = 0
     zero_record_tables = 0
+
+    candidate_rows = 0
+    parsed_before_dedup = 0
+    duplicate_rows = 0
+    repeated_headers = 0
+    note_rows = 0
+    invalid_rows = 0
 
     for table in tables:
         rows = table.get("rows", []) or []
@@ -478,17 +630,15 @@ def parse_tables(tables) -> List[UcretSatiri]:
 
         header_index = find_header_index(rows)
 
-        # Ücret tablosu olmayan tabloyu tamamen dışarıda bırak.
         if header_index == -1:
             ignored_table_count += 1
             continue
 
         fee_table_count += 1
 
-        # ÖNEMLİ: Header'ı data satırıyla birleştirmiyoruz.
-        # innerText içindeki satır sonları zaten JS tarafında boşluğa çevrildi.
         header = [normalize(x) for x in rows[header_index]]
         column_map = find_columns(header)
+        tablo_basligi = get_cell(header, 0)
 
         table_record_count = 0
 
@@ -498,13 +648,14 @@ def parse_tables(tables) -> List[UcretSatiri]:
             if not row or not any(row):
                 continue
 
-            # Bazı tablolarda header tekrar edebilir.
-            if header_score(row) >= 3:
+            candidate_rows += 1
+
+            # Sadece gerçek header tekrarıysa atla.
+            if is_repeated_header(row, header):
+                repeated_headers += 1
                 continue
 
-            masraf = get_cell(row, column_map["masraf"])
-            if not masraf:
-                continue
+            satir_masrafi = get_cell(row, column_map["masraf"])
 
             asgari_tutar = get_cell(row, column_map["asgari_tutar"])
             asgari_oran = get_cell(row, column_map["asgari_oran"])
@@ -517,12 +668,20 @@ def parse_tables(tables) -> List[UcretSatiri]:
             if not site_tarihi:
                 site_tarihi = aciklama_tarihi
 
-            # Tek hücrelik not / dipnot satırlarını ücret gibi alma.
-            meaningful_cells = sum(1 for cell in row if cell)
+            meaningful_cells = sum(1 for cell in row if normalize(cell))
             if meaningful_cells < 2:
+                note_rows += 1
                 continue
 
-            # Masraf dışında hiçbir bilgi yoksa alma.
+            # İlk hücre rowspan/boşluk yüzünden boş gelebilirse tablo başlığını kullan.
+            if not satir_masrafi:
+                satir_masrafi = tablo_basligi
+
+            if not satir_masrafi:
+                invalid_rows += 1
+                continue
+
+            # Satır gerçekten ücret/veri taşıyor mu?
             if not any(
                 [
                     asgari_tutar,
@@ -533,11 +692,26 @@ def parse_tables(tables) -> List[UcretSatiri]:
                     site_tarihi,
                 ]
             ):
+                invalid_rows += 1
                 continue
+
+            masraf = build_masraf_name(
+                alt_kategori=alt_kategori,
+                tablo_basligi=tablo_basligi,
+                satir_masrafi=satir_masrafi,
+            )
+
+            if not masraf:
+                invalid_rows += 1
+                continue
+
+            parsed_before_dedup += 1
 
             key = (
                 kategori,
-                masraf,
+                alt_kategori,
+                tablo_basligi,
+                satir_masrafi,
                 asgari_tutar,
                 asgari_oran,
                 azami_tutar,
@@ -547,6 +721,7 @@ def parse_tables(tables) -> List[UcretSatiri]:
             )
 
             if key in seen:
+                duplicate_rows += 1
                 continue
 
             seen.add(key)
@@ -572,30 +747,91 @@ def parse_tables(tables) -> List[UcretSatiri]:
             print(
                 f"[yapikredi][DEBUG] Ücret tablosu {table_index} 0 kayıt üretti | "
                 f"Kategori: {kategori} | Alt başlık: {alt_kategori} | "
+                f"Tablo başlığı: {tablo_basligi} | "
                 f"Satır: {len(rows)} | Header: {header}",
                 file=sys.stderr,
             )
 
     print(f"[yapikredi] Ücret tablosu: {fee_table_count}", file=sys.stderr)
-    print(f"[yapikredi] İlgisiz/atlanan tablo: {ignored_table_count}", file=sys.stderr)
-    print(f"[yapikredi] 0 kayıt üreten ücret tablosu: {zero_record_tables}", file=sys.stderr)
-    print(f"[yapikredi] Toplam benzersiz ücret: {len(sonuc)}", file=sys.stderr)
+    print(
+        f"[yapikredi] İlgisiz/atlanan tablo: {ignored_table_count}",
+        file=sys.stderr,
+    )
+    print(
+        f"[yapikredi] 0 kayıt üreten ücret tablosu: {zero_record_tables}",
+        file=sys.stderr,
+    )
+    print(
+        f"[yapikredi] Toplam benzersiz ücret: {len(sonuc)}",
+        file=sys.stderr,
+    )
 
     print("", file=sys.stderr)
     print("[yapikredi] ===== KATEGORİ RAPORU =====", file=sys.stderr)
-
     for kategori, count in sorted(
         kategori_sayilari.items(),
         key=lambda item: (-item[1], item[0]),
     ):
+        print(f"[yapikredi] {kategori} -> {count} kayıt", file=sys.stderr)
+    print("[yapikredi] ===========================", file=sys.stderr)
+
+    # Para aktarma özel kontrolü.
+    print("", file=sys.stderr)
+    print("[yapikredi] ===== PARA AKTARMA KONTROLÜ =====", file=sys.stderr)
+    for keyword in ["FAST", "EFT", "Havale", "SWIFT"]:
+        bulunan = [
+            item
+            for item in sonuc
+            if keyword.casefold() in item.masraf.casefold()
+        ]
         print(
-            f"[yapikredi] {kategori} -> {count} kayıt",
+            f"[yapikredi] {keyword}: {len(bulunan)} kayıt",
+            file=sys.stderr,
+        )
+        for item in bulunan[:8]:
+            print(f"    - {item.masraf}", file=sys.stderr)
+    print("[yapikredi] =================================", file=sys.stderr)
+
+    print("", file=sys.stderr)
+    print("[yapikredi] ===== BÜTÜNLÜK KONTROLÜ =====", file=sys.stderr)
+    print(f"[yapikredi] Ham veri satırı adayı: {candidate_rows}", file=sys.stderr)
+    print(
+        f"[yapikredi] Parse edilen (dedup öncesi): {parsed_before_dedup}",
+        file=sys.stderr,
+    )
+    print(f"[yapikredi] Duplicate: {duplicate_rows}", file=sys.stderr)
+    print(f"[yapikredi] Tekrarlanan header: {repeated_headers}", file=sys.stderr)
+    print(f"[yapikredi] Not/dipnot satırı: {note_rows}", file=sys.stderr)
+    print(f"[yapikredi] Geçersiz/değersiz satır: {invalid_rows}", file=sys.stderr)
+    print(f"[yapikredi] Excel'e gidecek satır: {len(sonuc)}", file=sys.stderr)
+
+    accounted = (
+        parsed_before_dedup
+        + repeated_headers
+        + note_rows
+        + invalid_rows
+    )
+
+    if accounted == candidate_rows:
+        print(
+            "[yapikredi] BÜTÜNLÜK: OK - aday satırların tamamı açıklandı.",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"[yapikredi] BÜTÜNLÜK: UYARI - "
+            f"{candidate_rows - accounted} aday satır açıklanamıyor.",
             file=sys.stderr,
         )
 
-    print("[yapikredi] ===========================", file=sys.stderr)
+    print("[yapikredi] ==============================", file=sys.stderr)
 
     return sonuc
+
+
+# =========================================================
+# ANA FONKSİYON
+# =========================================================
 
 
 def scrape_yapikredi(
@@ -623,6 +859,7 @@ if __name__ == "__main__":
         print()
         print("=" * 70)
         print("YAPI KREDİ SCRAPER")
+        print(f"SÜRÜM: {SCRAPER_VERSION}")
         print("=" * 70)
         print(f"Toplam çekilen ücret: {len(sonuc)}")
         print()
