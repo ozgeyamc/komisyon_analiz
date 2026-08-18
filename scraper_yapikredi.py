@@ -15,6 +15,9 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Set, Tuple
 
 
+SCRAPER_VERSION = "2026-08-18-v5-transfer-title-fix"
+
+
 YAPIKREDI_URL = (
     "https://www.yapikredi.com.tr/"
     "bireysel-bankacilik/hesaplama-araclari/"
@@ -231,9 +234,81 @@ def find_columns(header_row: List[str]) -> Dict[str, int]:
     return result
 
 
+
+def _contains_norm(haystack: str, needle: str) -> bool:
+    h = normalize_header(haystack)
+    n = normalize_header(needle)
+    return bool(h and n and n in h)
+
+
+def build_masraf(
+    kategori: str,
+    alt_kategori: str,
+    table_title: str,
+    row_label: str,
+) -> str:
+    """
+    Yapı Kredi'de FAST / EFT / Havale gibi işlem adı çoğu zaman
+    data satırında değil tablonun ilk header hücresinde bulunuyor.
+
+    Örnek:
+        alt_kategori = "EFT"
+        table_title  = "EFT Gönderimi"
+        row_label    = "İnternet/Mobil – 0 - 8.300 TL"
+
+    Sonuç:
+        "EFT Gönderimi - İnternet/Mobil – 0 - 8.300 TL"
+    """
+    kategori = normalize(kategori)
+    alt_kategori = normalize(alt_kategori)
+    table_title = normalize(table_title)
+    row_label = normalize(row_label)
+
+    # Önce tablo başlığı + satır adını birleştir.
+    if table_title and row_label:
+        nt = normalize_header(table_title)
+        nr = normalize_header(row_label)
+
+        if nt and nt in nr:
+            masraf = row_label
+        elif nr and nr in nt:
+            masraf = table_title
+        else:
+            masraf = f"{table_title} - {row_label}"
+    else:
+        masraf = table_title or row_label
+
+    if not masraf:
+        return ""
+
+    # SWIFT gibi bazı anahtar kelimeler accordion başlığında olup
+    # tablo başlığında yer almayabiliyor. Excel filtresinde kaybolmasın.
+    alt_norm = normalize_header(alt_kategori)
+    masraf_norm = normalize_header(masraf)
+
+    for keyword in ("FAST", "EFT", "Havale", "SWIFT"):
+        key_norm = normalize_header(keyword)
+        if key_norm in alt_norm and key_norm not in masraf_norm:
+            masraf = f"{keyword} - {masraf}"
+            masraf_norm = normalize_header(masraf)
+
+    # KOBİ'de aynı tablo başlığı farklı kredi türlerinde tekrar ediyor.
+    # Hem kayıtların duplicate sanılmaması hem de Excel'de ayırt edilmesi için
+    # alt ürün adını masrafa ekle.
+    if (
+        normalize_header(kategori) == "kobi kredileri"
+        and alt_kategori
+        and not _contains_norm(masraf, alt_kategori)
+    ):
+        masraf = f"{alt_kategori} - {masraf}"
+
+    return normalize(masraf)
+
+
 def collect_tables(url: str):
     from playwright.sync_api import sync_playwright
 
+    print(f"[yapikredi] SÜRÜM: {SCRAPER_VERSION}", file=sys.stderr)
     print(f"[yapikredi] Sayfa açılıyor: {url}", file=sys.stderr)
 
     with sync_playwright() as p:
@@ -457,7 +532,7 @@ def parse_tables(tables) -> List[UcretSatiri]:
     sonuc: List[UcretSatiri] = []
 
     seen: Set[
-        Tuple[str, str, str, str, str, str, str, str]
+        Tuple[str, str, str, str, str, str, str, str, str]
     ] = set()
 
     kategori_sayilari: Dict[str, int] = {}
@@ -489,6 +564,7 @@ def parse_tables(tables) -> List[UcretSatiri]:
         # innerText içindeki satır sonları zaten JS tarafında boşluğa çevrildi.
         header = [normalize(x) for x in rows[header_index]]
         column_map = find_columns(header)
+        table_title = get_cell(header, 0)
 
         table_record_count = 0
 
@@ -502,7 +578,15 @@ def parse_tables(tables) -> List[UcretSatiri]:
             if header_score(row) >= 3:
                 continue
 
-            masraf = get_cell(row, column_map["masraf"])
+            row_label = get_cell(row, column_map["masraf"])
+
+            masraf = build_masraf(
+                kategori=kategori,
+                alt_kategori=alt_kategori,
+                table_title=table_title,
+                row_label=row_label,
+            )
+
             if not masraf:
                 continue
 
@@ -537,6 +621,7 @@ def parse_tables(tables) -> List[UcretSatiri]:
 
             key = (
                 kategori,
+                alt_kategori,
                 masraf,
                 asgari_tutar,
                 asgari_oran,
@@ -572,7 +657,7 @@ def parse_tables(tables) -> List[UcretSatiri]:
             print(
                 f"[yapikredi][DEBUG] Ücret tablosu {table_index} 0 kayıt üretti | "
                 f"Kategori: {kategori} | Alt başlık: {alt_kategori} | "
-                f"Satır: {len(rows)} | Header: {header}",
+                f"Satır: {len(rows)} | Tablo başlığı: {table_title} | Header: {header}",
                 file=sys.stderr,
             )
 
@@ -594,6 +679,28 @@ def parse_tables(tables) -> List[UcretSatiri]:
         )
 
     print("[yapikredi] ===========================", file=sys.stderr)
+
+    print("", file=sys.stderr)
+    print("[yapikredi] ===== PARA AKTARMA KONTROLÜ =====", file=sys.stderr)
+
+    for keyword in ["FAST", "EFT", "Havale", "SWIFT"]:
+        matches = [
+            item for item in sonuc
+            if keyword.casefold() in item.masraf.casefold()
+        ]
+
+        print(
+            f"[yapikredi] {keyword}: {len(matches)} kayıt",
+            file=sys.stderr,
+        )
+
+        for item in matches[:5]:
+            print(
+                f"    - {item.masraf}",
+                file=sys.stderr,
+            )
+
+    print("[yapikredi] =================================", file=sys.stderr)
 
     return sonuc
 
