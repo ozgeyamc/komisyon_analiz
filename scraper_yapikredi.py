@@ -1,36 +1,33 @@
 """
-scraper_yapikredi_all.py
+Yapı Kredi Bireysel Ürün ve Hizmet Ücretleri scraper.
+
+Sayfadaki tüm HTML tablolarını Playwright ile toplar,
+tablo başlıklarını analiz eder ve bütün ücret satırlarını
+standart UcretSatiri formatına dönüştürür.
 """
 
 import re
 import sys
 from dataclasses import dataclass
-from typing import List, Dict, Set, Tuple
+from typing import List, Dict, Set, Tuple, Optional
 
-YAPIKREDI_URL = "https://www.yapikredi.com.tr/bireysel-bankacilik/hesaplama-araclari/bireysel-urun-ve-hizmet-ucretleri"
 
-DATE_PATTERN = re.compile(
-    r"G[üu]ncellenme\s*Tarihi\s*:\s*(\d{2}\.\d{2}\.\d{4}(?:\s+\d{2}:\d{2})?)",
-    re.IGNORECASE,
+YAPIKREDI_URL = (
+    "https://www.yapikredi.com.tr/"
+    "bireysel-bankacilik/hesaplama-araclari/"
+    "bireysel-urun-ve-hizmet-ucretleri"
 )
-DATE_PATTERN_TR = re.compile(
-    r"(?:son\s+)?g[üu]ncellenme\s+tarihi\s*:?\s*"
-    r"(\d{1,2})\s+(ocak|şubat|mart|nisan|mayıs|haziran|temmuz|ağustos|eylül|ekim|kasım|aralık)\s+(\d{4})",
-    re.IGNORECASE,
-)
-TURKCE_AYLAR = {
-    "ocak": "01", "şubat": "02", "mart": "03", "nisan": "04",
-    "mayıs": "05", "haziran": "06", "temmuz": "07", "ağustos": "08",
-    "eylül": "09", "ekim": "10", "kasım": "11", "aralık": "12",
-}
 
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
-    )
-}
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36"
+)
+
+
+# ---------------------------------------------------------
+# VERİ YAPISI
+# ---------------------------------------------------------
 
 @dataclass
 class UcretSatiri:
@@ -43,294 +40,1206 @@ class UcretSatiri:
     aciklama: str = ""
     site_guncelleme_tarihi: str = ""
 
+
 class ScraperError(Exception):
     pass
 
-def _parse_aciklama(raw_aciklama: str):
-    raw = (raw_aciklama or "").strip()
+
+# ---------------------------------------------------------
+# TARİH
+# ---------------------------------------------------------
+
+TURKCE_AYLAR = {
+    "ocak": "01",
+    "şubat": "02",
+    "mart": "03",
+    "nisan": "04",
+    "mayıs": "05",
+    "haziran": "06",
+    "temmuz": "07",
+    "ağustos": "08",
+    "eylül": "09",
+    "ekim": "10",
+    "kasım": "11",
+    "aralık": "12",
+}
+
+
+DATE_PATTERN = re.compile(
+    r"(?:güncellenme|güncelleme)\s*tarihi\s*:?\s*"
+    r"(\d{1,2}[./]\d{1,2}[./]\d{4}"
+    r"(?:\s+\d{1,2}:\d{2})?)",
+    re.IGNORECASE,
+)
+
+
+DATE_PATTERN_TR = re.compile(
+    r"(?:son\s+)?"
+    r"(?:güncellenme|güncelleme)\s+tarihi\s*:?\s*"
+    r"(\d{1,2})\s+"
+    r"(ocak|şubat|mart|nisan|mayıs|haziran|temmuz|"
+    r"ağustos|eylül|ekim|kasım|aralık)\s+"
+    r"(\d{4})",
+    re.IGNORECASE,
+)
+
+
+def parse_aciklama(raw_aciklama: str):
+    """
+    Açıklamanın içindeki güncelleme tarihini ayırır.
+    """
+
+    raw = normalize(raw_aciklama)
+
+    if not raw:
+        return "", ""
+
     match = DATE_PATTERN.search(raw)
+
     if match:
         tarih = match.group(1)
-        temiz = DATE_PATTERN.sub("", raw).strip(" .")
+
+        temiz = DATE_PATTERN.sub("", raw)
+        temiz = normalize(temiz).strip(" .:-")
+
         return temiz, tarih
-    match_tr = DATE_PATTERN_TR.search(raw)
-    if match_tr:
-        gun = match_tr.group(1).zfill(2)
-        ay = TURKCE_AYLAR.get(match_tr.group(2).lower(), "00")
-        yil = match_tr.group(3)
-        tarih = f"{gun}.{ay}.{yil}"
-        temiz = DATE_PATTERN_TR.sub("", raw).strip(" .")
-        return temiz, tarih
+
+    match = DATE_PATTERN_TR.search(raw)
+
+    if match:
+        gun = match.group(1).zfill(2)
+        ay = TURKCE_AYLAR.get(
+            match.group(2).lower(),
+            ""
+        )
+        yil = match.group(3)
+
+        if ay:
+            tarih = f"{gun}.{ay}.{yil}"
+
+            temiz = DATE_PATTERN_TR.sub("", raw)
+            temiz = normalize(temiz).strip(" .:-")
+
+            return temiz, tarih
+
     return raw, ""
 
-def _normalize(val: str) -> str:
-    return (val or "").strip().replace("\xa0", " ").replace("\u200b", "").strip()
 
-def _find_col_indices_from_headers(header_texts: List[str]) -> Dict[str, int]:
-    def norm(h: str) -> str:
-        h2 = re.sub(r"\(.*?\)", "", (h or ""))
-        h2 = h2.replace("%", " ")
-        h2 = re.sub(r"\s+", " ", h2).strip().lower()
-        return h2
-    headers_norm = [norm(h) for h in header_texts]
+# ---------------------------------------------------------
+# GENEL YARDIMCI FONKSİYONLAR
+# ---------------------------------------------------------
 
-    def find_col(keywords: List[str]) -> int:
-        for i, h in enumerate(headers_norm):
-            if all(k in h for k in keywords):
-                return i
-        return -1
+def normalize(value: Optional[str]) -> str:
+    """
+    HTML'den gelen metni temizler.
+    """
 
-    col_masraf = find_col(["masraf"])
-    if col_masraf == -1: col_masraf = find_col(["işlem"])
-    if col_masraf == -1: col_masraf = find_col(["ücret"])
-    if col_masraf == -1:
-        for k in (["eft"], ["gönderim"], ["havale"], ["swift"], ["gelen eft"], ["gelen"], ["kanal"]):
-            idx = find_col(k)
-            if idx != -1:
-                col_masraf = idx
-                break
+    if value is None:
+        return ""
 
-    col_asg_tutar = find_col(["asgari", "tutar"]) or find_col(["asgari"]) or find_col(["tutar"])
-    # EFT / Havale tabloları için BSMV takviyesi
-    if col_asg_tutar == -1:
-        for i, h in enumerate(headers_norm):
-            if ("bsmv" in h or "ücret" in h or "tl" in h) and i != col_masraf:
-                col_asg_tutar = i
-                break
+    value = str(value)
 
-    col_asg_oran = find_col(["asgari", "oran"]) or find_col(["asgari oran"]) or find_col(["oran"])
-    col_azm_tutar = find_col(["azami", "tutar"]) or find_col(["azami"]) or find_col(["tutar"])
-    col_azm_oran = find_col(["azami", "oran"]) or find_col(["azami oran"]) or find_col(["oran"])
-    col_aciklama = find_col(["açıklama"]) if find_col(["açıklama"]) != -1 else find_col(["aciklama"])
-    col_tarih = find_col(["güncelleme"]) or find_col(["guncelleme"]) or find_col(["tarih"])
+    value = value.replace("\xa0", " ")
+    value = value.replace("\u200b", "")
+    value = value.replace("\r", " ")
+    value = value.replace("\n", " ")
 
-    if col_masraf == -1: col_masraf = 0
-    if col_asg_tutar == -1: col_asg_tutar = 1
+    value = re.sub(r"\s+", " ", value)
 
-    return {
-        "masraf": col_masraf,
-        "asgari_tutar": col_asg_tutar,
-        "asgari_oran": col_asg_oran,
-        "azami_tutar": col_azm_tutar,
-        "azami_oran": col_azm_oran,
-        "aciklama": col_aciklama,
-        "tarih": col_tarih,
+    return value.strip()
+
+
+def normalize_header(value: Optional[str]) -> str:
+    """
+    Header karşılaştırması için Türkçe karakterleri sadeleştirir.
+    """
+
+    value = normalize(value).lower()
+
+    replacements = {
+        "ı": "i",
+        "ğ": "g",
+        "ü": "u",
+        "ş": "s",
+        "ö": "o",
+        "ç": "c",
     }
 
-def scrape_yapikredi_all(url: str = YAPIKREDI_URL) -> List[UcretSatiri]:
+    for old, new in replacements.items():
+        value = value.replace(old, new)
+
+    value = value.replace("%", " ")
+
+    # Parantez içlerini temizle
+    value = re.sub(r"\([^)]*\)", " ", value)
+
+    value = re.sub(r"\s+", " ", value)
+
+    return value.strip()
+
+
+def looks_like_amount(value: str) -> bool:
+    """
+    Hücrenin ücret/oran hücresi olup olmadığını kontrol eder.
+    """
+
+    value = normalize(value).lower()
+
+    if not value:
+        return False
+
+    if value in {"-", "—", "–"}:
+        return True
+
+    if "tl" in value:
+        return True
+
+    if "%" in value:
+        return True
+
+    # 10
+    # 10,50
+    # 1.000
+    # 0,275
+    if re.fullmatch(
+        r"[-+]?\d+(?:[.,]\d+)?",
+        value
+    ):
+        return True
+
+    return False
+
+
+def get_cell(row: List[str], index: int) -> str:
+    """
+    Güvenli hücre alma.
+    """
+
+    if index < 0:
+        return ""
+
+    if index >= len(row):
+        return ""
+
+    return normalize(row[index])
+
+
+# ---------------------------------------------------------
+# HEADER ANALİZİ
+# ---------------------------------------------------------
+
+def find_col(
+    headers: List[str],
+    keywords: List[str]
+) -> int:
+    """
+    Header içerisinde verilen kelimelerin tamamını arar.
+
+    ÖNEMLİ:
+    Bulamazsa -1 döner.
+    0 index'i özel olarak korunur.
+    """
+
+    for index, header in enumerate(headers):
+
+        if all(
+            keyword in header
+            for keyword in keywords
+        ):
+            return index
+
+    return -1
+
+
+def find_first(
+    headers: List[str],
+    candidates: List[List[str]]
+) -> int:
+    """
+    Aday header kombinasyonlarını sırayla dener.
+    """
+
+    for keywords in candidates:
+
+        index = find_col(
+            headers,
+            keywords
+        )
+
+        if index != -1:
+            return index
+
+    return -1
+
+
+def find_header_index(
+    rows: List[List[str]]
+) -> int:
+    """
+    Tablodaki gerçek header satırını bulur.
+    """
+
+    for index, row in enumerate(rows[:8]):
+
+        text = " ".join(
+            normalize_header(cell)
+            for cell in row
+        )
+
+        score = 0
+
+        for keyword in [
+            "asgari",
+            "azami",
+            "tutar",
+            "oran",
+            "aciklama",
+            "guncelleme",
+            "guncellenme",
+            "kanal",
+            "bsmv",
+            "masraf",
+            "ucret",
+            "islem",
+        ]:
+            if keyword in text:
+                score += 1
+
+        if score >= 2:
+            return index
+
+    return 0
+
+
+def find_columns(
+    header_row: List[str]
+) -> Dict[str, int]:
+    """
+    Yapı Kredi tablosundaki kolonları bulur.
+    """
+
+    headers = [
+        normalize_header(h)
+        for h in header_row
+    ]
+
+    result = {
+        "masraf": -1,
+        "asgari_tutar": -1,
+        "asgari_oran": -1,
+        "azami_tutar": -1,
+        "azami_oran": -1,
+        "aciklama": -1,
+        "tarih": -1,
+    }
+
+    # -----------------------------------------------------
+    # MASRAF
+    # -----------------------------------------------------
+
+    result["masraf"] = find_first(
+        headers,
+        [
+            ["masraf"],
+            ["ucret"],
+            ["islem"],
+            ["komisyon"],
+        ]
+    )
+
+    # -----------------------------------------------------
+    # ASGARİ TUTAR
+    # -----------------------------------------------------
+
+    result["asgari_tutar"] = find_first(
+        headers,
+        [
+            ["asgari", "tutar"],
+        ]
+    )
+
+    # -----------------------------------------------------
+    # ASGARİ ORAN
+    # -----------------------------------------------------
+
+    result["asgari_oran"] = find_first(
+        headers,
+        [
+            ["asgari", "oran"],
+        ]
+    )
+
+    # -----------------------------------------------------
+    # AZAMİ TUTAR
+    # -----------------------------------------------------
+
+    result["azami_tutar"] = find_first(
+        headers,
+        [
+            ["azami", "tutar"],
+        ]
+    )
+
+    # -----------------------------------------------------
+    # AZAMİ ORAN
+    # -----------------------------------------------------
+
+    result["azami_oran"] = find_first(
+        headers,
+        [
+            ["azami", "oran"],
+        ]
+    )
+
+    # -----------------------------------------------------
+    # AÇIKLAMA
+    # -----------------------------------------------------
+
+    result["aciklama"] = find_first(
+        headers,
+        [
+            ["aciklama"],
+        ]
+    )
+
+    # -----------------------------------------------------
+    # TARİH
+    # -----------------------------------------------------
+
+    result["tarih"] = find_first(
+        headers,
+        [
+            ["guncelleme", "tarihi"],
+            ["guncellenme", "tarihi"],
+            ["guncelleme"],
+            ["guncellenme"],
+        ]
+    )
+
+    return result
+
+
+# ---------------------------------------------------------
+# MASRAF BULMA
+# ---------------------------------------------------------
+
+def find_best_masraf(
+    row: List[str],
+    column_map: Dict[str, int]
+) -> str:
+    """
+    Masraf kolonu bulunamazsa satırdaki en mantıklı
+    açıklayıcı hücreyi bulur.
+    """
+
+    masraf_index = column_map["masraf"]
+
+    if masraf_index >= 0:
+
+        value = get_cell(
+            row,
+            masraf_index
+        )
+
+        if value and not looks_like_amount(value):
+            return value
+
+    # Kullanılmış kolonları çıkar
+    used_indices = {
+        index
+        for index in column_map.values()
+        if index >= 0
+    }
+
+    candidates = []
+
+    for index, cell in enumerate(row):
+
+        cell = normalize(cell)
+
+        if not cell:
+            continue
+
+        if index in used_indices:
+            continue
+
+        if looks_like_amount(cell):
+            continue
+
+        header_like = normalize_header(cell)
+
+        if header_like in {
+            "asgari tutar",
+            "asgari oran",
+            "azami tutar",
+            "azami oran",
+            "aciklama",
+            "guncelleme tarihi",
+        }:
+            continue
+
+        candidates.append(cell)
+
+    if candidates:
+        # En uzun anlamlı metni seç
+        return max(
+            candidates,
+            key=len
+        )
+
+    return ""
+
+
+# ---------------------------------------------------------
+# PLAYWRIGHT İLE TABLOLARI TOPLA
+# ---------------------------------------------------------
+
+def collect_tables(url: str):
     from playwright.sync_api import sync_playwright
 
-    print(f"[yapikredi] {url} adresinden veri çekiliyor...", file=sys.stderr)
+    print(
+        f"[yapikredi] Sayfa açılıyor: {url}",
+        file=sys.stderr
+    )
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        try:
-            context = browser.new_context(
-                user_agent=HEADERS["User-Agent"],
-                viewport={"width": 1440, "height": 1080},
-                locale="tr-TR",
-                extra_http_headers={
-                    "Accept-Language": "tr-TR,tr;q=0.9,en;q=0.8",
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                }
-            )
-            page = context.new_page()
-            page.goto(url, timeout=120000, wait_until="domcontentloaded")
-            page.wait_for_timeout(2000)
 
-            # Çerez kapat
-            for sel_text in ["Tümünü Kabul Et", "Tümünü Kabul", "Tümünü Reddet", "Kabul Et", "Kabul", "Kapat"]:
+        browser = p.chromium.launch(
+            headless=True
+        )
+
+        context = browser.new_context(
+            user_agent=USER_AGENT,
+            viewport={
+                "width": 1440,
+                "height": 1080,
+            },
+            locale="tr-TR",
+            extra_http_headers={
+                "Accept-Language":
+                    "tr-TR,tr;q=0.9,en;q=0.8",
+            },
+        )
+
+        page = context.new_page()
+
+        try:
+
+            page.goto(
+                url,
+                timeout=120000,
+                wait_until="domcontentloaded"
+            )
+
+            page.wait_for_timeout(2500)
+
+            # -------------------------------------------------
+            # COOKIE
+            # -------------------------------------------------
+
+            cookie_buttons = [
+                "Tümünü Kabul Et",
+                "Tümünü Kabul",
+                "Kabul Et",
+                "Kabul",
+                "Kapat",
+            ]
+
+            for text in cookie_buttons:
+
                 try:
-                    btn = page.locator(f"button:has-text(\"{sel_text}\"), a:has-text(\"{sel_text}\")").first
-                    if btn.is_visible():
-                        btn.click(timeout=1500)
-                        page.wait_for_timeout(300)
+
+                    locator = page.locator(
+                        f"button:has-text('{text}'), "
+                        f"a:has-text('{text}')"
+                    ).first
+
+                    if locator.is_visible(
+                        timeout=1000
+                    ):
+
+                        locator.click(
+                            timeout=2000
+                        )
+
+                        print(
+                            f"[yapikredi] "
+                            f"Cookie butonu: {text}",
+                            file=sys.stderr
+                        )
+
+                        page.wait_for_timeout(500)
+
                 except Exception:
                     pass
 
-            # Akordiyonları Aç (EFT/Havale vs.)
-            print("[yapikredi] Menüler açılıyor...", file=sys.stderr)
-            locators = [
-                ".accordion-title", ".accordionItem-title", ".collapsible-header", 
-                "a[data-toggle='collapse']", ".js-accordion-title", "h2.title", "h3.title"
+            # -------------------------------------------------
+            # ARIA ACCORDION
+            # -------------------------------------------------
+
+            print(
+                "[yapikredi] Accordion'lar açılıyor...",
+                file=sys.stderr
+            )
+
+            for _ in range(3):
+
+                try:
+
+                    elements = page.locator(
+                        "[aria-expanded='false']"
+                    )
+
+                    count = elements.count()
+
+                    if count == 0:
+                        break
+
+                    for i in range(count):
+
+                        try:
+
+                            item = elements.nth(i)
+
+                            if item.is_visible(
+                                timeout=300
+                            ):
+
+                                item.click(
+                                    timeout=1500
+                                )
+
+                                page.wait_for_timeout(
+                                    150
+                                )
+
+                        except Exception:
+                            pass
+
+                except Exception:
+                    break
+
+            # -------------------------------------------------
+            # BİLİNEN ACCORDION'LAR
+            # -------------------------------------------------
+
+            selectors = [
+                ".accordion-title",
+                ".accordionItem-title",
+                ".collapsible-header",
+                "a[data-toggle='collapse']",
+                ".js-accordion-title",
+                "h2.title",
+                "h3.title",
             ]
-            for loc in locators:
-                elements = page.locator(loc)
-                count = elements.count()
-                for i in range(count):
-                    try:
-                        if elements.nth(i).is_visible():
-                            elements.nth(i).click(timeout=1000)
-                            page.wait_for_timeout(300)
-                    except Exception:
-                        pass
 
-            for _ in range(8):
-                page.evaluate("window.scrollBy(0, window.innerHeight);")
-                page.wait_for_timeout(300)
+            for selector in selectors:
 
-            try:
-                page.wait_for_load_state("networkidle", timeout=3000)
-            except Exception:
-                pass
+                try:
 
-            # JS Tablo Toplayıcı
-            js_extract = r"""
-() => {
-    function findCategory(table) {
-        let curr = table;
-        while (curr && curr !== document.body) {
-            let prev = curr.previousElementSibling;
-            while (prev) {
-                if (['H1', 'H2', 'H3', 'H4', 'H5', 'H6'].includes(prev.tagName)) {
-                    let txt = prev.innerText.trim();
-                    if (txt) return txt;
+                    elements = page.locator(
+                        selector
+                    )
+
+                    count = elements.count()
+
+                    for i in range(count):
+
+                        try:
+
+                            element = elements.nth(i)
+
+                            if element.is_visible(
+                                timeout=300
+                            ):
+
+                                element.click(
+                                    timeout=1000
+                                )
+
+                                page.wait_for_timeout(
+                                    150
+                                )
+
+                        except Exception:
+                            pass
+
+                except Exception:
+                    pass
+
+            # -------------------------------------------------
+            # TAM SAYFA SCROLL
+            # -------------------------------------------------
+
+            print(
+                "[yapikredi] Sayfa taranıyor...",
+                file=sys.stderr
+            )
+
+            last_height = 0
+
+            for _ in range(40):
+
+                height = page.evaluate(
+                    "document.body.scrollHeight"
+                )
+
+                if height == last_height:
+                    break
+
+                last_height = height
+
+                page.evaluate(
+                    "window.scrollTo("
+                    "0, document.body.scrollHeight"
+                    ")"
+                )
+
+                page.wait_for_timeout(500)
+
+            page.evaluate(
+                "window.scrollTo(0, 0)"
+            )
+
+            page.wait_for_timeout(1000)
+
+            # -------------------------------------------------
+            # TABLE + KATEGORİ
+            # -------------------------------------------------
+
+            javascript = r"""
+            () => {
+
+                function clean(value) {
+
+                    return (value || "")
+                        .replace(/\u00a0/g, " ")
+                        .replace(/\u200b/g, "")
+                        .replace(/\s+/g, " ")
+                        .trim();
                 }
-                let headingInside = prev.querySelector('h1, h2, h3, h4, h5, h6, .accordion-title, .title');
-                if (headingInside) {
-                    let txt = headingInside.innerText.trim();
-                    if (txt) return txt;
+
+                function getRows(table) {
+
+                    const rows = [];
+
+                    const trs =
+                        Array.from(
+                            table.querySelectorAll("tr")
+                        );
+
+                    for (const tr of trs) {
+
+                        const cells =
+                            Array.from(
+                                tr.querySelectorAll(
+                                    "th, td"
+                                )
+                            );
+
+                        if (!cells.length)
+                            continue;
+
+                        rows.push(
+                            cells.map(
+                                cell =>
+                                    clean(
+                                        cell.innerText
+                                    )
+                            )
+                        );
+                    }
+
+                    return rows;
                 }
-                prev = prev.previousElementSibling;
+
+                function getCategory(table) {
+
+                    let current = table;
+
+                    for (let level = 0;
+                         level < 8;
+                         level++) {
+
+                        if (!current.parentElement)
+                            break;
+
+                        current =
+                            current.parentElement;
+
+                        const headings =
+                            current.querySelectorAll(
+                                "h1,h2,h3,h4,h5,h6,"
+                                + "button,"
+                                + ".accordion-title,"
+                                + ".title"
+                            );
+
+                        for (
+                            const heading
+                            of headings
+                        ) {
+
+                            const text =
+                                clean(
+                                    heading.innerText
+                                );
+
+                            if (
+                                text &&
+                                text.length < 150
+                            ) {
+
+                                const lower =
+                                    text.toLowerCase();
+
+                                if (
+                                    !lower.includes(
+                                        "asgari tutar"
+                                    ) &&
+                                    !lower.includes(
+                                        "azami tutar"
+                                    )
+                                ) {
+                                    return text;
+                                }
+                            }
+                        }
+                    }
+
+                    return "Yapı Kredi";
+                }
+
+                const tables =
+                    Array.from(
+                        document.querySelectorAll(
+                            "table"
+                        )
+                    );
+
+                return tables.map(
+                    (table, index) => {
+
+                        return {
+                            index: index,
+                            kategori:
+                                getCategory(table),
+                            rows:
+                                getRows(table)
+                        };
+
+                    }
+                );
             }
-            curr = curr.parentElement;
-        }
-        return "Yapı Kredi Genel";
-    }
+            """
 
-    function getHeaderText(table){
-        let thead = table.querySelector('thead');
-        let row = null;
-        if(thead){
-            const trs = thead.querySelectorAll('tr');
-            row = trs[trs.length-1] || trs[0];
-        } else {
-            row = table.querySelector('tr');
-        }
-        if(!row) return '';
-        return Array.from(row.querySelectorAll('th,td')).map(c=>c.innerText.trim()).join(' | ');
-    }
+            tables = page.evaluate(
+                javascript
+            )
 
-    function rowsFromTable(table){
-        const trs = Array.from(table.querySelectorAll('tr'));
-        const rows = [];
-        for(const tr of trs){
-            const cells = Array.from(tr.querySelectorAll('th,td'));
-            if(cells.length === 0) continue;
-            rows.push(cells.map(c => c.innerText.trim()));
-        }
-        return rows;
-    }
+            print(
+                f"[yapikredi] "
+                f"{len(tables)} adet tablo bulundu.",
+                file=sys.stderr
+            )
 
-    const out = [];
-    const tables = Array.from(document.querySelectorAll('table'));
-    for(let i=0;i<tables.length;i++){
-        const t = tables[i];
-        out.push({
-            index: i, 
-            header: getHeaderText(t), 
-            rows: rowsFromTable(t), 
-            kategori: findCategory(t)
-        });
-    }
-    return out;
-}
-"""
-            tables_data = page.evaluate(js_extract)
-            print(f"[yapikredi] JS ile {len(tables_data)} <table> bulundu", file=sys.stderr)
+            return tables
 
         finally:
+
+            context.close()
             browser.close()
 
-    if not tables_data:
-        raise ScraperError("Sayfada hiç tablo bulunamadı.")
 
-    tum_satirlar: List[UcretSatiri] = []
-    seen: Set[Tuple[str, str, str, str]] = set()
+# ---------------------------------------------------------
+# TABLOLARI PARSE ET
+# ---------------------------------------------------------
 
-    for tinfo in tables_data:
-        rows = tinfo.get("rows", []) or []
-        kategori_baslik = tinfo.get("kategori", "Yapı Kredi Genel")
+def parse_tables(
+    tables
+) -> List[UcretSatiri]:
+
+    sonuc = []
+
+    # Daha detaylı duplicate anahtarı
+    seen: Set[
+        Tuple[
+            str,
+            str,
+            str,
+            str,
+            str,
+            str,
+            str,
+        ]
+    ] = set()
+
+    tablo_sayisi = 0
+    atlanan_tablo = 0
+
+    for table in tables:
+
+        rows = table.get(
+            "rows",
+            []
+        )
+
         if not rows:
             continue
 
-        # KUSURSUZ HEADER TESPİT MANTIĞI
-        header_idx = 0
-        first_row = [c.lower() for c in rows[0]] if rows else []
-        if not any(any(k in c for k in ["tutar", "asgari", "açıklama", "güncelle", "oran", "kanal", "bsmv"]) for c in first_row):
-            found = False
-            for i in range(1, min(4, len(rows))):
-                rowi = " ".join([c.lower() for c in rows[i]])
-                if any(k in rowi for k in ["tutar", "asgari", "açıklama", "güncelle", "oran", "kanal", "bsmv"]):
-                    header_idx = i
-                    found = True
-                    break
-            if not found:
-                header_idx = 0
+        tablo_sayisi += 1
 
-        header_row = rows[header_idx] if rows else []
-        col_map = _find_col_indices_from_headers(header_row)
+        kategori = normalize(
+            table.get(
+                "kategori",
+                "Yapı Kredi"
+            )
+        )
 
-        for r in rows[header_idx+1:]:
-            def get_cell(idx):
-                return r[idx].strip() if 0 <= idx < len(r) else ""
+        if not kategori:
+            kategori = "Yapı Kredi"
 
-            masraf = get_cell(col_map["masraf"])
-            
-            # KUSURSUZ SATIR KAYMA MANTIĞI
-            if masraf:
-                low = masraf.lower()
-                if (("tl" in low or "%" in low or re.search(r"\d", low)) and len(masraf) < 10):
-                    for c in r:
-                        if c and not any(tok in c.lower() for tok in ["tl", "tutar", "asgari", "azami", "oran", "%"]):
-                            masraf = c
-                            break
+        # -------------------------------------------------
+        # HEADER
+        # -------------------------------------------------
 
-            if not masraf:
-                for c in r:
-                    if c and not any(tok in c.lower() for tok in ["tl","tutar","asgari","azami","oran","%"]):
-                        masraf = c
-                        break
+        header_index = find_header_index(
+            rows
+        )
+
+        header = rows[header_index]
+
+        # Gerçek header değilse tabloyu kaybetmeden
+        # yine de kontrol ediyoruz.
+        header_text = " ".join(
+            normalize_header(x)
+            for x in header
+        )
+
+        if not any(
+            keyword in header_text
+            for keyword in [
+                "asgari",
+                "azami",
+                "tutar",
+                "oran",
+                "aciklama",
+                "guncelleme",
+                "kanal",
+                "bsmv",
+                "masraf",
+                "ucret",
+                "islem",
+            ]
+        ):
+
+            atlanan_tablo += 1
+            continue
+
+        column_map = find_columns(
+            header
+        )
+
+        # -------------------------------------------------
+        # DATA
+        # -------------------------------------------------
+
+        for row in rows[header_index + 1:]:
+
+            if not row:
+                continue
+
+            row = [
+                normalize(cell)
+                for cell in row
+            ]
+
+            if not any(row):
+                continue
+
+            # Header tekrar etmişse atla
+            row_text = " ".join(
+                normalize_header(x)
+                for x in row
+            )
+
+            if (
+                "asgari" in row_text
+                and "azami" in row_text
+                and "tutar" in row_text
+            ):
+                continue
+
+            # -------------------------------------------------
+            # MASRAF
+            # -------------------------------------------------
+
+            masraf = find_best_masraf(
+                row,
+                column_map
+            )
 
             if not masraf:
                 continue
 
-            asgari_tutar = get_cell(col_map["asgari_tutar"])
-            asgari_oran = get_cell(col_map["asgari_oran"])
-            azami_tutar = get_cell(col_map["azami_tutar"])
-            azami_oran = get_cell(col_map["azami_oran"])
-            aciklama_raw = get_cell(col_map["aciklama"])
-            temiz_aciklama, aciklama_tarihi = _parse_aciklama(aciklama_raw)
-            site_tarihi = get_cell(col_map["tarih"]) or aciklama_tarihi
+            # -------------------------------------------------
+            # ÜCRETLER
+            # -------------------------------------------------
 
-            key = (kategori_baslik, masraf, asgari_tutar, azami_tutar)
+            asgari_tutar = get_cell(
+                row,
+                column_map["asgari_tutar"]
+            )
+
+            asgari_oran = get_cell(
+                row,
+                column_map["asgari_oran"]
+            )
+
+            azami_tutar = get_cell(
+                row,
+                column_map["azami_tutar"]
+            )
+
+            azami_oran = get_cell(
+                row,
+                column_map["azami_oran"]
+            )
+
+            # -------------------------------------------------
+            # AÇIKLAMA
+            # -------------------------------------------------
+
+            aciklama_raw = get_cell(
+                row,
+                column_map["aciklama"]
+            )
+
+            aciklama, tarih = parse_aciklama(
+                aciklama_raw
+            )
+
+            # -------------------------------------------------
+            # TARİH
+            # -------------------------------------------------
+
+            tablo_tarihi = get_cell(
+                row,
+                column_map["tarih"]
+            )
+
+            if tablo_tarihi:
+                tarih = tablo_tarihi
+
+            # -------------------------------------------------
+            # AÇIKLAMA KOLONU YOKSA
+            # -------------------------------------------------
+
+            if (
+                not aciklama
+                and column_map["aciklama"] == -1
+            ):
+
+                used = {
+                    i
+                    for i in column_map.values()
+                    if i >= 0
+                }
+
+                extra = []
+
+                for i, cell in enumerate(row):
+
+                    if i in used:
+                        continue
+
+                    if not cell:
+                        continue
+
+                    if looks_like_amount(cell):
+                        continue
+
+                    extra.append(cell)
+
+                if extra:
+
+                    aciklama = " ".join(
+                        extra
+                    )
+
+                    aciklama, extra_date = (
+                        parse_aciklama(
+                            aciklama
+                        )
+                    )
+
+                    if not tarih:
+                        tarih = extra_date
+
+            # -------------------------------------------------
+            # SADECE TAMAMEN BOŞ ÜCRET SATIRIYSA ATLA
+            # -------------------------------------------------
+
+            if not any([
+                asgari_tutar,
+                asgari_oran,
+                azami_tutar,
+                azami_oran,
+                aciklama,
+                tarih,
+            ]):
+                continue
+
+            # -------------------------------------------------
+            # DUPLICATE
+            # -------------------------------------------------
+
+            key = (
+                kategori,
+                masraf,
+                asgari_tutar,
+                asgari_oran,
+                azami_tutar,
+                azami_oran,
+                aciklama,
+            )
+
             if key in seen:
                 continue
+
             seen.add(key)
 
-            tum_satirlar.append(UcretSatiri(
-                kategori=kategori_baslik,
-                masraf=masraf,
-                asgari_tutar=asgari_tutar,
-                asgari_oran=asgari_oran,
-                azami_tutar=azami_tutar,
-                azami_oran=azami_oran,
-                aciklama=temiz_aciklama,
-                site_guncelleme_tarihi=site_tarihi
-            ))
+            sonuc.append(
+                UcretSatiri(
+                    kategori=kategori,
+                    masraf=masraf,
+                    asgari_tutar=asgari_tutar,
+                    asgari_oran=asgari_oran,
+                    azami_tutar=azami_tutar,
+                    azami_oran=azami_oran,
+                    aciklama=aciklama,
+                    site_guncelleme_tarihi=tarih,
+                )
+            )
 
-    print(f"[yapikredi] Toplam {len(tum_satirlar)} satır bulundu.", file=sys.stderr)
+    print(
+        f"[yapikredi] İşlenen tablo: "
+        f"{tablo_sayisi}",
+        file=sys.stderr
+    )
 
-    try:
-        import pandas as pd
-        df = pd.DataFrame([s.__dict__ for s in tum_satirlar])
-        out_fname = "yapikredi_all_komisyonlar.xlsx"
-        df.to_excel(out_fname, index=False)
-    except Exception:
-        pass
+    print(
+        f"[yapikredi] Atlanan tablo: "
+        f"{atlanan_tablo}",
+        file=sys.stderr
+    )
 
-    return tum_satirlar
+    print(
+        f"[yapikredi] Toplam benzersiz ücret: "
+        f"{len(sonuc)}",
+        file=sys.stderr
+    )
+
+    return sonuc
+
+
+# ---------------------------------------------------------
+# ANA FONKSİYON
+# ---------------------------------------------------------
+
+def scrape_yapikredi(
+    url: str = YAPIKREDI_URL
+) -> List[UcretSatiri]:
+
+    tables = collect_tables(url)
+
+    if not tables:
+        raise ScraperError(
+            "Yapı Kredi sayfasından tablo alınamadı."
+        )
+
+    sonuc = parse_tables(
+        tables
+    )
+
+    if not sonuc:
+        raise ScraperError(
+            "Tablolar bulundu fakat ücret satırı "
+            "oluşturulamadı."
+        )
+
+    return sonuc
+
+
+# ---------------------------------------------------------
+# TEST
+# ---------------------------------------------------------
 
 if __name__ == "__main__":
-    sonuc = scrape_yapikredi_all()
-    print(f"İşlem tamamlandı! Toplam çekilen satır sayısı: {len(sonuc)}")
+
+    try:
+
+        sonuc = scrape_yapikredi()
+
+        print()
+        print("=" * 70)
+        print("YAPI KREDİ SCRAPER")
+        print("=" * 70)
+
+        print(
+            f"Toplam çekilen ücret: {len(sonuc)}"
+        )
+
+        print()
+
+        for i, satir in enumerate(
+            sonuc[:30],
+            start=1
+        ):
+
+            print(
+                f"{i}. "
+                f"[{satir.kategori}] "
+                f"{satir.masraf}"
+            )
+
+            print(
+                f"   Asgari Tutar : "
+                f"{satir.asgari_tutar}"
+            )
+
+            print(
+                f"   Asgari Oran  : "
+                f"{satir.asgari_oran}"
+            )
+
+            print(
+                f"   Azami Tutar  : "
+                f"{satir.azami_tutar}"
+            )
+
+            print(
+                f"   Azami Oran   : "
+                f"{satir.azami_oran}"
+            )
+
+            print(
+                f"   Açıklama     : "
+                f"{satir.aciklama}"
+            )
+
+            print(
+                f"   Tarih        : "
+                f"{satir.site_guncelleme_tarihi}"
+            )
+
+            print("-" * 70)
+
+    except Exception as exc:
+
+        print(
+            f"[yapikredi][HATA] {exc}",
+            file=sys.stderr
+        )
+
+        sys.exit(1)
