@@ -2,10 +2,11 @@
 scraper_yapikredi_all.py
 
 Yapı Kredi "Bireysel Ürün ve Hizmet Ücretleri" sayfasından tüm tabloları çeker.
-- Playwright ile sayfayı açar, cookie/dialog butonlarını denemeye tıklar,
-  accordions'u açar, sayfayı kaydırır, sonra JS ile tüm tabloları toplar.
+- Playwright ile sayfayı açar, cookie/dialog butonlarını kapatır.
+- Accordion / sekme öğelerini açar, sayfayı kaydırarak dinamik tabloları yükler.
+- JS ile her tablonun üst başlığını (Kategori) ve satırlarını çıkartır.
 - Python tarafında header eşlemesi yapıp UcretSatiri nesneleri üretir.
-- Yinelenenleri temizler ve sonucu Excel'e yazar (pandas yüklüyse).
+- Sonucu Excel'e kaydeder.
 """
 
 import re
@@ -78,15 +79,12 @@ def _normalize(val: str) -> str:
 
 
 def _find_col_indices_from_headers(header_texts: List[str]) -> Dict[str, int]:
-    """
-    header_texts: list of header cell texts (original)
-    returns mapping of keys to column indices (or -1 if not found)
-    """
     def norm(h: str) -> str:
         h2 = re.sub(r"\(.*?\)", "", (h or ""))
         h2 = h2.replace("%", " ")
         h2 = re.sub(r"\s+", " ", h2).strip().lower()
         return h2
+
     headers_norm = [norm(h) for h in header_texts]
 
     def find_col(keywords: List[str]) -> int:
@@ -101,8 +99,7 @@ def _find_col_indices_from_headers(header_texts: List[str]) -> Dict[str, int]:
     if col_masraf == -1:
         col_masraf = find_col(["ücret"])
     if col_masraf == -1:
-        # try single words that often are used as section titles
-        for k in (["eft"], ["gönderim"], ["havale"], ["swift"], ["gelen eft"], ["gelen"]):
+        for k in (["eft"], ["gönderim"], ["havale"], ["swift"], ["gelen eft"], ["gelen"], ["kanal"]):
             idx = find_col(k)
             if idx != -1:
                 col_masraf = idx
@@ -139,104 +136,123 @@ def scrape_yapikredi_all(url: str = YAPIKREDI_URL) -> List[UcretSatiri]:
         try:
             context = browser.new_context(
                 user_agent=HEADERS["User-Agent"],
-                viewport={"width": 1280, "height": 1000},
+                viewport={"width": 1440, "height": 1080},
                 locale="tr-TR",
                 extra_http_headers={
                     "Accept-Language": "tr-TR,tr;q=0.9,en;q=0.8",
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-                    "Accept-Encoding": "gzip, deflate, br",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 }
             )
             page = context.new_page()
             page.goto(url, timeout=120000, wait_until="domcontentloaded")
+            page.wait_for_timeout(2000)
 
-            # Try click common cookie buttons (Turkish variants)
-            for sel_text in ["Tümünü Kabul Et", "Tümünü Kabul", "Tümünü Reddet", "Kabul Et", "Kabul"]:
+            # Çerez onay butonlarını kapat
+            for sel_text in ["Tümünü Kabul Et", "Tümünü Kabul", "Tümünü Reddet", "Kabul Et", "Kabul", "Kapat"]:
                 try:
-                    page.locator(f"button:has-text(\"{sel_text}\")").first.click(timeout=1500)
-                    print(f"[yapikredi][debug] Clicked cookie/button: {sel_text}", file=sys.stderr)
-                    page.wait_for_timeout(300)
-                    break
+                    btn = page.locator(f"button:has-text(\"{sel_text}\"), a:has-text(\"{sel_text}\")").first
+                    if btn.is_visible():
+                        btn.click(timeout=1500)
+                        page.wait_for_timeout(300)
+                        break
                 except Exception:
                     pass
 
-            # Try expand collapsed accordions and buttons that likely reveal sections
+            # Accordion, Tab ve gizli bölümleri aç
             try:
-                # click any collapsed buttons
-                toggles = page.query_selector_all("button[aria-expanded='false'], [role='button'][aria-expanded='false']")
-                for t in toggles:
-                    try:
-                        t.click()
-                        page.wait_for_timeout(120)
-                    except Exception:
-                        pass
-                # click buttons containing keywords (eft/havale/gönderim)
-                btns = page.query_selector_all("button")
-                for b in btns:
-                    try:
-                        txt = (b.inner_text() or "").lower()
-                        if any(k in txt for k in ["eft", "havale", "gönderim", "gönder"]):
-                            try:
-                                b.click()
-                                page.wait_for_timeout(120)
-                            except Exception:
-                                pass
-                    except Exception:
-                        pass
+                accordion_selectors = [
+                    "button[aria-expanded='false']",
+                    "[role='button'][aria-expanded='false']",
+                    ".accordion-header",
+                    ".accordion-title",
+                    ".collapsible-header",
+                    "[data-toggle='collapse']"
+                ]
+                for selector in accordion_selectors:
+                    elements = page.query_selector_all(selector)
+                    for el in elements:
+                        try:
+                            if el.is_visible():
+                                el.click()
+                                page.wait_for_timeout(150)
+                        except Exception:
+                            pass
             except Exception:
                 pass
 
-            # Scroll slowly to bottom to trigger lazy loading / rendering
-            for _ in range(6):
+            # Sayfayı kademeli aşağı kaydır (Lazy load/Render tetiklemesi)
+            for _ in range(8):
                 page.evaluate("window.scrollBy(0, window.innerHeight);")
-                page.wait_for_timeout(400)
+                page.wait_for_timeout(300)
 
-            # Wait a little for JS rendering
             try:
-                page.wait_for_load_state("networkidle", timeout=8000)
+                page.wait_for_load_state("networkidle", timeout=5000)
             except Exception:
                 pass
-            page.wait_for_timeout(800)
 
-            # JS: collect all tables -> header + rows arrays
-            js = r"""
+            # JS: Tabloları, üst başlıklarını ve satırlarını topla
+            js_extract = r"""
 () => {
-  function getHeaderText(table){
-    let thead = table.querySelector('thead');
-    let row = null;
-    if(thead){
-      const trs = thead.querySelectorAll('tr');
-      row = trs[trs.length-1] || trs[0];
-    } else {
-      row = table.querySelector('tr');
+    function findCategory(table) {
+        let curr = table;
+        // Yukarıya doğru hiyerarşik en yakın başlığı ara
+        while (curr && curr !== document.body) {
+            let prev = curr.previousElementSibling;
+            while (prev) {
+                if (['H1', 'H2', 'H3', 'H4', 'H5', 'H6'].includes(prev.tagName)) {
+                    let txt = prev.innerText.trim();
+                    if (txt) return txt;
+                }
+                let headingInside = prev.querySelector('h1, h2, h3, h4, h5, h6, .accordion-title, .title');
+                if (headingInside) {
+                    let txt = headingInside.innerText.trim();
+                    if (txt) return txt;
+                }
+                prev = prev.previousElementSibling;
+            }
+            curr = curr.parentElement;
+        }
+        return "Yapı Kredi Masraflar";
     }
-    if(!row) return '';
-    return Array.from(row.querySelectorAll('th,td')).map(c=>c.innerText.trim()).join(' | ');
-  }
-  function rowsFromTable(table){
-    const trs = Array.from(table.querySelectorAll('tr'));
-    const rows = [];
-    for(const tr of trs){
-      const cells = Array.from(tr.querySelectorAll('th,td'));
-      if(cells.length === 0) continue;
-      rows.push(cells.map(c => c.innerText.trim()));
+
+    function getHeaderText(table) {
+        let thead = table.querySelector('thead');
+        let row = null;
+        if (thead) {
+            const trs = thead.querySelectorAll('tr');
+            row = trs[trs.length - 1] || trs[0];
+        } else {
+            row = table.querySelector('tr');
+        }
+        if (!row) return '';
+        return Array.from(row.querySelectorAll('th, td')).map(c => c.innerText.trim()).join(' | ');
     }
-    return rows;
-  }
-  const out = [];
-  const tables = Array.from(document.querySelectorAll('table'));
-  for(let i=0;i<tables.length;i++){
-    const t = tables[i];
-    const header = getHeaderText(t);
-    const rows = rowsFromTable(t);
-    out.push({index:i, header: header, rows: rows});
-  }
-  return out;
+
+    function rowsFromTable(table) {
+        const trs = Array.from(table.querySelectorAll('tr'));
+        const rows = [];
+        for (const tr of trs) {
+            const cells = Array.from(tr.querySelectorAll('th, td'));
+            if (cells.length === 0) continue;
+            rows.push(cells.map(c => c.innerText.trim()));
+        }
+        return rows;
+    }
+
+    const out = [];
+    const tables = Array.from(document.querySelectorAll('table'));
+    for (let i = 0; i < tables.length; i++) {
+        const t = tables[i];
+        const header = getHeaderText(t);
+        const rows = rowsFromTable(t);
+        const kategori = findCategory(t);
+        out.push({ index: i, header: header, rows: rows, kategori: kategori });
+    }
+    return out;
 }
 """
-            tables_data = page.evaluate(js)
-            table_count = len(tables_data)
-            print(f"[yapikredi] JS ile {table_count} <table> bulundu", file=sys.stderr)
+            tables_data = page.evaluate(js_extract)
+            print(f"[yapikredi] Toplam {len(tables_data)} adet <table> bulundu.", file=sys.stderr)
 
         finally:
             browser.close()
@@ -246,23 +262,20 @@ def scrape_yapikredi_all(url: str = YAPIKREDI_URL) -> List[UcretSatiri]:
 
     tum_satirlar: List[UcretSatiri] = []
     seen: Set[Tuple[str, str, str, str]] = set()
-    processed_tables = 0
 
     for tinfo in tables_data:
-        processed_tables += 1
-        header_preview = tinfo.get("header", "") or ""
         rows = tinfo.get("rows", []) or []
+        kategori_baslik = _normalize(tinfo.get("kategori", "")) or "Genel"
         if not rows:
             continue
 
-        # find header row index: prefer a row containing 'tutar'/'asgari'/'açıklama'/'güncelle'
         header_idx = 0
         first_row = [c.lower() for c in rows[0]] if rows else []
-        if not any(any(k in c for k in ["tutar", "asgari", "açıklama", "güncelle", "oran"]) for c in first_row):
+        if not any(any(k in c for k in ["tutar", "asgari", "açıklama", "güncelle", "oran", "ücret", "masraf"]) for c in first_row):
             found = False
             for i in range(1, min(4, len(rows))):
                 rowi = " ".join([c.lower() for c in rows[i]])
-                if any(k in rowi for k in ["tutar", "asgari", "açıklama", "güncelle", "oran"]):
+                if any(k in rowi for k in ["tutar", "asgari", "açıklama", "güncelle", "oran", "ücret", "masraf"]):
                     header_idx = i
                     found = True
                     break
@@ -272,31 +285,21 @@ def scrape_yapikredi_all(url: str = YAPIKREDI_URL) -> List[UcretSatiri]:
         header_row = rows[header_idx] if rows else []
         col_map = _find_col_indices_from_headers(header_row)
 
-        # Data rows are after header_idx
-        for r in rows[header_idx+1:]:
+        for r in rows[header_idx + 1:]:
             def get_cell(idx):
-                return r[idx].strip() if 0 <= idx < len(r) else ""
+                return _normalize(r[idx]) if 0 <= idx < len(r) else ""
 
             masraf = get_cell(col_map["masraf"])
-            # If masraf seems like an amount (e.g., contains TL only) try to pick a textual cell
-            if masraf:
-                low = masraf.lower()
-                if (("tl" in low or "%" in low or re.search(r"\d", low)) and len(masraf) < 10):
-                    # try find a better descriptive cell
-                    for c in r:
-                        if c and not any(tok in c.lower() for tok in ["tl", "tutar", "asgari", "azami", "oran", "%"]):
-                            masraf = c
-                            break
-
-            # fallback: pick first non-empty textual cell that is not an amount
-            if not masraf:
+            
+            # Eğer masraf sütunu boşsa ya da sayı/tutar geldiyse alternatif metin hücresi bul
+            if not masraf or (len(masraf) < 10 and any(tok in masraf.lower() for tok in ["tl", "%"])):
                 for c in r:
-                    if c and not any(tok in c.lower() for tok in ["tl","tutar","asgari","azami","oran","%"]):
-                        masraf = c
+                    c_norm = _normalize(c)
+                    if c_norm and not any(tok in c_norm.lower() for tok in ["tl", "tutar", "asgari", "azami", "oran", "%"]):
+                        masraf = c_norm
                         break
 
             if not masraf:
-                # give up on this row
                 continue
 
             asgari_tutar = get_cell(col_map["asgari_tutar"])
@@ -307,15 +310,13 @@ def scrape_yapikredi_all(url: str = YAPIKREDI_URL) -> List[UcretSatiri]:
             temiz_aciklama, aciklama_tarihi = _parse_aciklama(aciklama_raw)
             site_tarihi = get_cell(col_map["tarih"]) or aciklama_tarihi
 
-            kategori = header_preview or "Yapikredi"
-
-            key = (kategori, masraf, asgari_tutar or "", azami_tutar or "")
+            key = (kategori_baslik, masraf, asgari_tutar, azami_tutar)
             if key in seen:
                 continue
             seen.add(key)
 
             tum_satirlar.append(UcretSatiri(
-                kategori=kategori,
+                kategori=kategori_baslik,
                 masraf=masraf,
                 asgari_tutar=asgari_tutar,
                 asgari_oran=asgari_oran,
@@ -325,25 +326,21 @@ def scrape_yapikredi_all(url: str = YAPIKREDI_URL) -> List[UcretSatiri]:
                 site_guncelleme_tarihi=site_tarihi
             ))
 
-    print(f"[yapikredi] İşlenen tablo sayısı: {processed_tables}", file=sys.stderr)
-    print(f"[yapikredi] Toplam {len(tum_satirlar)} satır bulundu.", file=sys.stderr)
+    print(f"[yapikredi] Toplam {len(tum_satirlar)} satır komisyon/masraf verisi başarıyla işlendi.", file=sys.stderr)
 
-    # Try write to Excel if pandas is available
+    # Excel'e yaz
     try:
         import pandas as pd
         df = pd.DataFrame([s.__dict__ for s in tum_satirlar])
         out_fname = "yapikredi_all_komisyonlar.xlsx"
         df.to_excel(out_fname, index=False)
-        print(f"[yapikredi] Sonuç {out_fname} olarak kaydedildi.", file=sys.stderr)
-    except Exception:
-        pass
+        print(f"[yapikredi] Excel dosyası oluşturuldu: {out_fname}", file=sys.stderr)
+    except Exception as e:
+        print(f"[yapikredi] Excel kaydedilirken hata oluştu: {e}", file=sys.stderr)
 
     return tum_satirlar
 
 
 if __name__ == "__main__":
     sonuc = scrape_yapikredi_all()
-    # print some examples
-    for s in sonuc[:200]:
-        print(s)
-    print(f"Toplam {len(sonuc)} satır bulundu.")
+    print(f"\nİşlem tamamlandı! Toplam çekilen satır sayısı: {len(sonuc)}")
