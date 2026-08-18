@@ -5,7 +5,7 @@ scraper_yapikredi_all.py
 import re
 import sys
 from dataclasses import dataclass
-from typing import List, Dict, Tuple, Set
+from typing import List, Dict, Set, Tuple
 
 YAPIKREDI_URL = "https://www.yapikredi.com.tr/bireysel-bankacilik/hesaplama-araclari/bireysel-urun-ve-hizmet-ucretleri"
 
@@ -50,48 +50,71 @@ def _parse_aciklama(raw_aciklama: str):
     raw = (raw_aciklama or "").strip()
     match = DATE_PATTERN.search(raw)
     if match:
-        return DATE_PATTERN.sub("", raw).strip(" ."), match.group(1)
+        tarih = match.group(1)
+        temiz = DATE_PATTERN.sub("", raw).strip(" .")
+        return temiz, tarih
     match_tr = DATE_PATTERN_TR.search(raw)
     if match_tr:
         gun = match_tr.group(1).zfill(2)
         ay = TURKCE_AYLAR.get(match_tr.group(2).lower(), "00")
         yil = match_tr.group(3)
-        return DATE_PATTERN_TR.sub("", raw).strip(" ."), f"{gun}.{ay}.{yil}"
+        tarih = f"{gun}.{ay}.{yil}"
+        temiz = DATE_PATTERN_TR.sub("", raw).strip(" .")
+        return temiz, tarih
     return raw, ""
 
 def _normalize(val: str) -> str:
     return (val or "").strip().replace("\xa0", " ").replace("\u200b", "").strip()
 
 def _find_col_indices_from_headers(header_texts: List[str]) -> Dict[str, int]:
-    headers_norm = [re.sub(r"\s+", " ", re.sub(r"\(.*?\)", "", h or "").replace("%", " ")).strip().lower() for h in header_texts]
+    def norm(h: str) -> str:
+        h2 = re.sub(r"\(.*?\)", "", (h or ""))
+        h2 = h2.replace("%", " ")
+        h2 = re.sub(r"\s+", " ", h2).strip().lower()
+        return h2
+    headers_norm = [norm(h) for h in header_texts]
 
     def find_col(keywords: List[str]) -> int:
         for i, h in enumerate(headers_norm):
-            if any(k in h for k in keywords):
+            if all(k in h for k in keywords):
                 return i
         return -1
 
-    # Önce masraf sütununu netleştir
-    col_masraf = find_col(["işlem kanalı", "işlem türü", "masraf", "hizmet", "ürün", "ücret türü", "kategori"])
-    if col_masraf == -1: col_masraf = 0
+    col_masraf = find_col(["masraf"])
+    if col_masraf == -1: col_masraf = find_col(["işlem"])
+    if col_masraf == -1: col_masraf = find_col(["ücret"])
+    if col_masraf == -1:
+        for k in (["eft"], ["gönderim"], ["havale"], ["swift"], ["gelen eft"], ["gelen"], ["kanal"]):
+            idx = find_col(k)
+            if idx != -1:
+                col_masraf = idx
+                break
 
-    # Tutar sütunu, masraf ile aynı indekse denk gelirse çakışmayı önle
-    col_asg_tutar = find_col(["asgari tutar", "ücret", "bsmv dahil", "tutar"])
-    if col_asg_tutar == col_masraf:
-        for i in range(len(headers_norm)):
-            if i != col_masraf and any(k in headers_norm[i] for k in ["tutar", "ücret", "bsmv"]):
+    col_asg_tutar = find_col(["asgari", "tutar"]) or find_col(["asgari"]) or find_col(["tutar"])
+    # EFT / Havale tabloları için BSMV takviyesi
+    if col_asg_tutar == -1:
+        for i, h in enumerate(headers_norm):
+            if ("bsmv" in h or "ücret" in h or "tl" in h) and i != col_masraf:
                 col_asg_tutar = i
                 break
 
-    col_asg_oran = find_col(["asgari oran", "oran"])
-    col_azm_tutar = find_col(["azami tutar", "azami"])
-    col_azm_oran = find_col(["azami oran"])
-    col_aciklama = find_col(["açıklama", "detay", "not"])
-    col_tarih = find_col(["güncelleme", "tarih"])
+    col_asg_oran = find_col(["asgari", "oran"]) or find_col(["asgari oran"]) or find_col(["oran"])
+    col_azm_tutar = find_col(["azami", "tutar"]) or find_col(["azami"]) or find_col(["tutar"])
+    col_azm_oran = find_col(["azami", "oran"]) or find_col(["azami oran"]) or find_col(["oran"])
+    col_aciklama = find_col(["açıklama"]) if find_col(["açıklama"]) != -1 else find_col(["aciklama"])
+    col_tarih = find_col(["güncelleme"]) or find_col(["guncelleme"]) or find_col(["tarih"])
+
+    if col_masraf == -1: col_masraf = 0
+    if col_asg_tutar == -1: col_asg_tutar = 1
 
     return {
-        "masraf": col_masraf, "asgari_tutar": col_asg_tutar, "asgari_oran": col_asg_oran, 
-        "azami_tutar": col_azm_tutar, "azami_oran": col_azm_oran, "aciklama": col_aciklama, "tarih": col_tarih
+        "masraf": col_masraf,
+        "asgari_tutar": col_asg_tutar,
+        "asgari_oran": col_asg_oran,
+        "azami_tutar": col_azm_tutar,
+        "azami_oran": col_azm_oran,
+        "aciklama": col_aciklama,
+        "tarih": col_tarih,
     }
 
 def scrape_yapikredi_all(url: str = YAPIKREDI_URL) -> List[UcretSatiri]:
@@ -102,11 +125,20 @@ def scrape_yapikredi_all(url: str = YAPIKREDI_URL) -> List[UcretSatiri]:
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         try:
-            context = browser.new_context(user_agent=HEADERS["User-Agent"], viewport={"width": 1440, "height": 1080}, locale="tr-TR")
+            context = browser.new_context(
+                user_agent=HEADERS["User-Agent"],
+                viewport={"width": 1440, "height": 1080},
+                locale="tr-TR",
+                extra_http_headers={
+                    "Accept-Language": "tr-TR,tr;q=0.9,en;q=0.8",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                }
+            )
             page = context.new_page()
             page.goto(url, timeout=120000, wait_until="domcontentloaded")
             page.wait_for_timeout(2000)
 
+            # Çerez kapat
             for sel_text in ["Tümünü Kabul Et", "Tümünü Kabul", "Tümünü Reddet", "Kabul Et", "Kabul", "Kapat"]:
                 try:
                     btn = page.locator(f"button:has-text(\"{sel_text}\"), a:has-text(\"{sel_text}\")").first
@@ -116,8 +148,12 @@ def scrape_yapikredi_all(url: str = YAPIKREDI_URL) -> List[UcretSatiri]:
                 except Exception:
                     pass
 
-            print("[yapikredi] Akordiyon menüleri açılıyor...", file=sys.stderr)
-            locators = [".accordion-title", ".accordionItem-title", ".collapsible-header", "a[data-toggle='collapse']", ".js-accordion-title", "h2.title", "h3.title", ".tab-link"]
+            # Akordiyonları Aç (EFT/Havale vs.)
+            print("[yapikredi] Menüler açılıyor...", file=sys.stderr)
+            locators = [
+                ".accordion-title", ".accordionItem-title", ".collapsible-header", 
+                "a[data-toggle='collapse']", ".js-accordion-title", "h2.title", "h3.title"
+            ]
             for loc in locators:
                 elements = page.locator(loc)
                 count = elements.count()
@@ -133,9 +169,12 @@ def scrape_yapikredi_all(url: str = YAPIKREDI_URL) -> List[UcretSatiri]:
                 page.evaluate("window.scrollBy(0, window.innerHeight);")
                 page.wait_for_timeout(300)
 
-            try: page.wait_for_load_state("networkidle", timeout=3000)
-            except Exception: pass
+            try:
+                page.wait_for_load_state("networkidle", timeout=3000)
+            except Exception:
+                pass
 
+            # JS Tablo Toplayıcı
             js_extract = r"""
 () => {
     function findCategory(table) {
@@ -156,28 +195,28 @@ def scrape_yapikredi_all(url: str = YAPIKREDI_URL) -> List[UcretSatiri]:
             }
             curr = curr.parentElement;
         }
-        return "Genel";
+        return "Yapı Kredi Genel";
     }
 
-    function getHeaderText(table) {
+    function getHeaderText(table){
         let thead = table.querySelector('thead');
         let row = null;
-        if (thead) {
+        if(thead){
             const trs = thead.querySelectorAll('tr');
-            row = trs[trs.length - 1] || trs[0];
+            row = trs[trs.length-1] || trs[0];
         } else {
             row = table.querySelector('tr');
         }
-        if (!row) return '';
-        return Array.from(row.querySelectorAll('th, td')).map(c => c.innerText.trim()).join(' | ');
+        if(!row) return '';
+        return Array.from(row.querySelectorAll('th,td')).map(c=>c.innerText.trim()).join(' | ');
     }
 
-    function rowsFromTable(table) {
+    function rowsFromTable(table){
         const trs = Array.from(table.querySelectorAll('tr'));
         const rows = [];
-        for (const tr of trs) {
-            const cells = Array.from(tr.querySelectorAll('th, td'));
-            if (cells.length === 0) continue;
+        for(const tr of trs){
+            const cells = Array.from(tr.querySelectorAll('th,td'));
+            if(cells.length === 0) continue;
             rows.push(cells.map(c => c.innerText.trim()));
         }
         return rows;
@@ -185,18 +224,20 @@ def scrape_yapikredi_all(url: str = YAPIKREDI_URL) -> List[UcretSatiri]:
 
     const out = [];
     const tables = Array.from(document.querySelectorAll('table'));
-    for (let i = 0; i < tables.length; i++) {
+    for(let i=0;i<tables.length;i++){
         const t = tables[i];
-        const header = getHeaderText(t);
-        const rows = rowsFromTable(t);
-        const kategori = findCategory(t);
-        out.push({ index: i, header: header, rows: rows, kategori: kategori });
+        out.push({
+            index: i, 
+            header: getHeaderText(t), 
+            rows: rowsFromTable(t), 
+            kategori: findCategory(t)
+        });
     }
     return out;
 }
 """
             tables_data = page.evaluate(js_extract)
-            print(f"[yapikredi] JS ile {len(tables_data)} <table> bulundu.", file=sys.stderr)
+            print(f"[yapikredi] JS ile {len(tables_data)} <table> bulundu", file=sys.stderr)
 
         finally:
             browser.close()
@@ -209,40 +250,52 @@ def scrape_yapikredi_all(url: str = YAPIKREDI_URL) -> List[UcretSatiri]:
 
     for tinfo in tables_data:
         rows = tinfo.get("rows", []) or []
-        kategori_baslik = _normalize(tinfo.get("kategori", "")) or "Genel"
-        
-        if len(rows) < 2: continue
+        kategori_baslik = tinfo.get("kategori", "Yapı Kredi Genel")
+        if not rows:
+            continue
 
+        # KUSURSUZ HEADER TESPİT MANTIĞI
         header_idx = 0
-        valid_keywords = ["tutar", "asgari", "açıklama", "güncelle", "oran", "ücret", "masraf", "işlem", "kanal", "tl", "komisyon", "bsmv"]
-        for i in range(min(5, len(rows))):
-            rowi = " ".join([c.lower() for c in rows[i]])
-            if any(k in rowi for k in valid_keywords):
-                header_idx = i
-                break
+        first_row = [c.lower() for c in rows[0]] if rows else []
+        if not any(any(k in c for k in ["tutar", "asgari", "açıklama", "güncelle", "oran", "kanal", "bsmv"]) for c in first_row):
+            found = False
+            for i in range(1, min(4, len(rows))):
+                rowi = " ".join([c.lower() for c in rows[i]])
+                if any(k in rowi for k in ["tutar", "asgari", "açıklama", "güncelle", "oran", "kanal", "bsmv"]):
+                    header_idx = i
+                    found = True
+                    break
+            if not found:
+                header_idx = 0
 
         header_row = rows[header_idx] if rows else []
         col_map = _find_col_indices_from_headers(header_row)
 
-        for r in rows[header_idx + 1:]:
-            def get_cell(idx): return _normalize(r[idx]) if 0 <= idx < len(r) else ""
+        for r in rows[header_idx+1:]:
+            def get_cell(idx):
+                return r[idx].strip() if 0 <= idx < len(r) else ""
 
             masraf = get_cell(col_map["masraf"])
-            asgari_tutar = get_cell(col_map["asgari_tutar"]) if col_map["asgari_tutar"] != -1 else get_cell(1)
+            
+            # KUSURSUZ SATIR KAYMA MANTIĞI
+            if masraf:
+                low = masraf.lower()
+                if (("tl" in low or "%" in low or re.search(r"\d", low)) and len(masraf) < 10):
+                    for c in r:
+                        if c and not any(tok in c.lower() for tok in ["tl", "tutar", "asgari", "azami", "oran", "%"]):
+                            masraf = c
+                            break
 
-            # Kayma durumunda toparlama (Eğer isim rakamlı bir tutarsa ve yanındaki isimse)
-            if not masraf or (len(masraf) < 8 and any(tok in masraf.lower() for tok in ["tl", "%", ","])):
-                for idx, c in enumerate(r):
-                    c_norm = _normalize(c)
-                    if c_norm and len(c_norm) > 2 and not any(tok in c_norm.lower() for tok in ["tl", "%"]):
-                        masraf = c_norm
-                        if col_map["asgari_tutar"] == -1 and idx + 1 < len(r):
-                            asgari_tutar = _normalize(r[idx+1])
+            if not masraf:
+                for c in r:
+                    if c and not any(tok in c.lower() for tok in ["tl","tutar","asgari","azami","oran","%"]):
+                        masraf = c
                         break
 
-            if not masraf or len(masraf) < 2:
+            if not masraf:
                 continue
 
+            asgari_tutar = get_cell(col_map["asgari_tutar"])
             asgari_oran = get_cell(col_map["asgari_oran"])
             azami_tutar = get_cell(col_map["azami_tutar"])
             azami_oran = get_cell(col_map["azami_oran"])
@@ -251,28 +304,33 @@ def scrape_yapikredi_all(url: str = YAPIKREDI_URL) -> List[UcretSatiri]:
             site_tarihi = get_cell(col_map["tarih"]) or aciklama_tarihi
 
             key = (kategori_baslik, masraf, asgari_tutar, azami_tutar)
-            if key in seen: continue
+            if key in seen:
+                continue
             seen.add(key)
 
             tum_satirlar.append(UcretSatiri(
-                kategori=kategori_baslik, masraf=masraf, asgari_tutar=asgari_tutar,
-                asgari_oran=asgari_oran, azami_tutar=azami_tutar, azami_oran=azami_oran,
-                aciklama=temiz_aciklama, site_guncelleme_tarihi=site_tarihi
+                kategori=kategori_baslik,
+                masraf=masraf,
+                asgari_tutar=asgari_tutar,
+                asgari_oran=asgari_oran,
+                azami_tutar=azami_tutar,
+                azami_oran=azami_oran,
+                aciklama=temiz_aciklama,
+                site_guncelleme_tarihi=site_tarihi
             ))
 
-    print(f"[yapikredi] Toplam {len(tum_satirlar)} satır komisyon/masraf verisi başarıyla işlendi.", file=sys.stderr)
+    print(f"[yapikredi] Toplam {len(tum_satirlar)} satır bulundu.", file=sys.stderr)
 
     try:
         import pandas as pd
         df = pd.DataFrame([s.__dict__ for s in tum_satirlar])
         out_fname = "yapikredi_all_komisyonlar.xlsx"
         df.to_excel(out_fname, index=False)
-        print(f"[yapikredi] Excel dosyası oluşturuldu: {out_fname}", file=sys.stderr)
-    except Exception as e:
+    except Exception:
         pass
 
     return tum_satirlar
 
 if __name__ == "__main__":
     sonuc = scrape_yapikredi_all()
-    print(f"\nİşlem tamamlandı! Toplam çekilen satır sayısı: {len(sonuc)}")
+    print(f"İşlem tamamlandı! Toplam çekilen satır sayısı: {len(sonuc)}")
