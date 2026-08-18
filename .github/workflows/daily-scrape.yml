@@ -3,6 +3,7 @@ name: Günlük Komisyon Güncelleme
 on:
   schedule:
     - cron: "00 05 * * *"
+
   workflow_dispatch:
     inputs:
       test_mail:
@@ -18,21 +19,59 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+
       - name: Repo'yu checkout et
         uses: actions/checkout@v4
+
 
       - name: Python kur
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
+
       - name: Bağımlılıkları yükle
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+
       - name: Playwright Chromium kur
-        run: playwright install --with-deps chromium
+        run: |
+          playwright install --with-deps chromium
+
+
+      # =====================================================
+      # DEBUG - HANGİ YAPI KREDİ SCRAPER ÇALIŞIYOR?
+      # =====================================================
+
+      - name: Yapı Kredi scraper sürüm kontrolü
+        run: |
+          echo "============================================"
+          echo "YAPI KREDİ SCRAPER KONTROLÜ"
+          echo "============================================"
+
+          echo "Çalışma klasörü:"
+          pwd
+
+          echo ""
+          echo "Repo commit:"
+          git rev-parse HEAD
+
+          echo ""
+          echo "scraper_yapikredi.py dosyası:"
+          ls -l scraper_yapikredi.py
+
+          echo ""
+          echo "SCRAPER_VERSION satırı:"
+          grep -n "SCRAPER_VERSION" scraper_yapikredi.py || echo "SCRAPER_VERSION BULUNAMADI"
+
+          echo ""
+          echo "Python tarafından kullanılan dosya:"
+          python -c "import scraper_yapikredi as s; print('DOSYA =', s.__file__); print('SURUM =', getattr(s, 'SCRAPER_VERSION', 'SURUM_YOK'))"
+
+          echo "============================================"
+
 
       - name: Eski Excel'i yedekle
         run: |
@@ -40,29 +79,48 @@ jobs:
             cp komisyonlar_guncel.xlsx komisyonlar_guncel_eski.xlsx
           fi
 
+
       - name: Scraper'ı çalıştır ve Excel'i güncelle
-        run: python main.py
+        run: |
+          python main.py
+
 
       - name: Değişiklik kontrolü ve mail bildirimi
         env:
           MAIL_USER: ${{ secrets.MAIL_USER }}
           MAIL_PASS: ${{ secrets.MAIL_PASS }}
-          MAIL_TO:   ${{ secrets.MAIL_TO }}
+          MAIL_TO: ${{ secrets.MAIL_TO }}
+
         run: |
           TEST_MODE="${{ github.event.inputs.test_mail }}"
+
           if [ "$TEST_MODE" = "true" ]; then
+
             python -c "
           from notify import check_and_notify
-          check_and_notify('komisyonlar_guncel_eski.xlsx', 'komisyonlar_guncel.xlsx', test_mode=True)
+          check_and_notify(
+              'komisyonlar_guncel_eski.xlsx',
+              'komisyonlar_guncel.xlsx',
+              test_mode=True
+          )
           "
+
           elif [ -f komisyonlar_guncel_eski.xlsx ]; then
+
             python -c "
           from notify import check_and_notify
-          check_and_notify('komisyonlar_guncel_eski.xlsx', 'komisyonlar_guncel.xlsx')
+          check_and_notify(
+              'komisyonlar_guncel_eski.xlsx',
+              'komisyonlar_guncel.xlsx'
+          )
           "
+
           else
+
             echo "[notify] İlk çalışma, karşılaştırma yapılmadı."
+
           fi
+
 
       - name: Excel dosyasını artifact olarak kaydet
         uses: actions/upload-artifact@v4
@@ -71,20 +129,30 @@ jobs:
           path: komisyonlar_guncel.xlsx
           retention-days: 30
 
+
       - name: Değişiklik var mı kontrol et
         id: git_check
         run: |
           if [ -n "$(git status --porcelain komisyonlar_guncel.xlsx)" ]; then
+
             echo "changed=true" >> "$GITHUB_OUTPUT"
+
           else
+
             echo "changed=false" >> "$GITHUB_OUTPUT"
+
           fi
+
 
       - name: Excel dosyasını commit et ve push et
         if: steps.git_check.outputs.changed == 'true'
+
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+
           git add komisyonlar_guncel.xlsx
+
           git commit -m "Komisyon ücretleri güncellendi ($(TZ='Europe/Istanbul' date +'%d.%m.%Y %H:%M'))"
+
           git push
