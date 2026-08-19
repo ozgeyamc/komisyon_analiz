@@ -27,7 +27,7 @@ import requests
 from bs4 import BeautifulSoup
 
 
-SCRAPER_VERSION = "2026-08-19-v2-ziraat-integrity-hierarchy"
+SCRAPER_VERSION = "2026-08-19-v3-ziraat-local-context-fix"
 
 ZIRAAT_URL = "https://www.ziraatbank.com.tr/tr/urun-ve-hizmet-ucretleri"
 
@@ -407,17 +407,37 @@ def _heading_text(
     )
 
 
+TRANSFER_GROUP_ALIASES = {
+    "eft": "EFT",
+    "fast": "FAST",
+    "havale": "Havale",
+    "swift": "Swift",
+    "altin eft": "Altın EFT",
+}
+
+
 def _context_headings(
     table,
-    limit: int = 30,
+    limit: int = 60,
 ) -> List[str]:
     """
-    Tabloya en yakın h1-h6 başlıklarını yakın -> uzak sırasıyla döndürür.
+    Tabloya en yakın bağlam etiketlerini yakın -> uzak sırasıyla döndürür.
+
+    Ziraat'ta ana kategori / accordion başlıkları yalnız h1-h6 değil,
+    button elemanında da bulunabiliyor.
     """
     result: List[str] = []
 
     for heading in table.find_all_previous(
-        ["h1", "h2", "h3", "h4", "h5", "h6"],
+        [
+            "h1",
+            "h2",
+            "h3",
+            "h4",
+            "h5",
+            "h6",
+            "button",
+        ],
         limit=limit,
     ):
         text = _heading_text(
@@ -449,25 +469,31 @@ def _find_category_and_hierarchy(
     table,
 ) -> Tuple[str, List[str]]:
     """
-    Örnek DOM:
-        Para Aktarma   <- ana kategori
-        FAST           <- alt bölüm
-        Mobil/ İnternet/Düzenli Ödeme <- tablo başlığı
+    Sibling tablo başlıklarını yanlışlıkla tek MASRAF hiyerarşisine
+    biriktirmez.
+
+    Mantık:
+      1) Geriye doğru ilk gerçek ana kategori bulunur.
+      2) Kategori ile mevcut tablo arasında görülen EN YAKIN başlık,
+         tablo başlığı olarak alınır.
+      3) Para Aktarma içinde EFT / FAST / Havale / Swift gibi son
+         açık transfer grubu ayrıca korunur.
+
+    Örnek:
+        Para Aktarma
+        FAST
+        Mobil/ İnternet/Düzenli Ödeme
         <table>
 
-    Sonuç:
-        kategori = Para Aktarma
-        hierarchy = ["FAST", "Mobil/ İnternet/Düzenli Ödeme"]
+    -> ["FAST", "Mobil/ İnternet/Düzenli Ödeme"]
     """
     nearby = _context_headings(
         table,
-        limit=40,
+        limit=80,
     )
 
     category = "Genel"
-    hierarchy_near_to_far: List[
-        str
-    ] = []
+    before_category: List[str] = []
 
     for text in nearby:
         key = _normalize_key(
@@ -480,57 +506,71 @@ def _find_category_and_hierarchy(
             ]
             break
 
-        hierarchy_near_to_far.append(
+        before_category.append(
             text
         )
 
-    # DOM'da en yakın başlık önce geldiği için hiyerarşiyi ters çevir.
-    hierarchy = list(
-        reversed(
-            hierarchy_near_to_far
-        )
-    )
+    # En yakın yerel tablo başlığı.
+    local_title = ""
 
-    # Gürültülü veya tekrar başlıkları ayıkla.
-    clean: List[str] = []
-
-    for text in hierarchy:
+    for text in before_category:
         key = _normalize_key(
             text
         )
 
-        if not text:
-            continue
-
-        if key in CATEGORY_ALIASES:
-            continue
-
-        if key in {
-            _normalize_key(x)
-            for x in IGNORE_HEADINGS
-        }:
+        if (
+            key in CATEGORY_ALIASES
+            or key in {
+                _normalize_key(x)
+                for x in IGNORE_HEADINGS
+            }
+        ):
             continue
 
         if len(text) > 180:
             continue
 
-        if any(
-            _normalize_key(existing)
-            == key
-            for existing in clean
-        ):
-            continue
+        local_title = text
+        break
 
-        clean.append(
-            text
+    transfer_group = ""
+
+    if category == "Para Aktarma":
+        # category ile mevcut table arasındaki etiketlerde,
+        # en yakından uzağa doğru ilk exact transfer grubu.
+        for text in before_category:
+            key = _normalize_key(
+                text
+            )
+
+            if key in TRANSFER_GROUP_ALIASES:
+                transfer_group = (
+                    TRANSFER_GROUP_ALIASES[
+                        key
+                    ]
+                )
+                break
+
+    hierarchy: List[str] = []
+
+    if transfer_group:
+        hierarchy.append(
+            transfer_group
         )
 
-    # Ziraat'ta pratikte kategori ile tablo arasında en fazla 2-3
-    # anlamlı başlık bulunuyor. Aşırı breadcrumb birikimini engelle.
-    if len(clean) > 3:
-        clean = clean[-3:]
+    if (
+        local_title
+        and _normalize_key(
+            local_title
+        ) != _normalize_key(
+            transfer_group
+        )
+    ):
+        hierarchy.append(
+            local_title
+        )
 
-    return category, clean
+    return category, hierarchy
 
 
 def _build_masraf(
@@ -586,18 +626,8 @@ def _build_masraf(
         else raw
     )
 
-    # SWIFT başlığını büyük/küçük harfe bağlı olmadan standartlaştır.
-    if any(
-        _normalize_key(part)
-        == "swift"
-        for part in hierarchy
-    ) and not _has_transfer_term(
-        masraf,
-        "swift",
-    ):
-        masraf = (
-            f"SWIFT - {masraf}"
-        )
+    # Swift grubu hierarchy içinde zaten korunur.
+    # Kelime sınırı kontrolü yalnız raporlama tarafında yapılır.
 
     return _normalize(
         masraf
@@ -1051,6 +1081,13 @@ def _parse_html(
             stats[
                 "missing_category_tables"
             ] += 1
+
+            print(
+                f"[ziraat][DEBUG][{source_name}] "
+                f"GENEL kalan tablo={table_index} | "
+                f"yakın bağlam={_context_headings(table, limit=15)}",
+                file=sys.stderr,
+            )
 
         table_record_count = 0
 
