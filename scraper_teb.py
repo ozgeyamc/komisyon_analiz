@@ -30,7 +30,7 @@ import requests
 from bs4 import BeautifulSoup
 
 
-SCRAPER_VERSION = "2026-08-19-v3-teb-dom-context-fix"
+SCRAPER_VERSION = "2026-08-19-v4-teb-nested-wrapper-context"
 
 TEB_URL = "https://www.teb.com.tr/urun-ve-hizmet-ucretleri/"
 TEB_TICARI_URL = "https://www.teb.com.tr/tuzel-urun-ve-hizmet-ucretleri/"
@@ -518,6 +518,12 @@ IGNORE_CONTEXT_TEXTS = {
     "$prmtabcontent$",
     "firmanız için uygun olanı seçin",
     "sizin için uygun olanı seçin",
+    "kurumsal çalışıyorum",
+    "kobi'yim",
+    "esnafım",
+    "çiftçiyim",
+    "girişimciyim",
+    "kadın patronum",
     "masraf",
     "asgari tutar",
     "asgari oran",
@@ -601,8 +607,18 @@ def _previous_text_nodes(
             }:
                 continue
 
-            # Önceki ücret tablosunun hücrelerini başlık/kategori adayı yapma.
-            if parent.find_parent("table") is not None:
+            # TEB sayfasında kategori ve tablo başlıkları, ücret tablolarını
+            # saran DIŞ/nested tabloların hücrelerinde bulunabiliyor.
+            #
+            # Bu yüzden "herhangi bir table içindeyse atla" demiyoruz.
+            # Yalnızca başka bir LEAF ücret tablosunun satır/hücre metinlerini
+            # bağlam adayı olmaktan çıkarıyoruz. Outer wrapper metinleri korunur.
+            ancestor_table = parent.find_parent("table")
+
+            if (
+                ancestor_table is not None
+                and _is_leaf_table(ancestor_table)
+            ):
                 continue
 
         value = _normalize(
