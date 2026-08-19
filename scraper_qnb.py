@@ -21,7 +21,7 @@ from typing import Dict, List, Optional, Set, Tuple
 from bs4 import BeautifulSoup
 
 
-SCRAPER_VERSION = "2026-08-19-v2-qnb-dynamic-integrity"
+SCRAPER_VERSION = "2026-08-19-v3-qnb-swift-context-debug"
 
 QNB_URL = "https://www.qnb.com.tr/yasal/urun-hizmet-ucretleri"
 
@@ -371,6 +371,56 @@ def _find_context_titles(
 
             table_title = text
             break
+
+    # Playwright'ın tabloya yazdığı gerçek accordion/heading adayları.
+    raw_labels = table.get("data-qnb-context-labels", "")
+
+    labels = []
+
+    if raw_labels:
+        try:
+            import json
+            parsed = json.loads(raw_labels)
+
+            if isinstance(parsed, list):
+                labels = [
+                    _normalize(x)
+                    for x in parsed
+                    if _is_valid_title(_normalize(x))
+                ]
+        except Exception:
+            labels = []
+
+    # En yakın label table_title için daha güvenilir olabilir.
+    if labels:
+        if not table_title or _normalize_key(table_title) == "genel":
+            table_title = labels[0]
+
+        # Ana kategori için kanal/transfer detayından daha genel bir label ara.
+        # Kesin değilse "Genel" bırakıyoruz; yanlış kategori uydurmuyoruz.
+        if kategori == "Genel":
+            channel_words = (
+                "subeden",
+                "qnb mobil",
+                "internet subesi",
+                "atm",
+                "fast",
+                "eft",
+                "havale",
+                "swift",
+                "ucret",
+                "masraf",
+            )
+
+            for candidate in reversed(labels):
+                key = _normalize_key(candidate)
+
+                if any(word in key for word in channel_words):
+                    continue
+
+                if 3 <= len(candidate.split()) <= 8:
+                    kategori = candidate
+                    break
 
     return kategori, table_title
 
@@ -758,38 +808,41 @@ def _build_masraf(
     raw_masraf: str,
     table_title: str,
 ) -> str:
+    raw_masraf = _normalize(raw_masraf)
+    table_title = _normalize(table_title)
 
-    raw_masraf = _normalize(
-        raw_masraf
+    masraf = raw_masraf
+
+    if table_title:
+        raw_key = _normalize_key(raw_masraf)
+        title_key = _normalize_key(table_title)
+
+        if (
+            raw_key != title_key
+            and title_key not in raw_key
+            and len(table_title) >= 4
+        ):
+            masraf = _normalize(
+                f"{table_title} - {raw_masraf}"
+            )
+
+    # QNB resmi kanallarında "Döviz Transferi (SWIFT)" olarak adlandırılan
+    # işlem, ücret ekranında "Yurtdışı YP Havale" biçiminde görünebiliyor.
+    # Excel'de SWIFT filtresinin bu gerçek ücretleri bulabilmesi için alias.
+    combined_key = _normalize_key(
+        " ".join([table_title, raw_masraf])
     )
 
-    table_title = _normalize(
-        table_title
+    swift_alias = (
+        "yurtdisi yp havale" in combined_key
+        or "yurt disi yp havale" in combined_key
+        or "doviz transfer" in combined_key
     )
 
-    if not table_title:
-        return raw_masraf
+    if swift_alias and not _has_transfer_term(masraf, "swift"):
+        masraf = _normalize(f"SWIFT - {masraf}")
 
-    raw_key = _normalize_key(
-        raw_masraf
-    )
-
-    title_key = _normalize_key(
-        table_title
-    )
-
-    if raw_key == title_key:
-        return raw_masraf
-
-    if title_key in raw_key:
-        return raw_masraf
-
-    if len(table_title) < 4:
-        return raw_masraf
-
-    return _normalize(
-        f"{table_title} - {raw_masraf}"
-    )
+    return masraf
 
 
 # =========================================================
@@ -887,6 +940,15 @@ def _parse_soup(
         ) = _find_context_titles(
             table
         )
+
+        if table_index < 12:
+            print(
+                f"[qnb][CONTEXT] tablo={table_index} | "
+                f"kategori={kategori} | "
+                f"başlık={table_title or '-'} | "
+                f"adaylar={table.get('data-qnb-context-labels', '')}",
+                file=sys.stderr,
+            )
 
         table_record_count = 0
 
@@ -1433,6 +1495,92 @@ def _scrape_with_playwright(
                             )
                     except Exception:
                         pass
+
+            # QNB kategori başlıkları klasik H2/H3 olmayabiliyor.
+            # Her tabloya yakın accordion/başlık adaylarını data attribute
+            # olarak yaz; BeautifulSoup tarafında gerçek DOM bağlamını okuyalım.
+            try:
+                page.evaluate("""
+                () => {
+                    const clean = v => (v || "")
+                        .replace(/\\u00a0/g, " ")
+                        .replace(/\\u200b/g, "")
+                        .replace(/\\s+/g, " ")
+                        .trim();
+
+                    const bad = new Set([
+                        "Müşteri Ol", "Ara", "Kapat", "Menü",
+                        "Ana Sayfa", "Online İşlemler",
+                        "Ürün Hizmet Ücretleri", "Ürün ve Hizmet Ücretleri"
+                    ]);
+
+                    function valid(t) {
+                        t = clean(t);
+                        return t.length >= 3 && t.length <= 140 && !bad.has(t);
+                    }
+
+                    function pushUnique(arr, text) {
+                        text = clean(text);
+                        if (!valid(text)) return;
+                        if (!arr.includes(text)) arr.push(text);
+                    }
+
+                    document.querySelectorAll("table").forEach((table, idx) => {
+                        const labels = [];
+
+                        // En yakın ancestor'lardan accordion trigger / heading topla.
+                        let node = table.parentElement;
+                        for (let depth = 0; node && depth < 12; depth++, node = node.parentElement) {
+                            const labelledBy = node.getAttribute && node.getAttribute("aria-labelledby");
+                            if (labelledBy) {
+                                const lab = document.getElementById(labelledBy);
+                                if (lab) pushUnique(labels, lab.innerText);
+                            }
+
+                            // node'un önceki kardeşlerinde trigger/heading
+                            let prev = node.previousElementSibling;
+                            for (let k = 0; prev && k < 4; k++, prev = prev.previousElementSibling) {
+                                if (prev.matches && prev.matches(
+                                    "h1,h2,h3,h4,h5,h6,button,[role='button'],[aria-expanded]"
+                                )) {
+                                    pushUnique(labels, prev.innerText);
+                                }
+
+                                const trigger = prev.querySelector && prev.querySelector(
+                                    "button[aria-expanded],[role='button'],h1,h2,h3,h4,h5,h6"
+                                );
+                                if (trigger) pushUnique(labels, trigger.innerText);
+                            }
+
+                            // ancestor içindeki doğrudan trigger
+                            const direct = Array.from(node.children || []).find(ch =>
+                                ch !== table &&
+                                ch.matches &&
+                                ch.matches("button[aria-expanded],[role='button'],h1,h2,h3,h4,h5,h6")
+                            );
+                            if (direct) pushUnique(labels, direct.innerText);
+                        }
+
+                        // Doküman sırasındaki yakın expandable controls da debug için.
+                        const prevControls = Array.from(
+                            document.querySelectorAll("[aria-expanded],h2,h3,h4,h5,h6")
+                        ).filter(el => {
+                            const pos = el.compareDocumentPosition(table);
+                            return !!(pos & Node.DOCUMENT_POSITION_FOLLOWING);
+                        }).slice(-8).reverse();
+
+                        prevControls.forEach(el => pushUnique(labels, el.innerText));
+
+                        table.dataset.qnbContextLabels = JSON.stringify(labels.slice(0, 8));
+                        table.dataset.qnbTableIndex = String(idx);
+                    });
+                }
+                """)
+            except Exception as exc:
+                print(
+                    f"[qnb][UYARI] DOM context işaretleme başarısız: {exc}",
+                    file=sys.stderr,
+                )
 
             html = page.content()
 
