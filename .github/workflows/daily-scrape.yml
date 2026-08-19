@@ -14,15 +14,29 @@ on:
 permissions:
   contents: write
 
+# Aynı workflow'un iki kez aynı anda Excel'e yazmasını engeller
+concurrency:
+  group: komisyon-guncelleme
+  cancel-in-progress: false
+
 jobs:
   scrape-and-update:
     runs-on: ubuntu-latest
 
     steps:
+      # =====================================================
+      # REPOSITORY
+      # =====================================================
 
       - name: Repo'yu checkout et
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
+
+      # =====================================================
+      # PYTHON
+      # =====================================================
 
       - name: Python kur
         uses: actions/setup-python@v5
@@ -42,48 +56,65 @@ jobs:
 
 
       # =====================================================
-      # DEBUG - HANGİ YAPI KREDİ SCRAPER ÇALIŞIYOR?
+      # SCRAPER SÜRÜM KONTROLÜ
       # =====================================================
 
-      - name: Yapı Kredi scraper sürüm kontrolü
+      - name: Scraper sürümlerini kontrol et
         run: |
           echo "============================================"
-          echo "YAPI KREDİ SCRAPER KONTROLÜ"
+          echo "SCRAPER SÜRÜM KONTROLÜ"
           echo "============================================"
 
+          echo ""
           echo "Çalışma klasörü:"
           pwd
 
           echo ""
-          echo "Repo commit:"
+          echo "Çalıştırılan commit:"
           git rev-parse HEAD
 
           echo ""
-          echo "scraper_yapikredi.py dosyası:"
-          ls -l scraper_yapikredi.py
-
-          echo ""
-          echo "SCRAPER_VERSION satırı:"
-          grep -n "SCRAPER_VERSION" scraper_yapikredi.py || echo "SCRAPER_VERSION BULUNAMADI"
-
-          echo ""
-          echo "Python tarafından kullanılan dosya:"
+          echo "--- YAPI KREDİ ---"
           python -c "import scraper_yapikredi as s; print('DOSYA =', s.__file__); print('SURUM =', getattr(s, 'SCRAPER_VERSION', 'SURUM_YOK'))"
 
+          echo ""
+          echo "--- GARANTİ ---"
+          python -c "import scraper as s; print('DOSYA =', s.__file__); print('SURUM =', getattr(s, 'SCRAPER_VERSION', 'SURUM_YOK'))"
+
+          echo ""
+          echo "--- İŞ BANKASI ---"
+          python -c "import scraper_isbank as s; print('DOSYA =', s.__file__); print('SURUM =', getattr(s, 'SCRAPER_VERSION', 'SURUM_YOK'))"
+
+          echo ""
           echo "============================================"
 
+
+      # =====================================================
+      # ESKİ EXCEL YEDEĞİ
+      # =====================================================
 
       - name: Eski Excel'i yedekle
         run: |
           if [ -f komisyonlar_guncel.xlsx ]; then
             cp komisyonlar_guncel.xlsx komisyonlar_guncel_eski.xlsx
+            echo "[excel] Eski Excel yedeklendi."
+          else
+            echo "[excel] Önceki Excel bulunamadı."
           fi
 
+
+      # =====================================================
+      # SCRAPER
+      # =====================================================
 
       - name: Scraper'ı çalıştır ve Excel'i güncelle
         run: |
           python main.py
 
+
+      # =====================================================
+      # MAIL BİLDİRİMİ
+      # =====================================================
 
       - name: Değişiklik kontrolü ve mail bildirimi
         env:
@@ -96,6 +127,8 @@ jobs:
 
           if [ "$TEST_MODE" = "true" ]; then
 
+            echo "[notify] Test modu aktif."
+
             python -c "
           from notify import check_and_notify
           check_and_notify(
@@ -106,6 +139,8 @@ jobs:
           "
 
           elif [ -f komisyonlar_guncel_eski.xlsx ]; then
+
+            echo "[notify] Eski ve yeni Excel karşılaştırılıyor."
 
             python -c "
           from notify import check_and_notify
@@ -122,6 +157,10 @@ jobs:
           fi
 
 
+      # =====================================================
+      # ARTIFACT
+      # =====================================================
+
       - name: Excel dosyasını artifact olarak kaydet
         uses: actions/upload-artifact@v4
         with:
@@ -130,19 +169,29 @@ jobs:
           retention-days: 30
 
 
+      # =====================================================
+      # GIT DEĞİŞİKLİK KONTROLÜ
+      # =====================================================
+
       - name: Değişiklik var mı kontrol et
         id: git_check
         run: |
           if [ -n "$(git status --porcelain komisyonlar_guncel.xlsx)" ]; then
 
             echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "[git] Excel dosyasında değişiklik var."
 
           else
 
             echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "[git] Excel dosyasında değişiklik yok."
 
           fi
 
+
+      # =====================================================
+      # COMMIT + REBASE + PUSH
+      # =====================================================
 
       - name: Excel dosyasını commit et ve push et
         if: steps.git_check.outputs.changed == 'true'
@@ -151,8 +200,26 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
+          echo "[git] Excel commit hazırlanıyor..."
+
           git add komisyonlar_guncel.xlsx
 
           git commit -m "Komisyon ücretleri güncellendi ($(TZ='Europe/Istanbul' date +'%d.%m.%Y %H:%M'))"
 
-          git push
+          echo ""
+          echo "[git] GitHub'daki en güncel main alınıyor..."
+
+          git fetch origin main
+
+          echo ""
+          echo "[git] Excel commit'i güncel main üzerine taşınıyor..."
+
+          git rebase origin/main
+
+          echo ""
+          echo "[git] Push yapılıyor..."
+
+          git push origin HEAD:main
+
+          echo ""
+          echo "[git] Push başarıyla tamamlandı."
