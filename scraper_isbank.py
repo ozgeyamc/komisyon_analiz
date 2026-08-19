@@ -17,7 +17,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 ISBANK_URL = "https://www.isbank.com.tr/urun-ve-hizmet-ucretleri"
 
-SCRAPER_VERSION = "2026-08-19-v2-isbank-integrity"
+SCRAPER_VERSION = "2026-08-19-v3-isbank-transfer-boundaries"
 
 HEADERS = {
     "User-Agent": (
@@ -141,9 +141,38 @@ TRANSFER_TERMS = (
 )
 
 
-def _contains_transfer_term(text: str) -> bool:
+def _has_transfer_term(text: str, term: str) -> bool:
+    """
+    Transfer terimlerini kelime/sınır bazlı arar.
+
+    Özellikle "EFT" için düz substring kullanmıyoruz;
+    aksi halde "Defteri" kelimesinin içindeki "eft"
+    yanlış pozitif üretir.
+    """
     normalized = _normalize_key(text)
-    return any(term in normalized for term in TRANSFER_TERMS)
+
+    patterns = {
+        "fast": r"(?<![a-z0-9])fast(?![a-z0-9])",
+        "eft": r"(?<![a-z0-9])eft(?![a-z0-9])",
+        "havale": r"(?<![a-z0-9])havale(?![a-z0-9])",
+        "swift": r"(?<![a-z0-9])swift(?![a-z0-9])",
+        "uftm": r"(?<![a-z0-9])uftm(?![a-z0-9])",
+        "fon transfer": r"fon\s+transfer",
+        "para transfer": r"para\s+transfer",
+    }
+
+    pattern = patterns.get(term)
+    if pattern:
+        return re.search(pattern, normalized) is not None
+
+    return term in normalized
+
+
+def _contains_transfer_term(text: str) -> bool:
+    return any(
+        _has_transfer_term(text, term)
+        for term in TRANSFER_TERMS
+    )
 
 
 def _build_masraf(
@@ -778,7 +807,7 @@ def _print_transfer_report(
         found = [
             row
             for row in rows
-            if needle in _normalize_key(row.masraf)
+            if _has_transfer_term(row.masraf, needle)
         ]
 
         print(
