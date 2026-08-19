@@ -21,7 +21,7 @@ import requests
 from bs4 import BeautifulSoup
 
 
-SCRAPER_VERSION = "2026-08-19-v2-akbank-integrity"
+SCRAPER_VERSION = "2026-08-19-v3-akbank-fast-fix"
 
 AKBANK_URL = "https://www.akbank.com/urun-ve-hizmet-ucretleri"
 
@@ -250,14 +250,33 @@ def _is_valid_title(text: str) -> bool:
     }
 
 
+def _direct_text(node) -> str:
+    """
+    Bir kapsayıcı div/p içinde sadece doğrudan yazılmış metni alır.
+    Böylece bütün bölümün dev metnini başlık sanmayız.
+    """
+    if not node:
+        return ""
+
+    pieces = []
+
+    for child in node.find_all(string=True, recursive=False):
+        value = _normalize(child)
+        if value:
+            pieces.append(value)
+
+    return _normalize(" ".join(pieces))
+
+
 def _find_context_titles(table) -> Tuple[str, str]:
     """
     kategori:
         En yakın önceki H2; yoksa H1.
 
     table_title:
-        Aynı ana bölüm içinde tabloya en yakın önceki
-        h3/h4/h5/h6/strong/button başlığı.
+        Tabloya en yakın başlık. Akbank bazı tablo adlarını klasik
+        h3/h4 yerine p/div/strong içinde de yayınlayabildiği için
+        ikinci bir yakın-başlık taraması da yapılır.
     """
 
     kategori = "Genel"
@@ -276,6 +295,7 @@ def _find_context_titles(table) -> Tuple[str, str]:
             if _is_valid_title(text):
                 kategori = text
 
+    # Önce klasik heading yapısı.
     for node in table.find_all_previous(
         ["h2", "h3", "h4", "h5", "h6", "strong", "button"],
         limit=40,
@@ -293,6 +313,36 @@ def _find_context_titles(table) -> Tuple[str, str]:
 
         table_title = text
         break
+
+    # FAST Uluslararası gibi bazı başlıklar heading tag'i dışında
+    # kalabiliyor. Mevcut table_title transfer ifadesi taşımıyorsa,
+    # tabloya en yakın kısa p/div/span metinlerinde transfer başlığı ara.
+    if not _contains_transfer_term(table_title):
+        for node in table.find_all_previous(
+            ["p", "div", "span", "strong"],
+            limit=45,
+        ):
+            text = _direct_text(node)
+
+            if not text:
+                continue
+
+            if not _is_valid_title(text):
+                continue
+
+            if len(text) > 180:
+                continue
+
+            if not _contains_transfer_term(text):
+                continue
+
+            # Önceki tablonun açıklamasındaki uzun FAST cümlesini
+            # başlık sanmamak için başlık benzeri kısa ifadeleri tercih et.
+            if len(text.split()) > 18:
+                continue
+
+            table_title = text
+            break
 
     return kategori, table_title
 
@@ -555,30 +605,54 @@ def _row_is_same_header(
 def _build_masraf(
     raw_masraf: str,
     table_title: str,
+    aciklama: str,
 ) -> str:
+    """
+    MASRAF adını hiyerarşik kurar.
+
+    Akbank'ın yurtiçi FAST tarifesi ayrı "FAST" masraf satırı olarak
+    yayınlanmıyor. İlgili EFT ücretlerinin açıklamasında
+    "FAST sistemi üzerinden yapılan işlemler için de aynı ücret uygulanır"
+    deniyor. Bu durumda MASRAF'a FAST etiketi de eklenir ki Excel'de
+    FAST filtresi aynı tarifeleri bulabilsin.
+    """
 
     raw_masraf = _normalize(raw_masraf)
     table_title = _normalize(table_title)
+    aciklama = _normalize(aciklama)
 
-    if not table_title:
-        return raw_masraf
+    masraf = raw_masraf
 
-    raw_key = _normalize_key(raw_masraf)
-    title_key = _normalize_key(table_title)
+    if table_title:
+        raw_key = _normalize_key(raw_masraf)
+        title_key = _normalize_key(table_title)
 
-    if raw_key == title_key:
-        return raw_masraf
+        if (
+            raw_key != title_key
+            and title_key not in raw_key
+            and len(table_title) >= 4
+        ):
+            masraf = _normalize(
+                f"{table_title} - {raw_masraf}"
+            )
 
-    if title_key in raw_key:
-        return raw_masraf
+    # Yurtiçi FAST: Akbank açıklamada EFT tarifesinin FAST için de
+    # geçerli olduğunu söylüyorsa aynı satırı FAST filtresine görünür yap.
+    aciklama_key = _normalize_key(aciklama)
 
-    # Çok kısa/generic bir üst başlığı ekleme.
-    if len(table_title) < 4:
-        return raw_masraf
-
-    return _normalize(
-        f"{table_title} - {raw_masraf}"
+    fast_same_fee = (
+        "fast sistemi uzerinden yapilan islemler icin de ayni ucret uygulanir"
+        in aciklama_key
+        or (
+            _has_transfer_term(aciklama, "fast")
+            and "ayni ucret" in aciklama_key
+        )
     )
+
+    if fast_same_fee and not _has_transfer_term(masraf, "fast"):
+        masraf = _normalize(f"FAST / {masraf}")
+
+    return masraf
 
 
 # =========================================================
@@ -732,6 +806,7 @@ def _parse_soup(
             masraf = _build_masraf(
                 raw_masraf=raw_masraf,
                 table_title=table_title,
+                aciklama=aciklama_raw,
             )
 
             stats["parsed_before_dedup"] += 1
@@ -1195,6 +1270,21 @@ def _print_transfer_report(
                 f"{label} MASRAF alanında hiç bulunamadı.",
                 file=sys.stderr,
             )
+
+    fast_from_description = [
+        row
+        for row in rows
+        if (
+            _has_transfer_term(row.masraf, "fast")
+            and "ayni ucret" in _normalize_key(row.aciklama)
+        )
+    ]
+
+    print(
+        f"[akbank] FAST (EFT tarifesiyle aynı ücret): "
+        f"{len(fast_from_description)} kayıt",
+        file=sys.stderr,
+    )
 
     print(
         "[akbank] =================================",
