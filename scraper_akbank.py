@@ -18,10 +18,10 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Set, Tuple
 
 import requests
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, NavigableString
 
 
-SCRAPER_VERSION = "2026-08-19-v3-akbank-fast-fix"
+SCRAPER_VERSION = "2026-08-19-v4-akbank-context-fix"
 
 AKBANK_URL = "https://www.akbank.com/urun-ve-hizmet-ucretleri"
 
@@ -251,10 +251,6 @@ def _is_valid_title(text: str) -> bool:
 
 
 def _direct_text(node) -> str:
-    """
-    Bir kapsayıcı div/p içinde sadece doğrudan yazılmış metni alır.
-    Böylece bütün bölümün dev metnini başlık sanmayız.
-    """
     if not node:
         return ""
 
@@ -268,22 +264,73 @@ def _direct_text(node) -> str:
     return _normalize(" ".join(pieces))
 
 
+def _nearest_text_between_tables(table) -> str:
+    """
+    Sadece mevcut tablo ile bir önceki tablo arasındaki metne bakar.
+
+    Böylece bir önceki transfer tablosunun başlığı sonraki,
+    ilgisiz tabloya taşınmaz.
+
+    Örn.:
+      "Akbank Fast Uluslararası ..." başlığı yalnızca kendi
+      "Tüm Tutarlar İçin" tablosuna bağlanır; daha sonra gelen
+      "Posta İle Aylık Hesap Özeti" tablosuna sızmaz.
+    """
+    node = table.previous_element
+    visited = 0
+
+    while node is not None and visited < 250:
+        visited += 1
+
+        # Bir önceki tabloya ulaştık: daha geriye gitme.
+        if getattr(node, "name", None) == "table":
+            break
+
+        if isinstance(node, NavigableString):
+            parent = getattr(node, "parent", None)
+
+            # Önceki tablonun içindeki text node'larını alma.
+            if parent is not None and parent.find_parent("table") is not None:
+                node = node.previous_element
+                continue
+
+            text = _normalize(str(node))
+
+            if (
+                _is_valid_title(text)
+                and len(text) <= 140
+                and len(text.split()) <= 18
+            ):
+                key = _normalize_key(text)
+
+                # Tarih, kolon başlığı ve açıklama benzeri metinleri ele.
+                bad_tokens = (
+                    "asgari tutar",
+                    "asgari oran",
+                    "azami tutar",
+                    "azami oran",
+                    "guncelleme tarihi",
+                    "bsmv",
+                    "kkdf",
+                )
+
+                if not any(token in key for token in bad_tokens):
+                    return text
+
+        node = node.previous_element
+
+    return ""
+
+
 def _find_context_titles(table) -> Tuple[str, str]:
     """
-    kategori:
-        En yakın önceki H2; yoksa H1.
-
-    table_title:
-        Tabloya en yakın başlık. Akbank bazı tablo adlarını klasik
-        h3/h4 yerine p/div/strong içinde de yayınlayabildiği için
-        ikinci bir yakın-başlık taraması da yapılır.
+    Ana kategori için H2/H1 kullanır.
+    Tablo başlığında yalnızca DOM olarak bu tabloya ait yakın metni
+    kullanır; önceki tablonun transfer başlığını taşımayı engeller.
     """
-
     kategori = "Genel"
-    table_title = ""
 
     h2 = table.find_previous("h2")
-
     if h2:
         text = _normalize(h2.get_text(" ", strip=True))
         if _is_valid_title(text):
@@ -295,50 +342,26 @@ def _find_context_titles(table) -> Tuple[str, str]:
             if _is_valid_title(text):
                 kategori = text
 
-    # Önce klasik heading yapısı.
-    for node in table.find_all_previous(
-        ["h2", "h3", "h4", "h5", "h6", "strong", "button"],
-        limit=40,
-    ):
-        if node.name == "h2":
-            break
+    table_title = _nearest_text_between_tables(table)
 
-        text = _normalize(node.get_text(" ", strip=True))
-
-        if not _is_valid_title(text):
-            continue
-
-        if _same_text(text, kategori):
-            continue
-
-        table_title = text
-        break
-
-    # FAST Uluslararası gibi bazı başlıklar heading tag'i dışında
-    # kalabiliyor. Mevcut table_title transfer ifadesi taşımıyorsa,
-    # tabloya en yakın kısa p/div/span metinlerinde transfer başlığı ara.
-    if not _contains_transfer_term(table_title):
+    # Local text bulunamadıysa yalnızca aynı H2 bölümündeki
+    # klasik heading'i fallback olarak kullan.
+    if not table_title:
         for node in table.find_all_previous(
-            ["p", "div", "span", "strong"],
-            limit=45,
+            ["h3", "h4", "h5", "h6", "strong", "button"],
+            limit=20,
         ):
-            text = _direct_text(node)
-
-            if not text:
+            # Arada başka bir table varsa bu heading eski tabloya aittir.
+            between_table = node.find_next("table")
+            if between_table is not table:
                 continue
+
+            text = _normalize(node.get_text(" ", strip=True))
 
             if not _is_valid_title(text):
                 continue
 
-            if len(text) > 180:
-                continue
-
-            if not _contains_transfer_term(text):
-                continue
-
-            # Önceki tablonun açıklamasındaki uzun FAST cümlesini
-            # başlık sanmamak için başlık benzeri kısa ifadeleri tercih et.
-            if len(text.split()) > 18:
+            if _same_text(text, kategori):
                 continue
 
             table_title = text
@@ -606,38 +629,59 @@ def _build_masraf(
     raw_masraf: str,
     table_title: str,
     aciklama: str,
+    kategori: str = "",
 ) -> str:
     """
-    MASRAF adını hiyerarşik kurar.
+    Transfer başlığını yalnızca gerçekten gerekli olduğunda MASRAF'a ekler.
 
-    Akbank'ın yurtiçi FAST tarifesi ayrı "FAST" masraf satırı olarak
-    yayınlanmıyor. İlgili EFT ücretlerinin açıklamasında
-    "FAST sistemi üzerinden yapılan işlemler için de aynı ücret uygulanır"
-    deniyor. Bu durumda MASRAF'a FAST etiketi de eklenir ki Excel'de
-    FAST filtresi aynı tarifeleri bulabilsin.
+    Bu kısıtlama:
+      - "Anlık EFT/Havale İşlem Ücreti - Aval Kredileri"
+      - "Kobi Giden Swift Paketi 350 - KKB Risk Raporu"
+      - "Fast Uluslararası - Posta İle Aylık Hesap Özeti"
+    gibi yanlış başlık taşmalarını engeller.
     """
-
     raw_masraf = _normalize(raw_masraf)
     table_title = _normalize(table_title)
     aciklama = _normalize(aciklama)
+    kategori = _normalize(kategori)
 
     masraf = raw_masraf
 
-    if table_title:
-        raw_key = _normalize_key(raw_masraf)
-        title_key = _normalize_key(table_title)
+    raw_has_transfer = _contains_transfer_term(raw_masraf)
+    title_has_transfer = _contains_transfer_term(table_title)
 
-        if (
-            raw_key != title_key
-            and title_key not in raw_key
-            and len(table_title) >= 4
-        ):
-            masraf = _normalize(
-                f"{table_title} - {raw_masraf}"
-            )
+    # Satırın kendisinde transfer terimi yoksa tablo başlığını yalnızca
+    # satır gerçekten jenerik/kanal-kart satırıysa öne ekle.
+    #
+    # Böylece yanlış bir context başlığı gelse bile:
+    #   Kobi Giden Swift Paketi 350 - KKB Risk Raporu
+    # gibi anlamsız birleşimler oluşmaz.
+    raw_key = _normalize_key(raw_masraf)
 
-    # Yurtiçi FAST: Akbank açıklamada EFT tarifesinin FAST için de
-    # geçerli olduğunu söylüyorsa aynı satırı FAST filtresine görünür yap.
+    generic_transfer_rows = {
+        "tum tutarlar icin",
+        "axess business",
+        "wings business",
+        "axess kobi",
+    }
+
+    allow_title_prefix = (
+        raw_key in generic_transfer_rows
+        or raw_key.startswith("tum tutarlar")
+    )
+
+    if (
+        table_title
+        and title_has_transfer
+        and not raw_has_transfer
+        and allow_title_prefix
+        and not _same_text(table_title, raw_masraf)
+    ):
+        masraf = _normalize(f"{table_title} - {raw_masraf}")
+
+    # Akbank yurtiçi FAST tarifesi ayrı satır değil;
+    # EFT ücret satırının açıklamasında aynı ücretin FAST için de
+    # uygulanacağı açıkça belirtiliyor.
     aciklama_key = _normalize_key(aciklama)
 
     fast_same_fee = (
@@ -651,6 +695,26 @@ def _build_masraf(
 
     if fast_same_fee and not _has_transfer_term(masraf, "fast"):
         masraf = _normalize(f"FAST / {masraf}")
+
+    # Standart döviz havale/transfer kalemleri Akbank'ın SWIFT hizmetinin
+    # ücret karşılığıdır. Fast Uluslararası ve Western Union'ı SWIFT diye
+    # etiketlemiyoruz.
+    combined = _normalize_key(
+        " ".join([kategori, table_title, raw_masraf])
+    )
+
+    is_standard_fx_transfer = (
+        (
+            "uluslararasi fon transferi" in combined
+            or "doviz havale" in combined
+            or "doviz transfer" in combined
+        )
+        and "fast uluslararasi" not in combined
+        and "western union" not in combined
+    )
+
+    if is_standard_fx_transfer and not _has_transfer_term(masraf, "swift"):
+        masraf = _normalize(f"SWIFT - {masraf}")
 
     return masraf
 
@@ -807,6 +871,7 @@ def _parse_soup(
                 raw_masraf=raw_masraf,
                 table_title=table_title,
                 aciklama=aciklama_raw,
+                kategori=kategori,
             )
 
             stats["parsed_before_dedup"] += 1
