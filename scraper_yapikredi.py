@@ -1,51 +1,35 @@
 """
-VakıfBank "Ürün ve Hizmet Ücretleri" scraper.
+Yapı Kredi Ürün ve Hizmet Ücretleri scraper.
 
-Bu sürüm:
-- VakıfBank sayfasının çağırdığı getProductServicePrices API yanıtını Playwright ile yakalar.
-- İlk yakalanan yanıtı körlemesine kullanmaz; tüm aday API cevaplarını inceler.
-- JSON yapısı değişse bile Fee/fee altında veya iç içe listelerde ücret listesini bulmaya çalışır.
-- API item anahtarlarını loglar; şema değişikliğini erken fark ettirir.
-- Ana kategori + varsa alt grup/kanal + ücret adını korur.
-- "Uluslararası Fon Transferi" kalemlerini SWIFT filtresinde görünür yapar.
-- FAST / EFT / Havale / SWIFT kontrolü yapar.
-- Duplicate, eksik isim, boş kayıt ve tarih alanlarını raporlar.
-- 30 saniyelik sabit beklemeyi kısaltır; API gelmezse bir kez kontrollü reload dener.
+- Playwright ile ücret sayfasındaki tüm tabloları toplar.
+- Ana H2 başlığını kategori olarak kullanır.
+- Accordion/alt başlık + tablo başlığı + satır adını MASRAF alanında birleştirir.
+- FAST / EFT / Havale / SWIFT gibi başlıkların Excel filtresinde kaybolmasını engeller.
+- Gerçek veri satırlarını yanlışlıkla tekrar header sanıp atlamaz.
+- Aynı isimli ücretleri farklı alt kategorilerde yanlışlıkla duplicate saymaz.
 - main.py / update_excel.py ile uyumlu UcretSatiri listesi döndürür.
 """
 
-import json
 import re
 import sys
-import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Set, Tuple
 
 
-SCRAPER_VERSION = "2026-08-19-v3-vakifbank-channel-currency-fix"
+SCRAPER_VERSION = "2026-08-18-v8-complete-fee-hierarchy"
 
-VAKIFBANK_API_URL = (
-    "https://inbound.apigateway.vakifbank.com.tr:8443/"
-    "getProductServicePrices"
+YAPIKREDI_URL = (
+    "https://www.yapikredi.com.tr/"
+    "bireysel-bankacilik/hesaplama-araclari/"
+    "bireysel-urun-ve-hizmet-ucretleri"
 )
 
-VAKIFBANK_PAGE_URL = (
-    "https://www.vakifbank.com.tr/tr/urun-ve-hizmet-ucretleri"
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36"
 )
 
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Accept-Language": "tr-TR,tr;q=0.9,en;q=0.8",
-}
-
-
-# =========================================================
-# VERİ YAPISI
-# =========================================================
 
 @dataclass
 class UcretSatiri:
@@ -63,27 +47,55 @@ class ScraperError(Exception):
     pass
 
 
+TURKCE_AYLAR = {
+    "ocak": "01",
+    "şubat": "02",
+    "mart": "03",
+    "nisan": "04",
+    "mayıs": "05",
+    "haziran": "06",
+    "temmuz": "07",
+    "ağustos": "08",
+    "eylül": "09",
+    "ekim": "10",
+    "kasım": "11",
+    "aralık": "12",
+}
+
+DATE_PATTERN = re.compile(
+    r"(?:son\s+)?(?:güncellenme|güncelleme)\s*tarihi\s*:?\s*"
+    r"(\d{1,2}[./]\d{1,2}[./]\d{4}(?:\s+\d{1,2}:\d{2})?)",
+    re.IGNORECASE,
+)
+
+DATE_PATTERN_TR = re.compile(
+    r"(?:son\s+)?(?:güncellenme|güncelleme)\s+tarihi\s*:?\s*"
+    r"(\d{1,2})\s+"
+    r"(ocak|şubat|mart|nisan|mayıs|haziran|temmuz|ağustos|eylül|ekim|kasım|aralık)\s+"
+    r"(\d{4})",
+    re.IGNORECASE,
+)
+
+
 # =========================================================
-# NORMALİZASYON
+# METİN YARDIMCILARI
 # =========================================================
 
-def _normalize(value) -> str:
+
+def normalize(value: Optional[str]) -> str:
     if value is None:
         return ""
-
-    text = str(value)
-    text = text.replace("\xa0", " ")
-    text = text.replace("\u200b", "")
-    text = text.replace("\r", " ")
-    text = text.replace("\n", " ")
-    text = re.sub(r"\s+", " ", text)
-
-    return text.strip()
+    value = str(value)
+    value = value.replace("\xa0", " ")
+    value = value.replace("\u200b", "")
+    value = value.replace("\r", " ")
+    value = value.replace("\n", " ")
+    value = re.sub(r"\s+", " ", value)
+    return value.strip()
 
 
-def _normalize_key(value) -> str:
-    text = _normalize(value).lower()
-
+def normalize_header(value: Optional[str]) -> str:
+    value = normalize(value).lower()
     replacements = {
         "ı": "i",
         "ğ": "g",
@@ -92,1783 +104,776 @@ def _normalize_key(value) -> str:
         "ö": "o",
         "ç": "c",
     }
-
     for old, new in replacements.items():
-        text = text.replace(old, new)
-
-    text = re.sub(r"\s+", " ", text)
-
-    return text.strip()
-
-
-def _normalize_tutar(value) -> str:
-    """
-    API'deki gerçek 0 değerlerini boş bırakır.
-    '0,50' gibi sıfır olmayan oranları korur.
-    """
-    if value is None:
-        return ""
-
-    if isinstance(value, bool):
-        return ""
-
-    if isinstance(value, (int, float)):
-        if value == 0:
-            return ""
-
-        if isinstance(value, float) and value.is_integer():
-            return str(int(value))
-
-        return str(value)
-
-    text = _normalize(value)
-
-    if not text:
-        return ""
-
-    if text in {
-        "0",
-        "0.0",
-        "0.00",
-        "0,0",
-        "0,00",
-        "-",
-    }:
-        return ""
-
-    try:
-        numeric = float(
-            text.replace(".", "").replace(",", ".")
-            if "," in text
-            else text
-        )
-
-        if numeric == 0:
-            return ""
-
-    except Exception:
-        pass
-
-    return text
+        value = value.replace(old, new)
+    value = value.replace("%", " ")
+    value = re.sub(r"\([^)]*\)", " ", value)
+    value = re.sub(r"\s+", " ", value)
+    return value.strip()
 
 
-def _normalize_tarih(value) -> str:
-    """
-    Çeşitli VakıfBank tarih formatlarını:
-        dd.mm.yyyy HH:MM
-    biçimine getirir.
-    """
-    text = _normalize(value)
+def identity(value: Optional[str]) -> str:
+    """Duplicate / başlık karşılaştırması için daha hafif normalize."""
+    return normalize_header(value)
 
-    if not text:
-        return ""
 
-    # 2026-04-28T10:10:41 / Z / +03:00
-    match = re.match(
-        r"^(\d{4})-(\d{2})-(\d{2})"
-        r"[T\s](\d{2}):(\d{2})",
-        text,
-    )
+def parse_aciklama(raw_aciklama: str) -> Tuple[str, str]:
+    raw = normalize(raw_aciklama)
+    if not raw:
+        return "", ""
 
+    match = DATE_PATTERN.search(raw)
     if match:
-        return (
-            f"{match.group(3)}."
-            f"{match.group(2)}."
-            f"{match.group(1)} "
-            f"{match.group(4)}:"
-            f"{match.group(5)}"
-        )
+        tarih = match.group(1)
+        temiz = normalize(DATE_PATTERN.sub("", raw)).strip(" .:-")
+        return temiz, tarih
 
-    # dd.mm.yyyyHH:MM
-    match = re.match(
-        r"^(\d{1,2}[./]\d{1,2}[./]\d{4})"
-        r"(\d{2}:\d{2})",
-        text,
-    )
-
+    match = DATE_PATTERN_TR.search(raw)
     if match:
-        return (
-            match.group(1).replace("/", ".")
-            + " "
-            + match.group(2)
-        )
+        gun = match.group(1).zfill(2)
+        ay = TURKCE_AYLAR.get(match.group(2).lower(), "")
+        yil = match.group(3)
+        if ay:
+            tarih = f"{gun}.{ay}.{yil}"
+            temiz = normalize(DATE_PATTERN_TR.sub("", raw)).strip(" .:-")
+            return temiz, tarih
 
-    # dd.mm.yyyy HH:MM:SS
-    match = re.match(
-        r"^(\d{1,2}[./]\d{1,2}[./]\d{4})"
-        r"\s+(\d{2}:\d{2}):\d{2}",
-        text,
-    )
+    return raw, ""
 
-    if match:
-        return (
-            match.group(1).replace("/", ".")
-            + " "
-            + match.group(2)
-        )
 
-    # dd.mm.yyyy HH:MM
-    match = re.match(
-        r"^(\d{1,2}[./]\d{1,2}[./]\d{4})"
-        r"\s+(\d{2}:\d{2})",
-        text,
-    )
-
-    if match:
-        return (
-            match.group(1).replace("/", ".")
-            + " "
-            + match.group(2)
-        )
-
-    # dd.mm.yyyy
-    match = re.match(
-        r"^(\d{1,2}[./]\d{1,2}[./]\d{4})$",
-        text,
-    )
-
-    if match:
-        return match.group(1).replace("/", ".")
-
-    return text
+def get_cell(row: List[str], index: int) -> str:
+    if index < 0 or index >= len(row):
+        return ""
+    return normalize(row[index])
 
 
 # =========================================================
-# TRANSFER TERİMLERİ
+# HEADER / KOLON TESPİTİ
 # =========================================================
 
-TRANSFER_TERMS = (
-    "fast",
-    "eft",
-    "havale",
-    "swift",
-)
+
+def find_col(headers: List[str], keywords: List[str]) -> int:
+    for index, header in enumerate(headers):
+        if all(keyword in header for keyword in keywords):
+            return index
+    return -1
 
 
-def _has_transfer_term(
-    text: str,
-    term: str,
-) -> bool:
-    normalized = _normalize_key(text)
+def header_score(row: List[str]) -> int:
+    """
+    Yalnızca HEADER hücrelerinin kendisini puanlar.
+    Data satırındaki uzun açıklamada geçen 'asgari tutar' vb.
+    ifadeler yüzünden satırın header sayılmasını önlemek için bu fonksiyon
+    sadece find_header_index sırasında kullanılır.
+    """
+    headers = [normalize_header(cell) for cell in row]
 
-    patterns = {
-        "fast": r"(?<![a-z0-9])fast(?![a-z0-9])",
-        "eft": r"(?<![a-z0-9])eft(?![a-z0-9])",
-        "havale": r"(?<![a-z0-9])havale(?![a-z0-9])",
-        "swift": r"(?<![a-z0-9])swift(?![a-z0-9])",
+    tests = [
+        ["asgari", "tutar"],
+        ["asgari", "oran"],
+        ["azami", "tutar"],
+        ["azami", "oran"],
+        ["aciklama"],
+        ["guncelleme", "tarihi"],
+        ["guncellenme", "tarihi"],
+    ]
+
+    score = 0
+    for keywords in tests:
+        if any(all(k in h for k in keywords) for h in headers):
+            score += 1
+    return score
+
+
+def find_header_index(rows: List[List[str]]) -> int:
+    best_index = -1
+    best_score = 0
+
+    for index, row in enumerate(rows[:10]):
+        score = header_score(row)
+        if score > best_score:
+            best_index = index
+            best_score = score
+
+    # Standart ücret tablosu olduğunu anlamak için en az 3 header sinyali.
+    if best_score < 3:
+        return -1
+
+    return best_index
+
+
+def find_columns(header_row: List[str]) -> Dict[str, int]:
+    headers = [normalize_header(h) for h in header_row]
+
+    result = {
+        "masraf": 0 if header_row else -1,
+        "asgari_tutar": find_col(headers, ["asgari", "tutar"]),
+        "asgari_oran": find_col(headers, ["asgari", "oran"]),
+        "azami_tutar": find_col(headers, ["azami", "tutar"]),
+        "azami_oran": find_col(headers, ["azami", "oran"]),
+        "aciklama": find_col(headers, ["aciklama"]),
+        "tarih": find_col(headers, ["guncelleme", "tarihi"]),
     }
 
-    pattern = patterns.get(term)
+    if result["tarih"] == -1:
+        result["tarih"] = find_col(headers, ["guncellenme", "tarihi"])
 
-    if pattern:
-        return re.search(
-            pattern,
-            normalized,
-        ) is not None
+    # Yapı Kredi standart ücret tablosunda kolonlar bu sırada.
+    if len(header_row) >= 7:
+        fallbacks = {
+            "masraf": 0,
+            "asgari_tutar": 1,
+            "asgari_oran": 2,
+            "azami_tutar": 3,
+            "azami_oran": 4,
+            "aciklama": 5,
+            "tarih": 6,
+        }
+        for key, fallback_index in fallbacks.items():
+            if result[key] == -1:
+                result[key] = fallback_index
 
-    return term in normalized
+    return result
+
+
+def is_repeated_header(row: List[str], header: List[str]) -> bool:
+    """
+    Gerçek veri satırlarını yanlışlıkla header diye silmez.
+
+    Eski mantık header_score(row) >= 3 idi. Bu, örneğin YP Teminat
+    Mektubu açıklamasında 'azami oran' ve 'asgari tutar' geçtiği için
+    gerçek veri satırını atabiliyordu.
+    """
+    row_norm = [identity(x) for x in row]
+    header_norm = [identity(x) for x in header]
+
+    # Birebir aynı satırsa kesin header tekrarı.
+    if row_norm == header_norm:
+        return True
+
+    exact_header_cells = {
+        "asgari tutar",
+        "asgari oran",
+        "azami tutar",
+        "azami oran",
+        "aciklama",
+        "guncelleme tarihi",
+        "guncellenme tarihi",
+    }
+
+    exact_matches = sum(1 for cell in row_norm if cell in exact_header_cells)
+    return exact_matches >= 4
 
 
 # =========================================================
-# JSON / API ŞEMA BULMA
+# MASRAF ADI OLUŞTURMA
 # =========================================================
 
-FEE_NAME_KEYS = (
-    "FeeName",
-    "feeName",
-    "ItemName",
-    "itemName",
-    "Name",
-    "name",
-)
 
-FEE_VALUE_KEYS = (
-    "MinimumAmount",
-    "minimumAmount",
-    "MinimumRate",
-    "minimumRate",
-    "MaximumAmount",
-    "maximumAmount",
-    "MaximumRate",
-    "maximumRate",
-    "Description",
-    "description",
-    "UpdateDate",
-    "updateDate",
-)
-
-CATEGORY_KEYS = (
-    "MainTransactionGroupName",
-    "mainTransactionGroupName",
-    "MainGroupName",
-    "mainGroupName",
-    "CategoryName",
-    "categoryName",
-)
-
-SUBGROUP_KEYS = (
-    "TransactionGroupName",
-    "transactionGroupName",
-    "SubTransactionGroupName",
-    "subTransactionGroupName",
-    "FeeGroupName",
-    "feeGroupName",
-    "GroupName",
-    "groupName",
-)
-
-CHANNEL_KEYS = (
-    "Channel",
-    "channel",
-    "ChannelName",
-    "channelName",
-    "TransactionChannelName",
-    "transactionChannelName",
-)
-
-
-def _first_value(
-    item: dict,
-    keys,
-):
-    for key in keys:
-        if key not in item:
-            continue
-
-        value = item.get(key)
-
-        if value is None:
-            continue
-
-        if isinstance(
-            value,
-            (dict, list),
-        ):
-            continue
-
-        text = _normalize(value)
-
-        if text:
-            return text
-
-    return ""
-
-
-
-def _with_currency(
-    amount: str,
-    currency: str,
-) -> str:
-    """
-    API CurrencyCode bilgisini tutarlarda kaybetme.
-    Örn:
-      5 + USD -> USD 5
-      10 + TL -> TL 10
-    """
-    amount = _normalize(amount)
-    currency = _normalize(currency)
-
-    if not amount:
-        return ""
-
-    if not currency:
-        return amount
-
-    amount_key = _normalize_key(amount)
-    currency_key = _normalize_key(currency)
-
-    if (
-        amount_key.startswith(currency_key + " ")
-        or amount_key.endswith(" " + currency_key)
-    ):
-        return amount
-
-    return f"{currency} {amount}"
-
-
-def _looks_like_fee_item(
-    item,
-) -> bool:
-    if not isinstance(
-        item,
-        dict,
-    ):
-        return False
-
-    has_name = any(
-        key in item
-        and _normalize(item.get(key))
-        for key in FEE_NAME_KEYS
-    )
-
-    if not has_name:
-        return False
-
-    has_value_key = any(
-        key in item
-        for key in FEE_VALUE_KEYS
-    )
-
-    has_category_key = any(
-        key in item
-        for key in CATEGORY_KEYS
-    )
-
-    return (
-        has_value_key
-        or has_category_key
-    )
-
-
-def _collect_fee_lists(
-    node,
-    path: str = "$",
-) -> List[
-    Tuple[
-        str,
-        List[dict],
-    ]
-]:
-    """
-    Bilinen Data.Fee yapısına ek olarak, şema değişirse
-    iç içe JSON'da ücret item'larına benzeyen listeleri bulur.
-    """
-    candidates: List[
-        Tuple[
-            str,
-            List[dict],
-        ]
-    ] = []
-
-    if isinstance(
-        node,
-        dict,
-    ):
-        for key, value in node.items():
-            child_path = (
-                f"{path}.{key}"
-            )
-
-            if isinstance(
-                value,
-                list,
-            ):
-                dict_items = [
-                    item
-                    for item in value
-                    if isinstance(
-                        item,
-                        dict,
-                    )
-                ]
-
-                fee_like = [
-                    item
-                    for item in dict_items
-                    if _looks_like_fee_item(
-                        item
-                    )
-                ]
-
-                if fee_like:
-                    candidates.append(
-                        (
-                            child_path,
-                            fee_like,
-                        )
-                    )
-
-            candidates.extend(
-                _collect_fee_lists(
-                    value,
-                    child_path,
-                )
-            )
-
-    elif isinstance(
-        node,
-        list,
-    ):
-        for index, value in enumerate(
-            node
-        ):
-            candidates.extend(
-                _collect_fee_lists(
-                    value,
-                    f"{path}[{index}]",
-                )
-            )
-
-    return candidates
-
-
-def _extract_fee_list(
-    data,
-) -> Tuple[
-    List[dict],
-    str,
-]:
-    """
-    Önce bilinen VakıfBank şemasını dener.
-    Sonra recursive şema keşfine düşer.
-    """
-    if isinstance(
-        data,
-        dict,
-    ):
-        for data_key in (
-            "Data",
-            "data",
-        ):
-            block = data.get(
-                data_key
-            )
-
-            if isinstance(
-                block,
-                dict,
-            ):
-                for fee_key in (
-                    "Fee",
-                    "fee",
-                    "Fees",
-                    "fees",
-                ):
-                    fee_list = block.get(
-                        fee_key
-                    )
-
-                    if isinstance(
-                        fee_list,
-                        list,
-                    ):
-                        dict_items = [
-                            item
-                            for item in fee_list
-                            if isinstance(
-                                item,
-                                dict,
-                            )
-                        ]
-
-                        if dict_items:
-                            return (
-                                dict_items,
-                                f"$.{data_key}.{fee_key}",
-                            )
-
-            elif isinstance(
-                block,
-                list,
-            ):
-                dict_items = [
-                    item
-                    for item in block
-                    if isinstance(
-                        item,
-                        dict,
-                    )
-                ]
-
-                if any(
-                    _looks_like_fee_item(
-                        item
-                    )
-                    for item in dict_items
-                ):
-                    return (
-                        dict_items,
-                        f"$.{data_key}",
-                    )
-
-        for fee_key in (
-            "Fee",
-            "fee",
-            "Fees",
-            "fees",
-        ):
-            fee_list = data.get(
-                fee_key
-            )
-
-            if isinstance(
-                fee_list,
-                list,
-            ):
-                dict_items = [
-                    item
-                    for item in fee_list
-                    if isinstance(
-                        item,
-                        dict,
-                    )
-                ]
-
-                if dict_items:
-                    return (
-                        dict_items,
-                        f"$.{fee_key}",
-                    )
-
-    if isinstance(
-        data,
-        list,
-    ):
-        dict_items = [
-            item
-            for item in data
-            if isinstance(
-                item,
-                dict,
-            )
-        ]
-
-        if any(
-            _looks_like_fee_item(
-                item
-            )
-            for item in dict_items
-        ):
-            return (
-                dict_items,
-                "$",
-            )
-
-    candidates = _collect_fee_lists(
-        data
-    )
-
-    if not candidates:
-        return [], ""
-
-    # En çok ücret item'ı içeren aday.
-    candidates.sort(
-        key=lambda item: len(
-            item[1]
-        ),
-        reverse=True,
-    )
-
-    return candidates[0][1], candidates[0][0]
-
-
-# =========================================================
-# MASRAF HİYERARŞİSİ
-# =========================================================
-
-def _append_unique(
-    parts: List[str],
-    value: str,
-) -> None:
-    value = _normalize(value)
-
+def _add_unique_component(parts: List[str], value: str) -> None:
+    value = normalize(value).strip(" -–—|")
     if not value:
         return
 
-    value_key = _normalize_key(
-        value
-    )
+    value_id = identity(value)
+    if not value_id:
+        return
 
+    # Aynı başlığı iki kez ekleme.
     for existing in parts:
-        existing_key = (
-            _normalize_key(
-                existing
-            )
-        )
-
-        if (
-            existing_key == value_key
-            or value_key in existing_key
-        ):
+        existing_id = identity(existing)
+        if value_id == existing_id:
             return
+
+        # Örn. alt başlık 'EFT', tablo başlığı 'EFT Gönderimi'.
+        # Daha açıklayıcı olan uzun metin zaten EFT içeriyorsa kısa olanı
+        # ayrıca eklemek zorunda değiliz.
+        if value_id in existing_id and len(value_id) < len(existing_id):
+            return
+
+    # Yeni parça, var olan kısa parçayı kapsıyorsa kısa parçayı çıkar.
+    parts[:] = [
+        existing
+        for existing in parts
+        if not (
+            identity(existing) in value_id
+            and len(identity(existing)) < len(value_id)
+        )
+    ]
 
     parts.append(value)
 
 
-def _build_masraf(
-    item: dict,
-    raw_name: str,
+def build_masraf_name(
+    alt_kategori: str,
+    tablo_basligi: str,
+    satir_masrafi: str,
 ) -> str:
     """
-    API'de varsa alt işlem grubu ve kanal bilgisini ücret adıyla
-    birleştirir. Ana kategori KATEGORİ kolonunda ayrıca tutulur.
+    Excel'deki MASRAF alanına anlamlı hiyerarşi koyar.
+
+    Örnekler:
+      FAST Gönderim - İnternet/Mobil – 0 - 8.300 TL
+      EFT Gönderimi - Geç - İnternet/Mobil – 0 - 8.300 TL
+      Havale Gönderimi - ATM – 0 - 8.300 TL
+      Uluslararası Fon Transferi ve Mesajlaşma Ücreti / SWIFT -
+          Döviz Havale Gönderimi - Şubeden - Aynı Gün Valörlü
     """
     parts: List[str] = []
 
-    subgroup = _first_value(
-        item,
-        SUBGROUP_KEYS,
-    )
+    _add_unique_component(parts, alt_kategori)
+    _add_unique_component(parts, tablo_basligi)
+    _add_unique_component(parts, satir_masrafi)
 
-    channel = _first_value(
-        item,
-        CHANNEL_KEYS,
-    )
-
-    _append_unique(
-        parts,
-        subgroup,
-    )
-
-    _append_unique(
-        parts,
-        channel,
-    )
-
-    _append_unique(
-        parts,
-        raw_name,
-    )
-
-    masraf = (
-        " - ".join(parts)
-        if parts
-        else raw_name
-    )
-
-    combined = _normalize_key(
-        " ".join(
-            [
-                subgroup,
-                channel,
-                raw_name,
-                _first_value(
-                    item,
-                    CATEGORY_KEYS,
-                ),
-            ]
-        )
-    )
-
-    # VakıfBank'ta SWIFT işlemi açıklama/başlık olarak
-    # "Uluslararası Fon Transferi" veya "Döviz Transferi"
-    # biçiminde yayınlanabilir.
-    swift_alias = (
-        "uluslararasi fon transfer" in combined
-        or "yurtdisi doviz transfer" in combined
-        or "yurt disi doviz transfer" in combined
-    )
-
-    if (
-        swift_alias
-        and not _has_transfer_term(
-            masraf,
-            "swift",
-        )
-    ):
-        masraf = (
-            f"SWIFT - {masraf}"
-        )
-
-    return _normalize(
-        masraf
-    )
+    return " - ".join(parts)
 
 
 # =========================================================
-# API ITEM PARSER
+# PLAYWRIGHT / DOM
 # =========================================================
 
-def _parse_fee_list(
-    fee_list: List[dict],
-) -> Tuple[
-    List[UcretSatiri],
-    Dict[str, int],
-]:
-    stats: Dict[str, int] = {
-        "raw_items": len(fee_list),
-        "non_dict": 0,
-        "missing_name": 0,
-        "empty_record": 0,
-        "parsed_before_dedup": 0,
-        "duplicates": 0,
-        "missing_category": 0,
-        "missing_date": 0,
-    }
 
-    rows: List[
-        UcretSatiri
-    ] = []
+def collect_tables(url: str):
+    from playwright.sync_api import sync_playwright
 
+    print(f"[yapikredi] SÜRÜM: {SCRAPER_VERSION}", file=sys.stderr)
+    print(f"[yapikredi] Sayfa açılıyor: {url}", file=sys.stderr)
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(
+            user_agent=USER_AGENT,
+            viewport={"width": 1440, "height": 1080},
+            locale="tr-TR",
+            extra_http_headers={
+                "Accept-Language": "tr-TR,tr;q=0.9,en;q=0.8",
+            },
+        )
+        page = context.new_page()
+
+        try:
+            page.goto(url, timeout=120000, wait_until="domcontentloaded")
+            page.wait_for_timeout(3500)
+
+            # Cookie
+            for text in [
+                "Tümünü Kabul Et",
+                "Tümünü Kabul",
+                "Kabul Et",
+                "Kabul",
+            ]:
+                try:
+                    locator = page.get_by_text(text, exact=True).first
+                    if locator.is_visible(timeout=800):
+                        locator.click(timeout=2500)
+                        print(
+                            f"[yapikredi] Cookie butonu: {text}",
+                            file=sys.stderr,
+                        )
+                        page.wait_for_timeout(500)
+                        break
+                except Exception:
+                    pass
+
+            print("[yapikredi] Accordion'lar açılıyor...", file=sys.stderr)
+
+            # Sadece gerçekten kapalı accordion kontrollerini aç.
+            for round_no in range(10):
+                opened = 0
+                elements = page.locator("[aria-expanded='false']")
+                count = elements.count()
+
+                for i in range(count):
+                    try:
+                        element = elements.nth(i)
+                        if not element.is_visible(timeout=150):
+                            continue
+                        element.scroll_into_view_if_needed(timeout=1000)
+                        element.click(timeout=1500, force=True)
+                        opened += 1
+                        page.wait_for_timeout(80)
+                    except Exception:
+                        pass
+
+                if opened == 0:
+                    break
+
+                print(
+                    f"[yapikredi] Accordion turu {round_no + 1}: "
+                    f"{opened} adet açıldı.",
+                    file=sys.stderr,
+                )
+                page.wait_for_timeout(300)
+
+            print("[yapikredi] Sayfa taranıyor...", file=sys.stderr)
+
+            # Lazy load için kademeli scroll.
+            stable = 0
+            previous_height = 0
+
+            for _ in range(180):
+                page.evaluate(
+                    "window.scrollBy(0, Math.max(window.innerHeight * 0.75, 500));"
+                )
+                page.wait_for_timeout(180)
+
+                height = page.evaluate("document.body.scrollHeight")
+                bottom = page.evaluate(
+                    "window.innerHeight + window.scrollY >= "
+                    "document.body.scrollHeight - 120"
+                )
+
+                if bottom and height == previous_height:
+                    stable += 1
+                else:
+                    stable = 0
+
+                previous_height = height
+                if stable >= 5:
+                    break
+
+            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            page.wait_for_timeout(1200)
+
+            javascript = r"""
+            () => {
+                function clean(value) {
+                    return (value || "")
+                        .replace(/\u00a0/g, " ")
+                        .replace(/\u200b/g, "")
+                        .replace(/\r/g, " ")
+                        .replace(/\n/g, " ")
+                        .replace(/\s+/g, " ")
+                        .trim();
+                }
+
+                function nearestPreviousHeading(table, tagName) {
+                    const xpath = `preceding::${tagName}[1]`;
+                    const result = document.evaluate(
+                        xpath,
+                        table,
+                        null,
+                        XPathResult.FIRST_ORDERED_NODE_TYPE,
+                        null
+                    );
+                    return result.singleNodeValue;
+                }
+
+                function getCategory(table) {
+                    const h2 = nearestPreviousHeading(table, "h2");
+                    if (h2) {
+                        const text = clean(h2.innerText);
+                        if (text) return text;
+                    }
+
+                    const h1 = nearestPreviousHeading(table, "h1");
+                    if (h1) {
+                        const text = clean(h1.innerText);
+                        if (text) return text;
+                    }
+
+                    return "Yapı Kredi";
+                }
+
+                function getSubcategory(table) {
+                    // Tabloya en yakın önceki accordion başlığı / buton / h5.
+                    const xpath =
+                        "preceding::*[self::h5 or self::h4 or self::button][1]";
+                    const result = document.evaluate(
+                        xpath,
+                        table,
+                        null,
+                        XPathResult.FIRST_ORDERED_NODE_TYPE,
+                        null
+                    );
+                    const node = result.singleNodeValue;
+                    return node ? clean(node.innerText) : "";
+                }
+
+                function getRows(table) {
+                    const trs = Array.from(table.querySelectorAll("tr"))
+                        .filter(tr => tr.closest("table") === table);
+
+                    const matrix = [];
+                    const spans = new Map();
+                    let rowIndex = 0;
+
+                    for (const tr of trs) {
+                        const cells = Array.from(tr.children).filter(
+                            el => el.tagName === "TD" || el.tagName === "TH"
+                        );
+                        if (!cells.length) continue;
+
+                        if (!matrix[rowIndex]) matrix[rowIndex] = [];
+                        let colIndex = 0;
+
+                        function fillPending() {
+                            while (spans.has(`${rowIndex}:${colIndex}`)) {
+                                const val = spans.get(`${rowIndex}:${colIndex}`);
+                                matrix[rowIndex][colIndex] = val;
+                                colIndex++;
+                            }
+                        }
+
+                        fillPending();
+
+                        for (const cell of cells) {
+                            fillPending();
+
+                            const text = clean(cell.innerText);
+                            const rowspan = Math.max(
+                                parseInt(cell.getAttribute("rowspan") || "1", 10),
+                                1
+                            );
+                            const colspan = Math.max(
+                                parseInt(cell.getAttribute("colspan") || "1", 10),
+                                1
+                            );
+
+                            for (let c = 0; c < colspan; c++) {
+                                matrix[rowIndex][colIndex + c] = text;
+                            }
+
+                            if (rowspan > 1) {
+                                for (let r = 1; r < rowspan; r++) {
+                                    for (let c = 0; c < colspan; c++) {
+                                        spans.set(
+                                            `${rowIndex + r}:${colIndex + c}`,
+                                            text
+                                        );
+                                    }
+                                }
+                            }
+
+                            colIndex += colspan;
+                        }
+
+                        // Satırın sonundaki pending rowspan hücrelerini de ekle.
+                        fillPending();
+                        rowIndex++;
+                    }
+
+                    return matrix
+                        .map(row => row.map(cell => clean(cell || "")))
+                        .filter(row => row.some(cell => cell !== ""));
+                }
+
+                const allTables = Array.from(document.querySelectorAll("table"));
+                const rootTables = allTables.filter(
+                    table => !table.parentElement.closest("table")
+                );
+
+                return rootTables.map((table, index) => ({
+                    index,
+                    kategori: getCategory(table),
+                    alt_kategori: getSubcategory(table),
+                    rows: getRows(table),
+                }));
+            }
+            """
+
+            tables = page.evaluate(javascript)
+
+            print(
+                f"[yapikredi] {len(tables)} adet tablo bulundu.",
+                file=sys.stderr,
+            )
+
+            total_rows = sum(len(t.get("rows", [])) for t in tables)
+            print(
+                f"[yapikredi] Toplam tablo satırı: {total_rows}",
+                file=sys.stderr,
+            )
+
+            return tables
+
+        finally:
+            context.close()
+            browser.close()
+
+
+# =========================================================
+# PARSE
+# =========================================================
+
+
+def parse_tables(tables) -> List[UcretSatiri]:
+    sonuc: List[UcretSatiri] = []
+
+    # alt_kategori + tablo başlığı duplicate anahtarına dahil.
     seen: Set[
-        Tuple[
-            str,
-            str,
-            str,
-            str,
-            str,
-            str,
-            str,
-            str,
-        ]
+        Tuple[str, str, str, str, str, str, str, str, str, str]
     ] = set()
 
-    for item in fee_list:
-        if not isinstance(
-            item,
-            dict,
-        ):
-            stats[
-                "non_dict"
-            ] += 1
+    kategori_sayilari: Dict[str, int] = {}
+
+    fee_table_count = 0
+    ignored_table_count = 0
+    zero_record_tables = 0
+
+    candidate_rows = 0
+    parsed_before_dedup = 0
+    duplicate_rows = 0
+    repeated_headers = 0
+    note_rows = 0
+    invalid_rows = 0
+
+    for table in tables:
+        rows = table.get("rows", []) or []
+        table_index = table.get("index")
+        kategori = normalize(table.get("kategori")) or "Yapı Kredi"
+        alt_kategori = normalize(table.get("alt_kategori"))
+
+        if not rows:
+            ignored_table_count += 1
             continue
 
-        raw_name = _first_value(
-            item,
-            FEE_NAME_KEYS,
-        )
+        header_index = find_header_index(rows)
 
-        if not raw_name:
-            stats[
-                "missing_name"
-            ] += 1
+        if header_index == -1:
+            ignored_table_count += 1
             continue
 
-        kategori = _first_value(
-            item,
-            CATEGORY_KEYS,
-        )
+        fee_table_count += 1
 
-        if not kategori:
-            kategori = "Genel"
-            stats[
-                "missing_category"
-            ] += 1
+        header = [normalize(x) for x in rows[header_index]]
+        column_map = find_columns(header)
+        tablo_basligi = get_cell(header, 0)
 
-        currency = _first_value(
-            item,
-            (
-                "CurrencyCode",
-                "currencyCode",
-                "Currency",
-                "currency",
-            ),
-        )
+        table_record_count = 0
 
-        asgari_tutar = _with_currency(
-            _normalize_tutar(
-                item.get(
-                    "MinimumAmount",
-                    item.get(
-                        "minimumAmount",
-                        "",
-                    ),
-                )
-            ),
-            currency,
-        )
+        for row in rows[header_index + 1:]:
+            row = [normalize(cell) for cell in row]
 
-        asgari_oran = (
-            _normalize_tutar(
-                item.get(
-                    "MinimumRate",
-                    item.get(
-                        "minimumRate",
-                        "",
-                    ),
-                )
+            if not row or not any(row):
+                continue
+
+            candidate_rows += 1
+
+            # Sadece gerçek header tekrarıysa atla.
+            if is_repeated_header(row, header):
+                repeated_headers += 1
+                continue
+
+            satir_masrafi = get_cell(row, column_map["masraf"])
+
+            asgari_tutar = get_cell(row, column_map["asgari_tutar"])
+            asgari_oran = get_cell(row, column_map["asgari_oran"])
+            azami_tutar = get_cell(row, column_map["azami_tutar"])
+            azami_oran = get_cell(row, column_map["azami_oran"])
+            aciklama_raw = get_cell(row, column_map["aciklama"])
+            site_tarihi = get_cell(row, column_map["tarih"])
+
+            aciklama, aciklama_tarihi = parse_aciklama(aciklama_raw)
+            if not site_tarihi:
+                site_tarihi = aciklama_tarihi
+
+            meaningful_cells = sum(1 for cell in row if normalize(cell))
+            if meaningful_cells < 2:
+                note_rows += 1
+                continue
+
+            # İlk hücre rowspan/boşluk yüzünden boş gelebilirse tablo başlığını kullan.
+            if not satir_masrafi:
+                satir_masrafi = tablo_basligi
+
+            if not satir_masrafi:
+                invalid_rows += 1
+                continue
+
+            # Satır gerçekten ücret/veri taşıyor mu?
+            if not any(
+                [
+                    asgari_tutar,
+                    asgari_oran,
+                    azami_tutar,
+                    azami_oran,
+                    aciklama,
+                    site_tarihi,
+                ]
+            ):
+                invalid_rows += 1
+                continue
+
+            masraf = build_masraf_name(
+                alt_kategori=alt_kategori,
+                tablo_basligi=tablo_basligi,
+                satir_masrafi=satir_masrafi,
             )
-        )
 
-        azami_tutar = _with_currency(
-            _normalize_tutar(
-                item.get(
-                    "MaximumAmount",
-                    item.get(
-                        "maximumAmount",
-                        "",
-                    ),
-                )
-            ),
-            currency,
-        )
+            if not masraf:
+                invalid_rows += 1
+                continue
 
-        azami_oran = (
-            _normalize_tutar(
-                item.get(
-                    "MaximumRate",
-                    item.get(
-                        "maximumRate",
-                        "",
-                    ),
-                )
-            )
-        )
+            parsed_before_dedup += 1
 
-        aciklama = _first_value(
-            item,
-            (
-                "Description",
-                "description",
-                "Explanation",
-                "explanation",
-            ),
-        )
-
-        bsmv = _first_value(
-            item,
-            (
-                "BSMV",
-                "bsmv",
-            ),
-        )
-
-        if bsmv:
-            bsmv_text = f"BSMV: {bsmv}"
-
-            if bsmv_text not in aciklama:
-                aciklama = (
-                    f"{aciklama} | {bsmv_text}"
-                    if aciklama
-                    else bsmv_text
-                )
-
-        site_tarihi = (
-            _normalize_tarih(
-                item.get(
-                    "UpdateDate",
-                    item.get(
-                        "updateDate",
-                        item.get(
-                            "LastUpdateDate",
-                            item.get(
-                                "lastUpdateDate",
-                                "",
-                            ),
-                        ),
-                    ),
-                )
-            )
-        )
-
-        if not site_tarihi:
-            stats[
-                "missing_date"
-            ] += 1
-
-        # İsim dışında hiçbir ücret bilgisi yoksa yine kaydı koruyoruz;
-        # çünkü bazı tarife satırları yalnız açıklama / grup bilgisi taşıyabilir.
-        has_any_detail = any(
-            [
+            key = (
+                kategori,
+                alt_kategori,
+                tablo_basligi,
+                satir_masrafi,
                 asgari_tutar,
                 asgari_oran,
                 azami_tutar,
                 azami_oran,
                 aciklama,
                 site_tarihi,
-            ]
-        )
-
-        if not has_any_detail:
-            stats[
-                "empty_record"
-            ] += 1
-
-        masraf = _build_masraf(
-            item,
-            raw_name,
-        )
-
-        stats[
-            "parsed_before_dedup"
-        ] += 1
-
-        key = (
-            kategori,
-            masraf,
-            asgari_tutar,
-            asgari_oran,
-            azami_tutar,
-            azami_oran,
-            aciklama,
-            site_tarihi,
-        )
-
-        if key in seen:
-            stats[
-                "duplicates"
-            ] += 1
-            continue
-
-        seen.add(key)
-
-        rows.append(
-            UcretSatiri(
-                kategori=kategori,
-                masraf=masraf,
-                asgari_tutar=asgari_tutar,
-                asgari_oran=asgari_oran,
-                azami_tutar=azami_tutar,
-                azami_oran=azami_oran,
-                aciklama=aciklama,
-                site_guncelleme_tarihi=site_tarihi,
             )
-        )
 
-    return rows, stats
+            if key in seen:
+                duplicate_rows += 1
+                continue
 
+            seen.add(key)
 
-# =========================================================
-# PLAYWRIGHT API INTERCEPT
-# =========================================================
-
-def _is_target_api(
-    url: str,
-) -> bool:
-    key = _normalize_key(url)
-
-    return (
-        "getproductserviceprices"
-        in key
-        or "productserviceprice"
-        in key
-    )
-
-
-def _capture_api_json(
-    page_url: str,
-) -> Tuple[
-    List[dict],
-    List[dict],
-]:
-    from playwright.sync_api import (
-        sync_playwright,
-    )
-
-    captured: List[dict] = []
-    request_meta: List[
-        dict
-    ] = []
-
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True
-        )
-
-        try:
-            context = (
-                browser.new_context(
-                    user_agent=HEADERS[
-                        "User-Agent"
-                    ],
-                    viewport={
-                        "width": 1440,
-                        "height": 1000,
-                    },
-                    locale="tr-TR",
-                    timezone_id=(
-                        "Europe/Istanbul"
-                    ),
-                    extra_http_headers={
-                        "Accept-Language": (
-                            HEADERS[
-                                "Accept-Language"
-                            ]
-                        ),
-                    },
+            sonuc.append(
+                UcretSatiri(
+                    kategori=kategori,
+                    masraf=masraf,
+                    asgari_tutar=asgari_tutar,
+                    asgari_oran=asgari_oran,
+                    azami_tutar=azami_tutar,
+                    azami_oran=azami_oran,
+                    aciklama=aciklama,
+                    site_guncelleme_tarihi=site_tarihi,
                 )
             )
 
-            page = context.new_page()
+            table_record_count += 1
+            kategori_sayilari[kategori] = kategori_sayilari.get(kategori, 0) + 1
 
-            def handle_response(
-                response,
-            ):
-                if not _is_target_api(
-                    response.url
-                ):
-                    return
-
-                method = ""
-
-                try:
-                    method = (
-                        response.request.method
-                    )
-                except Exception:
-                    pass
-
-                print(
-                    f"[vakifbank] Hedef API: "
-                    f"{method or '?'} "
-                    f"{response.url} "
-                    f"({response.status})",
-                    file=sys.stderr,
-                )
-
-                request_meta.append(
-                    {
-                        "url": response.url,
-                        "status": (
-                            response.status
-                        ),
-                        "method": method,
-                    }
-                )
-
-                if response.status != 200:
-                    return
-
-                try:
-                    data = response.json()
-
-                    captured.append(
-                        {
-                            "url": response.url,
-                            "data": data,
-                        }
-                    )
-
-                    print(
-                        "[vakifbank] "
-                        "JSON API yanıtı yakalandı.",
-                        file=sys.stderr,
-                    )
-
-                except Exception as exc:
-                    try:
-                        body = response.body()
-                        text = body.decode(
-                            "utf-8",
-                            errors="replace",
-                        )
-
-                        data = json.loads(
-                            text
-                        )
-
-                        captured.append(
-                            {
-                                "url": response.url,
-                                "data": data,
-                            }
-                        )
-
-                        print(
-                            "[vakifbank] "
-                            "API body JSON olarak yakalandı.",
-                            file=sys.stderr,
-                        )
-
-                    except Exception:
-                        print(
-                            f"[vakifbank][UYARI] "
-                            f"API JSON okunamadı: "
-                            f"{exc}",
-                            file=sys.stderr,
-                        )
-
-            page.on(
-                "response",
-                handle_response,
-            )
-
+        if table_record_count == 0:
+            zero_record_tables += 1
             print(
-                "[vakifbank] "
-                "Ürün ve Hizmet Ücretleri "
-                "sayfası yükleniyor...",
+                f"[yapikredi][DEBUG] Ücret tablosu {table_index} 0 kayıt üretti | "
+                f"Kategori: {kategori} | Alt başlık: {alt_kategori} | "
+                f"Tablo başlığı: {tablo_basligi} | "
+                f"Satır: {len(rows)} | Header: {header}",
                 file=sys.stderr,
             )
 
-            page.goto(
-                page_url,
-                timeout=120000,
-                wait_until=(
-                    "domcontentloaded"
-                ),
-            )
-
-            # API çoğu durumda ilk birkaç saniyede gelir.
-            deadline = (
-                time.time()
-                + 12
-            )
-
-            while (
-                not captured
-                and time.time()
-                < deadline
-            ):
-                page.wait_for_timeout(
-                    400
-                )
-
-            # Gelmediyse sayfadaki olası accordion/tabları tetikle.
-            if not captured:
-                print(
-                    "[vakifbank][UYARI] "
-                    "İlk yüklemede API gelmedi; "
-                    "dinamik öğeler tetikleniyor.",
-                    file=sys.stderr,
-                )
-
-                try:
-                    page.evaluate("""
-                    () => {
-                        const targets = new Set();
-
-                        document.querySelectorAll(
-                            "[aria-expanded='false'], "
-                            "[data-bs-toggle='collapse'], "
-                            "[role='button'], "
-                            ".accordion-button"
-                        ).forEach(el => {
-                            targets.add(el);
-                        });
-
-                        for (const el of targets) {
-                            try {
-                                el.click();
-                            } catch (_) {}
-                        }
-
-                        window.scrollTo(
-                            0,
-                            document.documentElement
-                                ? document.documentElement.scrollHeight
-                                : 0
-                        );
-                    }
-                    """)
-                except Exception:
-                    pass
-
-                deadline = (
-                    time.time()
-                    + 6
-                )
-
-                while (
-                    not captured
-                    and time.time()
-                    < deadline
-                ):
-                    page.wait_for_timeout(
-                        400
-                    )
-
-            # Hâlâ gelmediyse yalnız bir kez reload.
-            if not captured:
-                print(
-                    "[vakifbank][UYARI] "
-                    "API hâlâ gelmedi; "
-                    "sayfa bir kez yenileniyor.",
-                    file=sys.stderr,
-                )
-
-                try:
-                    page.reload(
-                        timeout=90000,
-                        wait_until=(
-                            "domcontentloaded"
-                        ),
-                    )
-
-                    deadline = (
-                        time.time()
-                        + 8
-                    )
-
-                    while (
-                        not captured
-                        and time.time()
-                        < deadline
-                    ):
-                        page.wait_for_timeout(
-                            400
-                        )
-
-                except Exception as exc:
-                    print(
-                        f"[vakifbank][UYARI] "
-                        f"Reload başarısız: "
-                        f"{exc}",
-                        file=sys.stderr,
-                    )
-
-        finally:
-            browser.close()
-
-    return captured, request_meta
-
-
-# =========================================================
-# RAPORLAR
-# =========================================================
-
-def _print_schema_report(
-    fee_list: List[dict],
-    json_path: str,
-) -> None:
+    print(f"[yapikredi] Ücret tablosu: {fee_table_count}", file=sys.stderr)
     print(
-        "",
+        f"[yapikredi] İlgisiz/atlanan tablo: {ignored_table_count}",
+        file=sys.stderr,
+    )
+    print(
+        f"[yapikredi] 0 kayıt üreten ücret tablosu: {zero_record_tables}",
+        file=sys.stderr,
+    )
+    print(
+        f"[yapikredi] Toplam benzersiz ücret: {len(sonuc)}",
         file=sys.stderr,
     )
 
-    print(
-        "[vakifbank] ===== API ŞEMA KONTROLÜ =====",
-        file=sys.stderr,
-    )
-
-    print(
-        f"[vakifbank] Fee listesi JSON yolu: "
-        f"{json_path or '?'}",
-        file=sys.stderr,
-    )
-
-    print(
-        f"[vakifbank] Ham Fee item sayısı: "
-        f"{len(fee_list)}",
-        file=sys.stderr,
-    )
-
-    keys: Set[str] = set()
-
-    for item in fee_list[:50]:
-        if isinstance(
-            item,
-            dict,
-        ):
-            keys.update(
-                str(k)
-                for k in item.keys()
-            )
-
-    print(
-        "[vakifbank] İlk item'larda görülen alanlar: "
-        + ", ".join(
-            sorted(keys)
-        ),
-        file=sys.stderr,
-    )
-
-    channels = sorted({
-        _first_value(
-            item,
-            CHANNEL_KEYS,
-        )
-        for item in fee_list
-        if isinstance(item, dict)
-        and _first_value(
-            item,
-            CHANNEL_KEYS,
-        )
-    })
-
-    currencies = sorted({
-        _first_value(
-            item,
-            (
-                "CurrencyCode",
-                "currencyCode",
-                "Currency",
-                "currency",
-            ),
-        )
-        for item in fee_list
-        if isinstance(item, dict)
-        and _first_value(
-            item,
-            (
-                "CurrencyCode",
-                "currencyCode",
-                "Currency",
-                "currency",
-            ),
-        )
-    })
-
-    print(
-        f"[vakifbank] Kanal çeşitleri "
-        f"({len(channels)}): "
-        + ", ".join(channels[:30]),
-        file=sys.stderr,
-    )
-
-    print(
-        f"[vakifbank] Para birimleri "
-        f"({len(currencies)}): "
-        + ", ".join(currencies[:30]),
-        file=sys.stderr,
-    )
-
-    print(
-        "[vakifbank] =============================",
-        file=sys.stderr,
-    )
-
-
-def _print_category_report(
-    rows: List[UcretSatiri],
-) -> None:
-    counts: Dict[
-        str,
-        int,
-    ] = {}
-
-    for row in rows:
-        counts[row.kategori] = (
-            counts.get(
-                row.kategori,
-                0,
-            )
-            + 1
-        )
-
-    print(
-        "",
-        file=sys.stderr,
-    )
-
-    print(
-        "[vakifbank] ===== KATEGORİ RAPORU =====",
-        file=sys.stderr,
-    )
-
-    for category, count in sorted(
-        counts.items(),
-        key=lambda item: (
-            -item[1],
-            item[0],
-        ),
+    print("", file=sys.stderr)
+    print("[yapikredi] ===== KATEGORİ RAPORU =====", file=sys.stderr)
+    for kategori, count in sorted(
+        kategori_sayilari.items(),
+        key=lambda item: (-item[1], item[0]),
     ):
+        print(f"[yapikredi] {kategori} -> {count} kayıt", file=sys.stderr)
+    print("[yapikredi] ===========================", file=sys.stderr)
+
+    # Para aktarma özel kontrolü.
+    print("", file=sys.stderr)
+    print("[yapikredi] ===== PARA AKTARMA KONTROLÜ =====", file=sys.stderr)
+    for keyword in ["FAST", "EFT", "Havale", "SWIFT"]:
+        bulunan = [
+            item
+            for item in sonuc
+            if keyword.casefold() in item.masraf.casefold()
+        ]
         print(
-            f"[vakifbank] "
-            f"{category} -> "
-            f"{count} kayıt",
+            f"[yapikredi] {keyword}: {len(bulunan)} kayıt",
             file=sys.stderr,
         )
+        for item in bulunan[:8]:
+            print(f"    - {item.masraf}", file=sys.stderr)
+    print("[yapikredi] =================================", file=sys.stderr)
 
+    print("", file=sys.stderr)
+    print("[yapikredi] ===== BÜTÜNLÜK KONTROLÜ =====", file=sys.stderr)
+    print(f"[yapikredi] Ham veri satırı adayı: {candidate_rows}", file=sys.stderr)
     print(
-        "[vakifbank] ===========================",
+        f"[yapikredi] Parse edilen (dedup öncesi): {parsed_before_dedup}",
         file=sys.stderr,
     )
-
-
-def _print_integrity_report(
-    stats: Dict[str, int],
-    result_count: int,
-) -> None:
-    raw_items = stats.get(
-        "raw_items",
-        0,
-    )
+    print(f"[yapikredi] Duplicate: {duplicate_rows}", file=sys.stderr)
+    print(f"[yapikredi] Tekrarlanan header: {repeated_headers}", file=sys.stderr)
+    print(f"[yapikredi] Not/dipnot satırı: {note_rows}", file=sys.stderr)
+    print(f"[yapikredi] Geçersiz/değersiz satır: {invalid_rows}", file=sys.stderr)
+    print(f"[yapikredi] Excel'e gidecek satır: {len(sonuc)}", file=sys.stderr)
 
     accounted = (
-        stats.get(
-            "parsed_before_dedup",
-            0,
-        )
-        + stats.get(
-            "non_dict",
-            0,
-        )
-        + stats.get(
-            "missing_name",
-            0,
-        )
+        parsed_before_dedup
+        + repeated_headers
+        + note_rows
+        + invalid_rows
     )
 
-    print(
-        "",
-        file=sys.stderr,
-    )
-
-    print(
-        "[vakifbank] ===== BÜTÜNLÜK KONTROLÜ =====",
-        file=sys.stderr,
-    )
-
-    print(
-        f"[vakifbank] Ham API item: "
-        f"{raw_items}",
-        file=sys.stderr,
-    )
-
-    print(
-        f"[vakifbank] Parse edilen "
-        f"(dedup öncesi): "
-        f"{stats.get('parsed_before_dedup', 0)}",
-        file=sys.stderr,
-    )
-
-    print(
-        f"[vakifbank] Duplicate: "
-        f"{stats.get('duplicates', 0)}",
-        file=sys.stderr,
-    )
-
-    print(
-        f"[vakifbank] Dict olmayan item: "
-        f"{stats.get('non_dict', 0)}",
-        file=sys.stderr,
-    )
-
-    print(
-        f"[vakifbank] Ücret adı olmayan item: "
-        f"{stats.get('missing_name', 0)}",
-        file=sys.stderr,
-    )
-
-    print(
-        f"[vakifbank] Ana kategori olmayan item: "
-        f"{stats.get('missing_category', 0)}",
-        file=sys.stderr,
-    )
-
-    print(
-        f"[vakifbank] Tarih olmayan item: "
-        f"{stats.get('missing_date', 0)}",
-        file=sys.stderr,
-    )
-
-    print(
-        f"[vakifbank] Değer/açıklama/tarih boş item: "
-        f"{stats.get('empty_record', 0)}",
-        file=sys.stderr,
-    )
-
-    print(
-        f"[vakifbank] Excel'e gidecek "
-        f"benzersiz satır: "
-        f"{result_count}",
-        file=sys.stderr,
-    )
-
-    if (
-        raw_items == accounted
-        and stats.get(
-            "missing_name",
-            0,
-        ) == 0
-    ):
+    if accounted == candidate_rows:
         print(
-            "[vakifbank] BÜTÜNLÜK: OK - "
-            "API item'larının tamamı açıklandı.",
+            "[yapikredi] BÜTÜNLÜK: OK - aday satırların tamamı açıklandı.",
             file=sys.stderr,
         )
     else:
         print(
-            "[vakifbank] BÜTÜNLÜK: UYARI",
+            f"[yapikredi] BÜTÜNLÜK: UYARI - "
+            f"{candidate_rows - accounted} aday satır açıklanamıyor.",
             file=sys.stderr,
         )
 
-    print(
-        "[vakifbank] ===============================",
-        file=sys.stderr,
-    )
+    print("[yapikredi] ==============================", file=sys.stderr)
 
-
-def _print_transfer_report(
-    rows: List[UcretSatiri],
-) -> None:
-    print(
-        "",
-        file=sys.stderr,
-    )
-
-    print(
-        "[vakifbank] ===== PARA AKTARMA KONTROLÜ =====",
-        file=sys.stderr,
-    )
-
-    for label, term in [
-        ("FAST", "fast"),
-        ("EFT", "eft"),
-        ("Havale", "havale"),
-        ("SWIFT", "swift"),
-    ]:
-        found = [
-            row
-            for row in rows
-            if _has_transfer_term(
-                row.masraf,
-                term,
-            )
-        ]
-
-        print(
-            f"[vakifbank] {label}: "
-            f"{len(found)} kayıt",
-            file=sys.stderr,
-        )
-
-        for row in found[:12]:
-            print(
-                f"    - "
-                f"[{row.kategori}] "
-                f"{row.masraf}",
-                file=sys.stderr,
-            )
-
-        if not found:
-            print(
-                f"[vakifbank][UYARI] "
-                f"{label} MASRAF alanında "
-                "hiç bulunamadı.",
-                file=sys.stderr,
-            )
-
-    print(
-        "[vakifbank] =================================",
-        file=sys.stderr,
-    )
-
-
-def _print_extra_product_report(
-    rows: List[UcretSatiri],
-) -> None:
-    print(
-        "",
-        file=sys.stderr,
-    )
-
-    print(
-        "[vakifbank] ===== EK ÜRÜN KONTROLÜ =====",
-        file=sys.stderr,
-    )
-
-    for label, term in [
-        ("Fatura", "fatura"),
-        ("HGS", "hgs"),
-        ("Kiralık Kasa", "kiralik kasa"),
-    ]:
-        found = [
-            row
-            for row in rows
-            if (
-                term in _normalize_key(
-                    row.masraf
-                )
-                or term in _normalize_key(
-                    row.kategori
-                )
-            )
-        ]
-
-        print(
-            f"[vakifbank] {label}: "
-            f"{len(found)} kayıt",
-            file=sys.stderr,
-        )
-
-        for row in found[:8]:
-            print(
-                f"    - "
-                f"[{row.kategori}] "
-                f"{row.masraf}",
-                file=sys.stderr,
-            )
-
-    print(
-        "[vakifbank] =============================",
-        file=sys.stderr,
-    )
+    return sonuc
 
 
 # =========================================================
-# ANA SCRAPER
+# ANA FONKSİYON
 # =========================================================
 
-def scrape_vakifbank(
-    page_url: str = VAKIFBANK_PAGE_URL,
+
+def scrape_yapikredi(
+    url: str = YAPIKREDI_URL,
 ) -> List[UcretSatiri]:
-    print(
-        f"[vakifbank] SÜRÜM: "
-        f"{SCRAPER_VERSION}",
-        file=sys.stderr,
-    )
+    tables = collect_tables(url)
 
-    print(
-        "[vakifbank] "
-        "Playwright API intercept başlıyor...",
-        file=sys.stderr,
-    )
+    if not tables:
+        raise ScraperError("Yapı Kredi sayfasından hiç tablo alınamadı.")
 
-    captured, request_meta = (
-        _capture_api_json(
-            page_url
-        )
-    )
+    sonuc = parse_tables(tables)
 
-    if not captured:
-        if request_meta:
-            details = "; ".join(
-                f"{x.get('status')} "
-                f"{x.get('method')} "
-                f"{x.get('url')}"
-                for x in request_meta
-            )
-
-            raise ScraperError(
-                "VakıfBank hedef API isteği görüldü "
-                "ama kullanılabilir 200 JSON yanıtı alınamadı. "
-                f"İstekler: {details}"
-            )
-
+    if not sonuc:
         raise ScraperError(
-            "VakıfBank getProductServicePrices "
-            "API yanıtı yakalanamadı."
+            "Tablolar bulundu fakat hiçbir ücret satırı oluşturulamadı."
         )
 
-    best_fee_list: List[
-        dict
-    ] = []
+    return sonuc
 
-    best_path = ""
-    best_url = ""
-
-    for capture in captured:
-        fee_list, path = (
-            _extract_fee_list(
-                capture.get(
-                    "data"
-                )
-            )
-        )
-
-        print(
-            f"[vakifbank] API adayı: "
-            f"{capture.get('url')} | "
-            f"Fee={len(fee_list)} | "
-            f"JSON yolu={path or '?'}",
-            file=sys.stderr,
-        )
-
-        if len(fee_list) > len(
-            best_fee_list
-        ):
-            best_fee_list = fee_list
-            best_path = path
-            best_url = _normalize(
-                capture.get(
-                    "url"
-                )
-            )
-
-    if not best_fee_list:
-        raise ScraperError(
-            "VakıfBank API JSON'u yakalandı "
-            "ancak ücret listesi bulunamadı."
-        )
-
-    print(
-        f"[vakifbank] Kullanılan API yanıtı: "
-        f"{best_url}",
-        file=sys.stderr,
-    )
-
-    _print_schema_report(
-        best_fee_list,
-        best_path,
-    )
-
-    rows, stats = _parse_fee_list(
-        best_fee_list
-    )
-
-    if not rows:
-        raise ScraperError(
-            "VakıfBank Fee listesi "
-            "parse edilemedi."
-        )
-
-    rows = sorted(
-        rows,
-        key=lambda row: (
-            _normalize_key(
-                row.kategori
-            ),
-            _normalize_key(
-                row.masraf
-            ),
-        ),
-    )
-
-    _print_category_report(
-        rows
-    )
-
-    _print_integrity_report(
-        stats,
-        len(rows),
-    )
-
-    _print_transfer_report(
-        rows
-    )
-
-    _print_extra_product_report(
-        rows
-    )
-
-    print(
-        f"[vakifbank] Toplam "
-        f"{len(rows)} benzersiz "
-        "satır bulundu.",
-        file=sys.stderr,
-    )
-
-    return rows
-
-
-# =========================================================
-# TEST
-# =========================================================
 
 if __name__ == "__main__":
     try:
-        veriler = scrape_vakifbank()
+        sonuc = scrape_yapikredi()
 
         print()
         print("=" * 70)
-        print("VAKIFBANK SCRAPER")
+        print("YAPI KREDİ SCRAPER")
+        print(f"SÜRÜM: {SCRAPER_VERSION}")
         print("=" * 70)
-        print(
-            f"Toplam çekilen ücret: "
-            f"{len(veriler)}"
-        )
+        print(f"Toplam çekilen ücret: {len(sonuc)}")
         print()
 
-        for i, row in enumerate(
-            veriler[:40],
-            start=1,
-        ):
-            print(
-                f"{i}. "
-                f"[{row.kategori}] "
-                f"{row.masraf}"
-            )
-            print(
-                f"   Asgari Tutar : "
-                f"{row.asgari_tutar}"
-            )
-            print(
-                f"   Asgari Oran  : "
-                f"{row.asgari_oran}"
-            )
-            print(
-                f"   Azami Tutar  : "
-                f"{row.azami_tutar}"
-            )
-            print(
-                f"   Azami Oran   : "
-                f"{row.azami_oran}"
-            )
-            print(
-                f"   Açıklama     : "
-                f"{row.aciklama}"
-            )
-            print(
-                f"   Tarih        : "
-                f"{row.site_guncelleme_tarihi}"
-            )
+        for i, satir in enumerate(sonuc[:40], start=1):
+            print(f"{i}. [{satir.kategori}] {satir.masraf}")
+            print(f"   Asgari Tutar : {satir.asgari_tutar}")
+            print(f"   Asgari Oran  : {satir.asgari_oran}")
+            print(f"   Azami Tutar  : {satir.azami_tutar}")
+            print(f"   Azami Oran   : {satir.azami_oran}")
+            print(f"   Açıklama     : {satir.aciklama}")
+            print(f"   Tarih        : {satir.site_guncelleme_tarihi}")
             print("-" * 70)
 
     except Exception as exc:
-        print(
-            f"[vakifbank][HATA] "
-            f"{exc}",
-            file=sys.stderr,
-        )
+        print(f"[yapikredi][HATA] {exc}", file=sys.stderr)
         sys.exit(1)
