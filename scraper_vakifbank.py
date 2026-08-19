@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Set, Tuple
 
 
-SCRAPER_VERSION = "2026-08-19-v2-vakifbank-api-integrity"
+SCRAPER_VERSION = "2026-08-19-v3-vakifbank-channel-currency-fix"
 
 VAKIFBANK_API_URL = (
     "https://inbound.apigateway.vakifbank.com.tr:8443/"
@@ -318,6 +318,8 @@ SUBGROUP_KEYS = (
 )
 
 CHANNEL_KEYS = (
+    "Channel",
+    "channel",
     "ChannelName",
     "channelName",
     "TransactionChannelName",
@@ -350,6 +352,38 @@ def _first_value(
             return text
 
     return ""
+
+
+
+def _with_currency(
+    amount: str,
+    currency: str,
+) -> str:
+    """
+    API CurrencyCode bilgisini tutarlarda kaybetme.
+    Örn:
+      5 + USD -> USD 5
+      10 + TL -> TL 10
+    """
+    amount = _normalize(amount)
+    currency = _normalize(currency)
+
+    if not amount:
+        return ""
+
+    if not currency:
+        return amount
+
+    amount_key = _normalize_key(amount)
+    currency_key = _normalize_key(currency)
+
+    if (
+        amount_key.startswith(currency_key + " ")
+        or amount_key.endswith(" " + currency_key)
+    ):
+        return amount
+
+    return f"{currency} {amount}"
 
 
 def _looks_like_fee_item(
@@ -801,7 +835,17 @@ def _parse_fee_list(
                 "missing_category"
             ] += 1
 
-        asgari_tutar = (
+        currency = _first_value(
+            item,
+            (
+                "CurrencyCode",
+                "currencyCode",
+                "Currency",
+                "currency",
+            ),
+        )
+
+        asgari_tutar = _with_currency(
             _normalize_tutar(
                 item.get(
                     "MinimumAmount",
@@ -810,7 +854,8 @@ def _parse_fee_list(
                         "",
                     ),
                 )
-            )
+            ),
+            currency,
         )
 
         asgari_oran = (
@@ -825,7 +870,7 @@ def _parse_fee_list(
             )
         )
 
-        azami_tutar = (
+        azami_tutar = _with_currency(
             _normalize_tutar(
                 item.get(
                     "MaximumAmount",
@@ -834,7 +879,8 @@ def _parse_fee_list(
                         "",
                     ),
                 )
-            )
+            ),
+            currency,
         )
 
         azami_oran = (
@@ -858,6 +904,24 @@ def _parse_fee_list(
                 "explanation",
             ),
         )
+
+        bsmv = _first_value(
+            item,
+            (
+                "BSMV",
+                "bsmv",
+            ),
+        )
+
+        if bsmv:
+            bsmv_text = f"BSMV: {bsmv}"
+
+            if bsmv_text not in aciklama:
+                aciklama = (
+                    f"{aciklama} | {bsmv_text}"
+                    if aciklama
+                    else bsmv_text
+                )
 
         site_tarihi = (
             _normalize_tarih(
@@ -1275,6 +1339,56 @@ def _print_schema_report(
         + ", ".join(
             sorted(keys)
         ),
+        file=sys.stderr,
+    )
+
+    channels = sorted({
+        _first_value(
+            item,
+            CHANNEL_KEYS,
+        )
+        for item in fee_list
+        if isinstance(item, dict)
+        and _first_value(
+            item,
+            CHANNEL_KEYS,
+        )
+    })
+
+    currencies = sorted({
+        _first_value(
+            item,
+            (
+                "CurrencyCode",
+                "currencyCode",
+                "Currency",
+                "currency",
+            ),
+        )
+        for item in fee_list
+        if isinstance(item, dict)
+        and _first_value(
+            item,
+            (
+                "CurrencyCode",
+                "currencyCode",
+                "Currency",
+                "currency",
+            ),
+        )
+    })
+
+    print(
+        f"[vakifbank] Kanal çeşitleri "
+        f"({len(channels)}): "
+        + ", ".join(channels[:30]),
+        file=sys.stderr,
+    )
+
+    print(
+        f"[vakifbank] Para birimleri "
+        f"({len(currencies)}): "
+        + ", ".join(currencies[:30]),
         file=sys.stderr,
     )
 
