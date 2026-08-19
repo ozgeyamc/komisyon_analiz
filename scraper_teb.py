@@ -30,7 +30,7 @@ import requests
 from bs4 import BeautifulSoup
 
 
-SCRAPER_VERSION = "2026-08-19-v4-teb-nested-wrapper-context"
+SCRAPER_VERSION = "2026-08-19-v5-teb-category-normalization"
 
 TEB_URL = "https://www.teb.com.tr/urun-ve-hizmet-ucretleri/"
 TEB_TICARI_URL = "https://www.teb.com.tr/tuzel-urun-ve-hizmet-ucretleri/"
@@ -97,6 +97,10 @@ def _normalize(value: Optional[str]) -> str:
 
 def _normalize_key(value: Optional[str]) -> str:
     text = _normalize(value).lower()
+
+    # Türkçe büyük İ lower() sonrası "i\u0307" üretebilir.
+    # Combining dot'u temizle ki "İşlemleri" -> "islemleri" eşleşsin.
+    text = text.replace("\u0307", "")
 
     replacements = {
         "ı": "i",
@@ -535,35 +539,38 @@ IGNORE_CONTEXT_TEXTS = {
 
 # TEB bireysel sayfasındaki ana ücret bölümleri.
 BIREYSEL_CATEGORY_ALIASES = {
-    "atm kullanım": "ATM Kullanım",
+    "atm kullanim": "ATM Kullanım",
     "bireysel krediler": "Bireysel Krediler",
-    "diğer": "Diğer",
     "diger": "Diğer",
-    "kredi kartları ve banka kartları": "Kredi Kartları ve Banka Kartları",
-    "menkul kıymet işlemleri": "Menkul Kıymet İşlemleri",
-    "mevduat hesapları": "Mevduat Hesapları",
+    "kredi kartlari ve banka kartlari":
+        "Kredi Kartları ve Banka Kartları",
+    "kredi kartlari":
+        "Kredi Kartları ve Banka Kartları",
+    "banka kartlari":
+        "Kredi Kartları ve Banka Kartları",
+    "menkul kiymet islemleri":
+        "Menkul Kıymet İşlemleri",
+    "mevduat hesaplari":
+        "Mevduat Hesapları",
     "para aktarma": "Para Aktarma",
 }
 
 # TEB ticari/tüzel sayfasındaki ana ücret bölümleri.
 TICARI_CATEGORY_ALIASES = {
-    "anlaşmalı kurumlar": "Ticari - Anlaşmalı Kurumlar",
-    "anlasmali kurumlar": "Ticari - Anlaşmalı Kurumlar",
-    "dış ticaret": "Ticari - Dış Ticaret",
-    "dis ticaret": "Ticari - Dış Ticaret",
-    "diğer": "Ticari - Diğer",
-    "diger": "Ticari - Diğer",
-    "krediler": "Ticari - Krediler",
-    "kartlar ve üye iş yeri işlemleri": "Ticari - Kartlar ve Üye İş Yeri İşlemleri",
-    "kartlar ve uye is yeri islemleri": "Ticari - Kartlar ve Üye İş Yeri İşlemleri",
-    "nakit yönetimi": "Ticari - Nakit Yönetimi",
-    "nakit yonetimi": "Ticari - Nakit Yönetimi",
-    "mevduat, katılım fonu ve kıymetli maden depo hesapları":
-        "Ticari - Mevduat/Katılım Fonu ve Kıymetli Maden",
+    "anlasmali kurumlar":
+        "Ticari - Anlaşmalı Kurumlar",
+    "dis ticaret":
+        "Ticari - Dış Ticaret",
+    "diger":
+        "Ticari - Diğer",
+    "krediler":
+        "Ticari - Krediler",
+    "kartlar ve uye is yeri islemleri":
+        "Ticari - Kartlar ve Üye İş Yeri İşlemleri",
+    "nakit yonetimi":
+        "Ticari - Nakit Yönetimi",
     "mevduat, katilim fonu ve kiymetli maden depo hesaplari":
         "Ticari - Mevduat/Katılım Fonu ve Kıymetli Maden",
-    "para ve kıymetli maden transferleri":
-        "Ticari - Para ve Kıymetli Maden Transferleri",
     "para ve kiymetli maden transferleri":
         "Ticari - Para ve Kıymetli Maden Transferleri",
 }
@@ -904,6 +911,7 @@ def _parse_page(
         "repeated_headers": 0,
         "notes": 0,
         "invalid_rows": 0,
+        "missing_category_tables": 0,
     }
 
     rows_out: List[
@@ -952,6 +960,14 @@ def _parse_page(
             table,
             segment,
         )
+
+        if category in {
+            "Genel",
+            "Ticari - Genel",
+        }:
+            stats[
+                "missing_category_tables"
+            ] += 1
 
         table_title = _find_table_title(
             table,
@@ -1606,6 +1622,12 @@ def _print_page_report(
     )
 
     print(
+        f"[teb] Genel kategoride kalan ücret tablosu: "
+        f"{stats.get('missing_category_tables', 0)}",
+        file=sys.stderr,
+    )
+
+    print(
         f"[teb] Benzersiz satır: "
         f"{unique_count}",
         file=sys.stderr,
@@ -1621,6 +1643,10 @@ def _print_page_report(
             "fee_tables",
             0,
         ) > 0
+        and stats.get(
+            "missing_category_tables",
+            0,
+        ) == 0
     ):
         print(
             f"[teb] {label} BÜTÜNLÜK: OK",
