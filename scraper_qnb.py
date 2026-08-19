@@ -21,7 +21,7 @@ from typing import Dict, List, Optional, Set, Tuple
 from bs4 import BeautifulSoup
 
 
-SCRAPER_VERSION = "2026-08-19-v3-qnb-swift-context-debug"
+SCRAPER_VERSION = "2026-08-19-v4-qnb-fast-run"
 
 QNB_URL = "https://www.qnb.com.tr/yasal/urun-hizmet-ucretleri"
 
@@ -1313,85 +1313,76 @@ def _scrape_with_playwright(
             try:
                 page.wait_for_selector(
                     "table",
-                    timeout=30000,
+                    timeout=4000,
                 )
             except Exception:
                 print(
                     "[qnb][UYARI] "
-                    "İlk 30 saniyede table "
+                    "İlk 8 saniyede table "
                     "görünmedi; accordion/scroll "
                     "ile devam ediliyor.",
                     file=sys.stderr,
                 )
 
-            # Yalnızca kapalı accordion.
-            for round_no in range(10):
-                opened = 0
-
+            # QNB'de accordion'lar birbirini tekrar kapatabildiği için
+            # yüzlerce Playwright click() yapmak çok yavaşlıyordu.
+            # Aynı işi browser tarafında toplu JS click ile en fazla 3 turda yap.
+            for round_no in range(3):
                 try:
-                    elements = page.locator(
-                        "[aria-expanded='false']"
+                    opened = page.evaluate("""
+                    () => {
+                        const els = Array.from(
+                            document.querySelectorAll("[aria-expanded='false']")
+                        );
+
+                        let clicked = 0;
+
+                        for (const el of els) {
+                            try {
+                                el.click();
+                                clicked++;
+                            } catch (_) {}
+                        }
+
+                        return clicked;
+                    }
+                    """)
+
+                    print(
+                        f"[qnb] Hızlı accordion turu "
+                        f"{round_no + 1}: "
+                        f"{opened} adet tetiklendi.",
+                        file=sys.stderr,
                     )
 
-                    count = (
-                        elements.count()
+                    if not opened:
+                        break
+
+                    page.wait_for_timeout(1200)
+
+                    # Tablo sayısı artık oluştuysa gereksiz turları uzatma.
+                    table_now = page.locator("table").count()
+
+                    if table_now >= 90:
+                        print(
+                            f"[qnb] {table_now} tablo görüldü; "
+                            "accordion açma tamam.",
+                            file=sys.stderr,
+                        )
+                        break
+
+                except Exception as exc:
+                    print(
+                        f"[qnb][UYARI] Hızlı accordion açma hatası: {exc}",
+                        file=sys.stderr,
                     )
-
-                    for i in range(
-                        count
-                    ):
-                        try:
-                            element = (
-                                elements.nth(i)
-                            )
-
-                            if not (
-                                element.is_visible(
-                                    timeout=150
-                                )
-                            ):
-                                continue
-
-                            element.scroll_into_view_if_needed(
-                                timeout=1000
-                            )
-
-                            element.click(
-                                timeout=1500,
-                                force=True,
-                            )
-
-                            opened += 1
-
-                            page.wait_for_timeout(
-                                70
-                            )
-
-                        except Exception:
-                            pass
-
-                except Exception:
-                    pass
-
-                if opened == 0:
                     break
-
-                print(
-                    f"[qnb] Accordion turu "
-                    f"{round_no + 1}: "
-                    f"{opened} adet açıldı.",
-                    file=sys.stderr,
-                )
-
-                page.wait_for_timeout(
-                    300
-                )
 
             # Güvenli lazy scroll.
             stable = 0
             previous_height = 0
 
-            for _ in range(140):
+            for _ in range(60):
                 try:
                     height = page.evaluate(
                         "() => "
@@ -1408,7 +1399,7 @@ def _scrape_with_playwright(
                     )
 
                     page.wait_for_timeout(
-                        120
+                        80
                     )
 
                     bottom = page.evaluate(
@@ -1449,7 +1440,7 @@ def _scrape_with_playwright(
                 pass
 
             page.wait_for_timeout(
-                1500
+                800
             )
 
             # Kısa DOM teşhisi.
