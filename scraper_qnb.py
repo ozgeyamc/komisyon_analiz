@@ -21,7 +21,7 @@ from typing import Dict, List, Optional, Set, Tuple
 from bs4 import BeautifulSoup
 
 
-SCRAPER_VERSION = "2026-08-19-v4-qnb-fast-run"
+SCRAPER_VERSION = "2026-08-19-v5-qnb-category-fix"
 
 QNB_URL = "https://www.qnb.com.tr/yasal/urun-hizmet-ucretleri"
 
@@ -135,6 +135,23 @@ def _normalize_key(value: Optional[str]) -> str:
 
 def _same_text(a: str, b: str) -> bool:
     return _normalize_key(a) == _normalize_key(b)
+
+
+def _join_category(parts: List[str]) -> str:
+    clean: List[str] = []
+
+    for part in parts:
+        part = _normalize(part)
+
+        if not part:
+            continue
+
+        if clean and _same_text(clean[-1], part):
+            continue
+
+        clean.append(part)
+
+    return " - ".join(clean) if clean else "Genel"
 
 
 def _parse_aciklama(raw_aciklama: str) -> Tuple[str, str]:
@@ -396,14 +413,85 @@ def _find_context_titles(
         if not table_title or _normalize_key(table_title) == "genel":
             table_title = labels[0]
 
-        # Ana kategori için kanal/transfer detayından daha genel bir label ara.
-        # Kesin değilse "Genel" bırakıyoruz; yanlış kategori uydurmuyoruz.
-        if kategori == "Genel":
+        label_keys = [
+            _normalize_key(x)
+            for x in labels
+        ]
+
+        # -------------------------------------------------
+        # PARA AKTARMA HİYERARŞİSİ
+        # -------------------------------------------------
+        #
+        # QNB DOM'unda örneğin:
+        # ["Şubeden", "EFT", "Para Aktarma", ...]
+        # ["Şubeden TL", "Havale", "EFT", "Para Aktarma", ...]
+        #
+        # şeklinde yakın accordion başlıkları geliyor.
+        # Bu nedenle kanal adını kategori yapmak yerine:
+        #
+        #   Para Aktarma - EFT
+        #   Para Aktarma - Havale
+        #   Para Aktarma - Bankalar Arası Altın Transferi
+        #
+        # üretiyoruz.
+        if any(key == "para aktarma" for key in label_keys):
+            channel_markers = (
+                "subeden",
+                "qnb mobil",
+                "internet subesi",
+                "cagri merkezi",
+                "telefon bankaciligi",
+                "atm",
+                "ahl'den",
+                "duzenli",
+            )
+
+            sub_category = ""
+
+            # labels en yakından en uzağa sıralı.
+            for candidate in labels:
+                key = _normalize_key(candidate)
+
+                if key == "para aktarma":
+                    continue
+
+                if any(
+                    marker in key
+                    for marker in channel_markers
+                ):
+                    continue
+
+                # Başlıkların içinde bulunan en yakın gerçek ürün/işlem adı.
+                if (
+                    key in {"eft", "havale", "fast", "swift"}
+                    or "altin transfer" in key
+                    or "kiymetli maden" in key
+                    or "yurtdisi yp havale" in key
+                    or "yurt disi yp havale" in key
+                ):
+                    sub_category = candidate
+                    break
+
+            if sub_category:
+                kategori = _join_category(
+                    ["Para Aktarma", sub_category]
+                )
+            else:
+                kategori = "Para Aktarma"
+
+        # -------------------------------------------------
+        # DİĞER GENEL KATEGORİLER
+        # -------------------------------------------------
+        elif kategori == "Genel":
             channel_words = (
                 "subeden",
                 "qnb mobil",
                 "internet subesi",
+                "cagri merkezi",
+                "telefon bankaciligi",
                 "atm",
+                "ahl'den",
+                "duzenli",
                 "fast",
                 "eft",
                 "havale",
@@ -415,10 +503,13 @@ def _find_context_titles(
             for candidate in reversed(labels):
                 key = _normalize_key(candidate)
 
-                if any(word in key for word in channel_words):
+                if any(
+                    word in key
+                    for word in channel_words
+                ):
                     continue
 
-                if 3 <= len(candidate.split()) <= 8:
+                if 2 <= len(candidate.split()) <= 10:
                     kategori = candidate
                     break
 
@@ -940,15 +1031,6 @@ def _parse_soup(
         ) = _find_context_titles(
             table
         )
-
-        if table_index < 12:
-            print(
-                f"[qnb][CONTEXT] tablo={table_index} | "
-                f"kategori={kategori} | "
-                f"başlık={table_title or '-'} | "
-                f"adaylar={table.get('data-qnb-context-labels', '')}",
-                file=sys.stderr,
-            )
 
         table_record_count = 0
 
