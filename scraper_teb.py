@@ -30,7 +30,7 @@ import requests
 from bs4 import BeautifulSoup
 
 
-SCRAPER_VERSION = "2026-08-19-v2-teb-bireysel-ticari-integrity"
+SCRAPER_VERSION = "2026-08-19-v3-teb-dom-context-fix"
 
 TEB_URL = "https://www.teb.com.tr/urun-ve-hizmet-ucretleri/"
 TEB_TICARI_URL = "https://www.teb.com.tr/tuzel-urun-ve-hizmet-ucretleri/"
@@ -503,7 +503,7 @@ def _row_is_same_header(
 # BAŞLIK / KATEGORİ
 # =========================================================
 
-IGNORE_HEADINGS = {
+IGNORE_CONTEXT_TEXTS = {
     "ürün ve hizmet ücretleri",
     "ticari ürün ve hizmet ücretleri",
     "kredi kartı masraf komisyon ve ücret listesi",
@@ -513,100 +513,142 @@ IGNORE_HEADINGS = {
     "kapat",
     "menü",
     "ana sayfa",
+    "anasayfa",
+    "paylaş",
+    "$prmtabcontent$",
+    "firmanız için uygun olanı seçin",
+    "sizin için uygun olanı seçin",
+    "masraf",
+    "asgari tutar",
+    "asgari oran",
+    "azami tutar",
+    "azami oran",
+    "açıklama",
+    "güncelleme tarihi",
 }
 
+# TEB bireysel sayfasındaki ana ücret bölümleri.
 BIREYSEL_CATEGORY_ALIASES = {
     "atm kullanım": "ATM Kullanım",
     "bireysel krediler": "Bireysel Krediler",
-    "kredi kartları": "Kredi Kartları ve Banka Kartları",
-    "kredi kartları ve banka kartları": "Kredi Kartları ve Banka Kartları",
-    "banka kartları": "Kredi Kartları ve Banka Kartları",
-    "mevduat": "Mevduat Hesapları",
-    "mevduat hesapları": "Mevduat Hesapları",
-    "menkul kıymet işlemleri": "Menkul Kıymet İşlemleri",
-    "çekler ve senetler": "Çekler ve Senetler",
-    "diger": "Diğer",
     "diğer": "Diğer",
+    "diger": "Diğer",
+    "kredi kartları ve banka kartları": "Kredi Kartları ve Banka Kartları",
+    "menkul kıymet işlemleri": "Menkul Kıymet İşlemleri",
+    "mevduat hesapları": "Mevduat Hesapları",
     "para aktarma": "Para Aktarma",
 }
 
+# TEB ticari/tüzel sayfasındaki ana ücret bölümleri.
 TICARI_CATEGORY_ALIASES = {
-    "anlasmali kurumlar": "Ticari - Anlaşmalı Kurumlar",
     "anlaşmalı kurumlar": "Ticari - Anlaşmalı Kurumlar",
-    "dis ticaret": "Ticari - Dış Ticaret",
+    "anlasmali kurumlar": "Ticari - Anlaşmalı Kurumlar",
     "dış ticaret": "Ticari - Dış Ticaret",
-    "diger": "Ticari - Diğer",
+    "dis ticaret": "Ticari - Dış Ticaret",
     "diğer": "Ticari - Diğer",
+    "diger": "Ticari - Diğer",
     "krediler": "Ticari - Krediler",
-    "nakit yonetimi": "Ticari - Nakit Yönetimi",
+    "kartlar ve üye iş yeri işlemleri": "Ticari - Kartlar ve Üye İş Yeri İşlemleri",
+    "kartlar ve uye is yeri islemleri": "Ticari - Kartlar ve Üye İş Yeri İşlemleri",
     "nakit yönetimi": "Ticari - Nakit Yönetimi",
-    "para aktarma": "Ticari - Para Aktarma",
-    "cekler ve senetler": "Ticari - Çekler ve Senetler",
-    "çekler ve senetler": "Ticari - Çekler ve Senetler",
+    "nakit yonetimi": "Ticari - Nakit Yönetimi",
+    "mevduat, katılım fonu ve kıymetli maden depo hesapları":
+        "Ticari - Mevduat/Katılım Fonu ve Kıymetli Maden",
+    "mevduat, katilim fonu ve kiymetli maden depo hesaplari":
+        "Ticari - Mevduat/Katılım Fonu ve Kıymetli Maden",
+    "para ve kıymetli maden transferleri":
+        "Ticari - Para ve Kıymetli Maden Transferleri",
+    "para ve kiymetli maden transferleri":
+        "Ticari - Para ve Kıymetli Maden Transferleri",
 }
 
 
-def _heading_text(
-    element,
-) -> str:
-    return _normalize(
-        element.get_text(
-            " ",
-            strip=True,
-        )
-    )
-
-
-def _heading_candidates(
+def _previous_text_nodes(
     table,
+    limit: int = 1200,
 ) -> List[str]:
     """
-    Tabloya en yakın başlıkları yakın -> uzak sırasıyla döndürür.
+    TEB sayfasında gerçek ücret bölümü ve tablo başlıkları her zaman
+    h1-h6 etiketi değildir. Bu yüzden tablo öncesindeki görünür metin
+    düğümlerini DOM sırasına göre yakın -> uzak tararız.
     """
-    candidates: List[str] = []
+    result: List[str] = []
 
-    for heading in table.find_all_previous(
-        ["h1", "h2", "h3", "h4", "h5", "h6"],
-        limit=20,
+    for node in table.find_all_previous(
+        string=True,
+        limit=limit,
     ):
-        text = _heading_text(
-            heading
+        parent = getattr(
+            node,
+            "parent",
+            None,
         )
 
-        if not text:
-            continue
-
-        if _normalize_key(
-            text
-        ) in {
-            _normalize_key(x)
-            for x in IGNORE_HEADINGS
-        }:
-            continue
-
-        if text not in candidates:
-            candidates.append(
-                text
+        if parent is not None:
+            name = (
+                parent.name.lower()
+                if getattr(parent, "name", None)
+                else ""
             )
 
-    return candidates
+            if name in {
+                "script",
+                "style",
+                "noscript",
+                "svg",
+                "path",
+                "option",
+            }:
+                continue
+
+            # Önceki ücret tablosunun hücrelerini başlık/kategori adayı yapma.
+            if parent.find_parent("table") is not None:
+                continue
+
+        value = _normalize(
+            str(node)
+        )
+
+        if not value:
+            continue
+
+        if value not in result:
+            result.append(
+                value
+            )
+
+    return result
+
+
+def _category_aliases(
+    segment: str,
+) -> Dict[str, str]:
+    return (
+        BIREYSEL_CATEGORY_ALIASES
+        if segment == "bireysel"
+        else TICARI_CATEGORY_ALIASES
+    )
 
 
 def _find_category(
     table,
     segment: str,
 ) -> str:
-    candidates = _heading_candidates(
-        table
+    """
+    Tablodan geriye doğru ilk gerçek ana ücret bölümü adını bulur.
+
+    Bu yaklaşım, v2'deki h1-h6 bağımlılığını kaldırır. TEB sayfasında
+    'ATM Kullanım', 'Para Aktarma', 'Dış Ticaret' gibi bölüm etiketleri
+    düz div/span metni olarak da gelebiliyor.
+    """
+    aliases = _category_aliases(
+        segment
     )
 
-    aliases = (
-        BIREYSEL_CATEGORY_ALIASES
-        if segment == "bireysel"
-        else TICARI_CATEGORY_ALIASES
-    )
-
-    for text in candidates:
+    for text in _previous_text_nodes(
+        table,
+        limit=1800,
+    ):
         key = _normalize_key(
             text
         )
@@ -614,39 +656,117 @@ def _find_category(
         if key in aliases:
             return aliases[key]
 
-    if segment == "ticari":
-        return "Ticari - Diğer"
+    return (
+        "Ticari - Genel"
+        if segment == "ticari"
+        else "Genel"
+    )
 
-    return "Genel"
+
+def _looks_like_ui_text(
+    text: str,
+) -> bool:
+    key = _normalize_key(
+        text
+    )
+
+    if not key:
+        return True
+
+    if key in {
+        _normalize_key(x)
+        for x in IGNORE_CONTEXT_TEXTS
+    }:
+        return True
+
+    if key.startswith(
+        "kredi kartı masraf"
+    ):
+        return True
+
+    if key.startswith(
+        "temel bankacılık ürün"
+    ):
+        return True
+
+    if key.endswith(
+        "için tıklayın"
+    ):
+        return True
+
+    if key in {
+        "sizin için",
+        "firmanız için",
+        "teb hakkında",
+        "günlük işlemler",
+        "kartlar",
+        "krediler",
+        "mevduat ve yatırım",
+        "sigorta ve emeklilik",
+        "ayrıcalıklı bankacılık",
+        "cepteteb",
+    }:
+        return True
+
+    return False
 
 
 def _find_table_title(
     table,
     category: str,
+    segment: str,
 ) -> str:
     """
-    En yakın başlık genellikle ürün/kanal/tablo başlığıdır.
-    Kategori başlığını başlık olarak tekrar etme.
+    Tablodan hemen önce gelen yerel işlem/ürün başlığını bulur.
+
+    Örnekler:
+      ATM'den EFT Ücreti
+      FAST Ücreti
+      CEPTETEB Mobil Bankacılık'tan Havale
+      Uluslararası Fon Transferi ve Mesajlaşma Ücreti
+      ANLAŞMALI KURUM ÖDEMESİ VE HGS ÜCRETLERİ
     """
-    for text in _heading_candidates(
-        table
+    aliases = _category_aliases(
+        segment
+    )
+
+    for text in _previous_text_nodes(
+        table,
+        limit=100,
     ):
-        if _normalize_key(
+        key = _normalize_key(
             text
-        ) == _normalize_key(
-            category.replace(
-                "Ticari - ",
-                "",
+        )
+
+        if _looks_like_ui_text(
+            text
+        ):
+            continue
+
+        # Ana kategori başlığını MASRAF prefix'i olarak tekrar etme.
+        if key in aliases:
+            continue
+
+        if (
+            key
+            == _normalize_key(
+                category.replace(
+                    "Ticari - ",
+                    "",
+                )
             )
         ):
             continue
 
-        # Ana bölüm başlıkları MASRAF prefix'i olmasın.
+        # Çok uzun açıklama/paragraf başlık değildir.
+        if len(text) > 180:
+            continue
+
+        # URL / breadcrumb / form metinlerini alma.
         if (
-            _normalize_key(text)
-            in BIREYSEL_CATEGORY_ALIASES
-            or _normalize_key(text)
-            in TICARI_CATEGORY_ALIASES
+            "http://" in key
+            or "https://" in key
+            or key in {">", "»"}
         ):
             continue
 
@@ -687,9 +807,11 @@ def _build_masraf(
             raw_masraf
         )
 
-    masraf = " - ".join(
-        parts
-    ) if parts else raw_masraf
+    masraf = (
+        " - ".join(parts)
+        if parts
+        else raw_masraf
+    )
 
     combined = _normalize_key(
         " ".join(
@@ -700,8 +822,8 @@ def _build_masraf(
         )
     )
 
-    # Resmî sayfada SWIFT kalemleri "Uluslararası Fon Transferi ve
-    # Mesajlaşma Ücreti" başlığında yayınlanıyor.
+    # Resmî TEB sayfasındaki uluslararası fon transferi tablolarını
+    # Excel'de SWIFT filtresinde görünür kıl.
     if (
         (
             "uluslararasi fon transfer" in combined
@@ -818,6 +940,7 @@ def _parse_page(
         table_title = _find_table_title(
             table,
             category,
+            segment,
         )
 
         table_record_count = 0
@@ -1165,6 +1288,10 @@ def _scrape_one_page(
             and stats["candidate_rows"] >= 15
             and len(rows) >= 15
         ):
+            _print_context_examples(
+                html,
+                segment,
+            )
             return rows, stats, "requests"
 
         print(
@@ -1201,6 +1328,11 @@ def _scrape_one_page(
         f"ücret={stats['fee_tables']}, "
         f"satır={len(rows)}",
         file=sys.stderr,
+    )
+
+    _print_context_examples(
+        html,
+        segment,
     )
 
     return rows, stats, "playwright"
@@ -1255,6 +1387,88 @@ def _deduplicate(
         result.append(row)
 
     return result, duplicates
+
+
+# =========================================================
+# BAŞLIK TANILAMA
+# =========================================================
+
+def _print_context_examples(
+    html: str,
+    segment: str,
+    limit: int = 18,
+) -> None:
+    """
+    İlk ücret tablolarındaki kategori ve yerel başlığı loglar.
+    TEB DOM yapısı değişirse yanlış bağlamı hemen görürüz.
+    """
+    soup = BeautifulSoup(
+        html,
+        "lxml",
+    )
+
+    leaf_tables = [
+        table
+        for table in soup.find_all(
+            "table"
+        )
+        if _is_leaf_table(
+            table
+        )
+    ]
+
+    print(
+        f"[teb][{segment}] "
+        "===== BAĞLAM ÖRNEKLERİ =====",
+        file=sys.stderr,
+    )
+
+    shown = 0
+
+    for index, table in enumerate(
+        leaf_tables
+    ):
+        grid = _table_to_rows(
+            table
+        )
+
+        if (
+            not grid
+            or _find_header_index(
+                grid
+            ) == -1
+        ):
+            continue
+
+        category = _find_category(
+            table,
+            segment,
+        )
+
+        title = _find_table_title(
+            table,
+            category,
+            segment,
+        )
+
+        print(
+            f"[teb][{segment}] "
+            f"tablo={index} | "
+            f"kategori={category} | "
+            f"başlık={title or '-'}",
+            file=sys.stderr,
+        )
+
+        shown += 1
+
+        if shown >= limit:
+            break
+
+    print(
+        f"[teb][{segment}] "
+        "============================",
+        file=sys.stderr,
+    )
 
 
 # =========================================================
