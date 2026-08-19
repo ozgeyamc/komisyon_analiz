@@ -14,6 +14,7 @@ Bu sürüm:
 - main.py / update_excel.py ile uyumlu UcretSatiri listesi döndürür.
 """
 
+import io
 import re
 import sys
 from dataclasses import dataclass
@@ -24,7 +25,7 @@ import requests
 from bs4 import BeautifulSoup
 
 
-SCRAPER_VERSION = "2026-08-19-v2-halkbank-integrity-fast"
+SCRAPER_VERSION = "2026-08-19-v3-halkbank-card-commercial-fix"
 
 HALKBANK_ANA_URL = "https://www.halkbank.com.tr/tr/urun-ve-hizmet-ucretleri"
 
@@ -428,6 +429,475 @@ def _discover_pages(
     )
 
     return list(FALLBACK_PAGES)
+
+
+# =========================================================
+# TİCARİ ÜCRET PDF
+# =========================================================
+
+def _extract_commercial_pdf_url(
+    html: str,
+    base_url: str,
+) -> str:
+    soup = BeautifulSoup(
+        html,
+        "lxml",
+    )
+
+    # Önce açık PDF linkleri.
+    for a in soup.find_all(
+        "a",
+        href=True,
+    ):
+        href = _normalize(
+            a.get("href")
+        )
+
+        if ".pdf" not in href.lower():
+            continue
+
+        text = _normalize_key(
+            a.get_text(
+                " ",
+                strip=True,
+            )
+        )
+
+        href_key = _normalize_key(
+            href
+        )
+
+        if (
+            "ticari" in text
+            or "komisyon" in text
+            or "ticari" in href_key
+            or "komisyon" in href_key
+        ):
+            return urljoin(
+                base_url,
+                href,
+            )
+
+    return ""
+
+
+def _pdf_clean_cell(
+    value: Optional[str],
+) -> str:
+    return _normalize(
+        value or ""
+    )
+
+
+def _numeric_prefix(
+    text: str,
+) -> Tuple[str, str]:
+    """
+    '3.3.1. Elektronik Fon Transferi...' ->
+    ('3.3.1', 'Elektronik Fon Transferi...')
+    """
+    text = _normalize(text)
+
+    match = re.match(
+        r"^\s*(\d+(?:\.\d+)*)\.?\s+(.*)$",
+        text,
+    )
+
+    if not match:
+        return "", text
+
+    return (
+        match.group(1),
+        _normalize(
+            match.group(2)
+        ),
+    )
+
+
+def _commercial_pdf_rows(
+    pdf_bytes: bytes,
+) -> List[UcretSatiri]:
+    """
+    Halkbank'ın resmi 'Ticari Ücret ve Komisyonlar Tarifesi' PDF'ini
+    tablo olarak okur.
+
+    Not:
+    requirements.txt içinde pdfplumber bulunmalıdır.
+    """
+    try:
+        import pdfplumber
+    except ImportError as exc:
+        raise ScraperError(
+            "Ticari Halkbank PDF'i için pdfplumber gerekli. "
+            "requirements.txt dosyasına 'pdfplumber>=0.11.0' ekleyin."
+        ) from exc
+
+    result: List[
+        UcretSatiri
+    ] = []
+
+    # Numara seviyesine göre başlık hiyerarşisi.
+    hierarchy: Dict[
+        int,
+        str,
+    ] = {}
+
+    with pdfplumber.open(
+        io.BytesIO(pdf_bytes)
+    ) as pdf:
+        for page_no, page in enumerate(
+            pdf.pages,
+            start=1,
+        ):
+            tables = page.extract_tables(
+                table_settings={
+                    "vertical_strategy": "lines",
+                    "horizontal_strategy": "lines",
+                    "intersection_tolerance": 5,
+                    "snap_tolerance": 3,
+                    "join_tolerance": 3,
+                }
+            )
+
+            # Bazı PDF sürümlerinde çizgi algısı zayıf olabilir.
+            if not tables:
+                tables = page.extract_tables()
+
+            for table in tables:
+                if not table:
+                    continue
+
+                header_index = -1
+
+                for i, row in enumerate(
+                    table[:8]
+                ):
+                    cells = [
+                        _normalize_key(
+                            _pdf_clean_cell(x)
+                        )
+                        for x in row
+                    ]
+
+                    joined = " | ".join(
+                        cells
+                    )
+
+                    if (
+                        "kalem adi" in joined
+                        and "asgari" in joined
+                        and "azami" in joined
+                    ):
+                        header_index = i
+                        break
+
+                if header_index == -1:
+                    continue
+
+                header = [
+                    _normalize_key(
+                        _pdf_clean_cell(x)
+                    )
+                    for x in table[
+                        header_index
+                    ]
+                ]
+
+                def find_col(
+                    *needles: str,
+                ) -> int:
+                    for idx, cell in enumerate(
+                        header
+                    ):
+                        if all(
+                            needle in cell
+                            for needle in needles
+                        ):
+                            return idx
+                    return -1
+
+                col_name = find_col(
+                    "kalem",
+                    "adi",
+                )
+                col_currency = find_col(
+                    "para",
+                    "birimi",
+                )
+                col_min_amount = find_col(
+                    "asgari",
+                    "tutar",
+                )
+                col_min_rate = find_col(
+                    "asgari",
+                    "oran",
+                )
+                col_max_amount = find_col(
+                    "azami",
+                    "tutar",
+                )
+                col_max_rate = find_col(
+                    "azami",
+                    "oran",
+                )
+                col_desc = find_col(
+                    "aciklama",
+                )
+                col_date = find_col(
+                    "guncelle",
+                )
+
+                if col_date == -1:
+                    col_date = find_col(
+                        "tarih",
+                    )
+
+                # PDF extractor bazen tarih başlığını boş verir;
+                # en sağ kolon tarih görünümündeyse fallback yap.
+                if (
+                    col_date == -1
+                    and len(header) >= 8
+                ):
+                    col_date = len(
+                        header
+                    ) - 1
+
+                data_rows = table[
+                    header_index + 1:
+                ]
+
+                for raw_row in data_rows:
+                    row = [
+                        _pdf_clean_cell(x)
+                        for x in raw_row
+                    ]
+
+                    if not any(row):
+                        continue
+
+                    def get(
+                        index: int,
+                    ) -> str:
+                        if (
+                            index < 0
+                            or index >= len(row)
+                        ):
+                            return ""
+                        return row[index]
+
+                    raw_name = get(
+                        col_name
+                    )
+
+                    if not raw_name:
+                        continue
+
+                    number, name = (
+                        _numeric_prefix(
+                            raw_name
+                        )
+                    )
+
+                    if not name:
+                        name = raw_name
+
+                    currency = get(
+                        col_currency
+                    )
+                    min_amount = get(
+                        col_min_amount
+                    )
+                    min_rate = get(
+                        col_min_rate
+                    )
+                    max_amount = get(
+                        col_max_amount
+                    )
+                    max_rate = get(
+                        col_max_rate
+                    )
+                    desc = get(
+                        col_desc
+                    )
+                    date = get(
+                        col_date
+                    ).replace("/", ".")
+
+                    has_value = any(
+                        [
+                            currency,
+                            min_amount,
+                            min_rate,
+                            max_amount,
+                            max_rate,
+                            desc,
+                            date,
+                        ]
+                    )
+
+                    # Sadece başlık satırıysa hierarchy güncelle.
+                    if (
+                        number
+                        and not has_value
+                    ):
+                        level = len(
+                            number.split(".")
+                        )
+
+                        hierarchy[
+                            level
+                        ] = name
+
+                        for old_level in list(
+                            hierarchy
+                        ):
+                            if old_level > level:
+                                del hierarchy[
+                                    old_level
+                                ]
+
+                        continue
+
+                    # Para birimini tutarlarda kaybetme.
+                    if (
+                        currency
+                        and min_amount
+                        and not min_amount.upper().startswith(
+                            currency.upper()
+                        )
+                    ):
+                        min_amount = (
+                            f"{currency} "
+                            f"{min_amount}"
+                        )
+
+                    if (
+                        currency
+                        and max_amount
+                        and not max_amount.upper().startswith(
+                            currency.upper()
+                        )
+                    ):
+                        max_amount = (
+                            f"{currency} "
+                            f"{max_amount}"
+                        )
+
+                    if number:
+                        level = len(
+                            number.split(".")
+                        )
+
+                        parents = [
+                            hierarchy[l]
+                            for l in sorted(
+                                hierarchy
+                            )
+                            if l < level
+                        ]
+                    else:
+                        parents = []
+
+                    masraf = " - ".join(
+                        [
+                            p
+                            for p in (
+                                parents
+                                + [name]
+                            )
+                            if p
+                        ]
+                    )
+
+                    masraf = _normalize(
+                        masraf
+                    )
+
+                    # Ticari PDF'teki EFT/Havale/FAST/SWIFT hiyerarşisi
+                    # satır adına yansısın.
+                    combined = _normalize_key(
+                        " ".join(
+                            parents
+                            + [name]
+                        )
+                    )
+
+                    if (
+                        "uluslararasi fon transfer" in combined
+                        and not _has_transfer_term(
+                            masraf,
+                            "swift",
+                        )
+                    ):
+                        masraf = (
+                            f"SWIFT - {masraf}"
+                        )
+
+                    result.append(
+                        UcretSatiri(
+                            kategori=(
+                                "Ticari Ücret ve Komisyonları"
+                            ),
+                            masraf=masraf,
+                            asgari_tutar=min_amount,
+                            asgari_oran=min_rate,
+                            azami_tutar=max_amount,
+                            azami_oran=max_rate,
+                            aciklama=desc,
+                            site_guncelleme_tarihi=date,
+                        )
+                    )
+
+    return result
+
+
+def _scrape_commercial_pdf(
+    page_html: str,
+    page_url: str,
+    session: Optional[
+        requests.Session
+    ] = None,
+) -> List[UcretSatiri]:
+    pdf_url = _extract_commercial_pdf_url(
+        page_html,
+        page_url,
+    )
+
+    if not pdf_url:
+        raise ScraperError(
+            "Ticari ücret PDF linki bulunamadı."
+        )
+
+    requester = (
+        session
+        if session is not None
+        else requests
+    )
+
+    response = requester.get(
+        pdf_url,
+        headers=HEADERS,
+        timeout=60,
+    )
+    response.raise_for_status()
+
+    print(
+        f"[halkbank] Ticari PDF bulundu: "
+        f"{pdf_url}",
+        file=sys.stderr,
+    )
+
+    rows = _commercial_pdf_rows(
+        response.content
+    )
+
+    print(
+        f"[halkbank] Ticari PDF: "
+        f"{len(rows)} satır parse edildi.",
+        file=sys.stderr,
+    )
+
+    return rows
 
 
 # =========================================================
@@ -1216,12 +1686,36 @@ def _scrape_all_requests(
             )
             response.raise_for_status()
 
-            rows, stats = _parse_page(
-                response.text,
-                page_category,
-                page_url,
-                "requests",
-            )
+            if (
+                page_category
+                == "Ticari Ücret ve Komisyonları"
+            ):
+                rows = _scrape_commercial_pdf(
+                    response.text,
+                    page_url,
+                    session=session,
+                )
+
+                stats = {
+                    "tables_total": 1,
+                    "fee_tables": 1,
+                    "ignored_tables": 0,
+                    "zero_record_tables": (
+                        0 if rows else 1
+                    ),
+                    "candidate_rows": len(rows),
+                    "parsed_before_dedup": len(rows),
+                    "repeated_headers": 0,
+                    "notes": 0,
+                    "invalid_rows": 0,
+                }
+            else:
+                rows, stats = _parse_page(
+                    response.text,
+                    page_category,
+                    page_url,
+                    "requests",
+                )
 
             _merge_stats(
                 total,
@@ -1323,31 +1817,75 @@ def _scrape_all_playwright(
                         1200
                     )
 
-                    # Yalnızca kapalı accordionları browser tarafında
-                    # toplu tetikle; tek tek Playwright click() yapma.
-                    try:
-                        clicked = page.evaluate("""
-                        () => {
-                            let count = 0;
+                    # Halkbank'ta özellikle kredi kartı sayfasındaki
+                    # ücret bölümleri klasik aria-expanded dışında H3 /
+                    # accordion wrapper ile tetiklenebiliyor.
+                    for click_round in range(3):
+                        try:
+                            clicked = page.evaluate("""
+                            () => {
+                                const targets = new Set();
 
-                            for (const el of document.querySelectorAll(
-                                "[aria-expanded='false']"
-                            )) {
-                                try {
-                                    el.click();
-                                    count++;
-                                } catch (_) {}
+                                document.querySelectorAll(
+                                    "[aria-expanded='false'], "
+                                    "[data-bs-toggle='collapse'], "
+                                    "[data-toggle='collapse'], "
+                                    ".accordion-button, "
+                                    ".accordion-header, "
+                                    "[role='button']"
+                                ).forEach(el => targets.add(el));
+
+                                // H3'e bağlı parent/trigger'ları da ekle.
+                                document.querySelectorAll("h3").forEach(h => {
+                                    targets.add(h);
+
+                                    const parent = h.parentElement;
+                                    if (parent) targets.add(parent);
+
+                                    const button = h.closest("button");
+                                    if (button) targets.add(button);
+
+                                    const roleButton = h.closest(
+                                        "[role='button']"
+                                    );
+                                    if (roleButton) targets.add(roleButton);
+                                });
+
+                                let count = 0;
+
+                                for (const el of targets) {
+                                    try {
+                                        el.click();
+                                        count++;
+                                    } catch (_) {}
+                                }
+
+                                return count;
                             }
+                            """)
 
-                            return count;
-                        }
-                        """)
+                            if clicked:
+                                page.wait_for_timeout(
+                                    900
+                                )
 
-                        if clicked:
-                            page.wait_for_timeout(
-                                700
-                            )
+                            # Kredi kartı içeriği geldiyse daha fazla tıklama yapma.
+                            current_tables = page.locator(
+                                "table"
+                            ).count()
 
+                            if current_tables > 0:
+                                break
+
+                        except Exception:
+                            break
+
+                    # XHR/JS render tamamlanması için kısa bekleme.
+                    try:
+                        page.wait_for_load_state(
+                            "networkidle",
+                            timeout=5000,
+                        )
                     except Exception:
                         pass
 
@@ -1381,12 +1919,64 @@ def _scrape_all_playwright(
 
                     html = page.content()
 
-                    rows, stats = _parse_page(
-                        html,
-                        page_category,
-                        page_url,
-                        "playwright",
-                    )
+                    if (
+                        page_category
+                        == "Ticari Ücret ve Komisyonları"
+                    ):
+                        rows = _scrape_commercial_pdf(
+                            html,
+                            page_url,
+                        )
+
+                        stats = {
+                            "tables_total": 1,
+                            "fee_tables": 1,
+                            "ignored_tables": 0,
+                            "zero_record_tables": (
+                                0 if rows else 1
+                            ),
+                            "candidate_rows": len(rows),
+                            "parsed_before_dedup": len(rows),
+                            "repeated_headers": 0,
+                            "notes": 0,
+                            "invalid_rows": 0,
+                        }
+                    else:
+                        rows, stats = _parse_page(
+                            html,
+                            page_category,
+                            page_url,
+                            "playwright",
+                        )
+
+                    if (
+                        page_category
+                        == "Kredi Kartları ve Banka Kartları"
+                        and not rows
+                    ):
+                        try:
+                            h3_texts = page.locator(
+                                "h3"
+                            ).all_text_contents()
+
+                            print(
+                                "[halkbank][DEBUG] "
+                                "Kredi kartı sayfası hâlâ 0 tablo. "
+                                f"H3 sayısı={len(h3_texts)} | "
+                                f"H3={h3_texts[:20]}",
+                                file=sys.stderr,
+                            )
+
+                            print(
+                                "[halkbank][DEBUG] "
+                                "Kredi kartı selector sayıları: "
+                                f"button={page.locator('button').count()}, "
+                                f"aria-expanded={page.locator('[aria-expanded]').count()}, "
+                                f"collapse={page.locator('[class*=collapse]').count()}",
+                                file=sys.stderr,
+                            )
+                        except Exception:
+                            pass
 
                     _merge_stats(
                         total,
@@ -1655,15 +2245,26 @@ def _print_integrity_report(
             "pages_failed",
             0,
         ) == 0
+        and stats.get(
+            "pages_no_rows",
+            0,
+        ) == 0
+        and stats.get(
+            "zero_record_tables",
+            0,
+        ) == 0
     ):
         print(
             "[halkbank] BÜTÜNLÜK: OK - "
+            "tüm alt sayfalar veri üretti ve "
             "aday satırların tamamı açıklandı.",
             file=sys.stderr,
         )
     else:
         print(
-            "[halkbank] BÜTÜNLÜK: UYARI",
+            "[halkbank] BÜTÜNLÜK: UYARI - "
+            "0 kayıt üreten / hatalı alt sayfa "
+            "veya açıklanamayan satır var.",
             file=sys.stderr,
         )
 
