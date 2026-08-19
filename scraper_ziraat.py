@@ -27,7 +27,7 @@ import requests
 from bs4 import BeautifulSoup
 
 
-SCRAPER_VERSION = "2026-08-19-v3-ziraat-local-context-fix"
+SCRAPER_VERSION = "2026-08-19-v4-ziraat-section-boundary-fix"
 
 ZIRAAT_URL = "https://www.ziraatbank.com.tr/tr/urun-ve-hizmet-ucretleri"
 
@@ -121,6 +121,10 @@ def _normalize(value) -> str:
 
 def _normalize_key(value) -> str:
     text = _normalize(value).lower()
+
+    # Türkçe büyük İ lower() sonrası "i\u0307" üretebilir.
+    # Combining dot'u temizle ki "İşlemleri" -> "islemleri" eşleşsin.
+    text = text.replace("\u0307", "")
 
     replacements = {
         "ı": "i",
@@ -416,19 +420,118 @@ TRANSFER_GROUP_ALIASES = {
 }
 
 
-def _context_headings(
+def _previous_context_texts(
     table,
-    limit: int = 60,
+    limit: int = 12000,
 ) -> List[str]:
     """
-    Tabloya en yakın bağlam etiketlerini yakın -> uzak sırasıyla döndürür.
-
-    Ziraat'ta ana kategori / accordion başlıkları yalnız h1-h6 değil,
-    button elemanında da bulunabiliyor.
+    Ziraat ana kategori etiketleri her zaman heading değildir.
+    Tablo öncesindeki görünür metinlerden en yakın exact kategori bulunur.
+    Başka ücret tablolarının hücreleri bağlamdan çıkarılır.
     """
     result: List[str] = []
 
-    for heading in table.find_all_previous(
+    for node in table.find_all_previous(
+        string=True,
+        limit=limit,
+    ):
+        parent = getattr(
+            node,
+            "parent",
+            None,
+        )
+
+        if parent is not None:
+            name = (
+                parent.name.lower()
+                if getattr(parent, "name", None)
+                else ""
+            )
+
+            if name in {
+                "script",
+                "style",
+                "noscript",
+                "svg",
+                "path",
+                "option",
+            }:
+                continue
+
+            if parent.find_parent(
+                "table"
+            ) is not None:
+                continue
+
+        text = _normalize(
+            str(node)
+        )
+
+        if (
+            text
+            and text not in result
+        ):
+            result.append(
+                text
+            )
+
+    return result
+
+
+def _find_category_from_text(
+    table,
+) -> str:
+    for text in _previous_context_texts(
+        table
+    ):
+        key = _normalize_key(
+            text
+        )
+
+        if key in CATEGORY_ALIASES:
+            return CATEGORY_ALIASES[
+                key
+            ]
+
+    return "Genel"
+
+
+def _heading_level(
+    element,
+) -> int:
+    name = (
+        element.name.lower()
+        if getattr(
+            element,
+            "name",
+            None,
+        )
+        else ""
+    )
+
+    match = re.fullmatch(
+        r"h([1-6])",
+        name,
+    )
+
+    if match:
+        return int(
+            match.group(1)
+        )
+
+    return 9
+
+
+def _nearby_heading_elements(
+    table,
+    limit: int = 50,
+):
+    """
+    En yakın başlık elemanlarını yakın -> uzak döndürür.
+    """
+    result = []
+
+    for element in table.find_all_previous(
         [
             "h1",
             "h2",
@@ -441,7 +544,7 @@ def _context_headings(
         limit=limit,
     ):
         text = _heading_text(
-            heading
+            element
         )
 
         if not text:
@@ -457,10 +560,15 @@ def _context_headings(
         }:
             continue
 
-        if text not in result:
-            result.append(
-                text
+        result.append(
+            (
+                element,
+                text,
+                _heading_level(
+                    element
+                ),
             )
+        )
 
     return result
 
@@ -469,106 +577,112 @@ def _find_category_and_hierarchy(
     table,
 ) -> Tuple[str, List[str]]:
     """
-    Sibling tablo başlıklarını yanlışlıkla tek MASRAF hiyerarşisine
-    biriktirmez.
+    Ana kategori exact görünür metinden bulunur.
 
-    Mantık:
-      1) Geriye doğru ilk gerçek ana kategori bulunur.
-      2) Kategori ile mevcut tablo arasında görülen EN YAKIN başlık,
-         tablo başlığı olarak alınır.
-      3) Para Aktarma içinde EFT / FAST / Havale / Swift gibi son
-         açık transfer grubu ayrıca korunur.
-
-    Örnek:
-        Para Aktarma
-        FAST
-        Mobil/ İnternet/Düzenli Ödeme
-        <table>
-
-    -> ["FAST", "Mobil/ İnternet/Düzenli Ödeme"]
+    Hiyerarşi yalnız gerçek heading parent-child ilişkisini taşır.
+    Önceki sibling bölümün FAST / Swift / Altın EFT başlığı sonraki
+    BKM / POS / başka tabloya sızmaz.
     """
-    nearby = _context_headings(
-        table,
-        limit=80,
+    category = _find_category_from_text(
+        table
     )
 
-    category = "Genel"
-    before_category: List[str] = []
+    headings = _nearby_heading_elements(
+        table,
+        limit=50,
+    )
 
-    for text in nearby:
+    local_text = ""
+    local_level = 99
+    local_index = -1
+
+    for index, (
+        element,
+        text,
+        level,
+    ) in enumerate(
+        headings
+    ):
         key = _normalize_key(
             text
         )
 
         if key in CATEGORY_ALIASES:
-            category = CATEGORY_ALIASES[
-                key
-            ]
-            break
-
-        before_category.append(
-            text
-        )
-
-    # En yakın yerel tablo başlığı.
-    local_title = ""
-
-    for text in before_category:
-        key = _normalize_key(
-            text
-        )
-
-        if (
-            key in CATEGORY_ALIASES
-            or key in {
-                _normalize_key(x)
-                for x in IGNORE_HEADINGS
-            }
-        ):
             continue
 
         if len(text) > 180:
             continue
 
-        local_title = text
+        local_text = text
+        local_level = level
+        local_index = index
         break
 
-    transfer_group = ""
+    hierarchy: List[str] = []
 
-    if category == "Para Aktarma":
-        # category ile mevcut table arasındaki etiketlerde,
-        # en yakından uzağa doğru ilk exact transfer grubu.
-        for text in before_category:
+    if local_text:
+        local_key = _normalize_key(
+            local_text
+        )
+
+        if (
+            category == "Para Aktarma"
+            and local_key
+            in TRANSFER_GROUP_ALIASES
+        ):
+            hierarchy.append(
+                TRANSFER_GROUP_ALIASES[
+                    local_key
+                ]
+            )
+
+            return category, hierarchy
+
+    if (
+        category == "Para Aktarma"
+        and local_index >= 0
+    ):
+        for (
+            element,
+            text,
+            level,
+        ) in headings[
+            local_index + 1:
+        ]:
             key = _normalize_key(
                 text
             )
 
-            if key in TRANSFER_GROUP_ALIASES:
-                transfer_group = (
+            if key in CATEGORY_ALIASES:
+                break
+
+            # Parent başlık daha üst h seviyesinde olmalı.
+            # h2 parent + h3 local -> geçerli.
+            # h2 sibling + h2 local -> geçersiz.
+            if (
+                key in TRANSFER_GROUP_ALIASES
+                and level < local_level
+            ):
+                hierarchy.append(
                     TRANSFER_GROUP_ALIASES[
                         key
                     ]
                 )
                 break
 
-    hierarchy: List[str] = []
-
-    if transfer_group:
-        hierarchy.append(
-            transfer_group
+    if local_text:
+        local_key = _normalize_key(
+            local_text
         )
 
-    if (
-        local_title
-        and _normalize_key(
-            local_title
-        ) != _normalize_key(
-            transfer_group
-        )
-    ):
-        hierarchy.append(
-            local_title
-        )
+        if not any(
+            _normalize_key(x)
+            == local_key
+            for x in hierarchy
+        ):
+            hierarchy.append(
+                local_text
+            )
 
     return category, hierarchy
 
