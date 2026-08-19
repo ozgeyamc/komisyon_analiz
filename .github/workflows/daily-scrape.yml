@@ -1,225 +1,97 @@
-name: Günlük Komisyon Güncelleme
+name: QNB + DenizBank Hızlı Test
 
 on:
-  schedule:
-    - cron: "00 05 * * *"
-
   workflow_dispatch:
-    inputs:
-      test_mail:
-        description: "Test maili gönder (değişiklik olmasa da)"
-        required: false
-        default: "false"
 
 permissions:
-  contents: write
-
-# Aynı workflow'un iki kez aynı anda Excel'e yazmasını engeller
-concurrency:
-  group: komisyon-guncelleme
-  cancel-in-progress: false
+  contents: read
 
 jobs:
-  scrape-and-update:
+  test-banks:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
-      # =====================================================
-      # REPOSITORY
-      # =====================================================
-
       - name: Repo'yu checkout et
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-
-      # =====================================================
-      # PYTHON
-      # =====================================================
 
       - name: Python kur
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-
       - name: Bağımlılıkları yükle
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-
       - name: Playwright Chromium kur
         run: |
           playwright install --with-deps chromium
 
-
       # =====================================================
-      # SCRAPER SÜRÜM KONTROLÜ
+      # SÜRÜM KONTROLÜ
       # =====================================================
 
-      - name: Scraper sürümlerini kontrol et
+      - name: Scraper sürümlerini göster
         run: |
-          echo "============================================"
-          echo "SCRAPER SÜRÜM KONTROLÜ"
-          echo "============================================"
+          echo "===== QNB ====="
+          python -c "import scraper_qnb as s; print('DOSYA =', s.__file__); print('SURUM =', getattr(s, 'SCRAPER_VERSION', 'SURUM_YOK'))"
 
           echo ""
-          echo "Çalışma klasörü:"
-          pwd
-
-          echo ""
-          echo "Çalıştırılan commit:"
-          git rev-parse HEAD
-
-          echo ""
-          echo "--- YAPI KREDİ ---"
-          python -c "import scraper_yapikredi as s; print('DOSYA =', s.__file__); print('SURUM =', getattr(s, 'SCRAPER_VERSION', 'SURUM_YOK'))"
-
-          echo ""
-          echo "--- GARANTİ ---"
-          python -c "import scraper as s; print('DOSYA =', s.__file__); print('SURUM =', getattr(s, 'SCRAPER_VERSION', 'SURUM_YOK'))"
-
-          echo ""
-          echo "--- İŞ BANKASI ---"
-          python -c "import scraper_isbank as s; print('DOSYA =', s.__file__); print('SURUM =', getattr(s, 'SCRAPER_VERSION', 'SURUM_YOK'))"
-
-          echo ""
-          echo "============================================"
-
+          echo "===== DENİZBANK ====="
+          python -c "import scraper_denizbank as s; print('DOSYA =', s.__file__); print('SURUM =', getattr(s, 'SCRAPER_VERSION', 'SURUM_YOK'))"
 
       # =====================================================
-      # ESKİ EXCEL YEDEĞİ
+      # QNB
       # =====================================================
 
-      - name: Eski Excel'i yedekle
+      - name: QNB testi
         run: |
-          if [ -f komisyonlar_guncel.xlsx ]; then
-            cp komisyonlar_guncel.xlsx komisyonlar_guncel_eski.xlsx
-            echo "[excel] Eski Excel yedeklendi."
-          else
-            echo "[excel] Önceki Excel bulunamadı."
-          fi
+          python - <<'PY'
+          from scraper_qnb import scrape_qnb
 
+          print()
+          print("========================================")
+          print("QNB TESTİ BAŞLIYOR")
+          print("========================================")
+
+          rows = scrape_qnb()
+
+          print()
+          print(f"QNB TEST SONUCU: {len(rows)} satır")
+          print("========================================")
+          PY
 
       # =====================================================
-      # SCRAPER
+      # DENİZBANK
       # =====================================================
 
-      - name: Scraper'ı çalıştır ve Excel'i güncelle
+      - name: DenizBank testi
         run: |
-          python main.py
-
-
-      # =====================================================
-      # MAIL BİLDİRİMİ
-      # =====================================================
-
-      - name: Değişiklik kontrolü ve mail bildirimi
-        env:
-          MAIL_USER: ${{ secrets.MAIL_USER }}
-          MAIL_PASS: ${{ secrets.MAIL_PASS }}
-          MAIL_TO: ${{ secrets.MAIL_TO }}
-
-        run: |
-          TEST_MODE="${{ github.event.inputs.test_mail }}"
-
-          if [ "$TEST_MODE" = "true" ]; then
-
-            echo "[notify] Test modu aktif."
-
-            python -c "
-          from notify import check_and_notify
-          check_and_notify(
-              'komisyonlar_guncel_eski.xlsx',
-              'komisyonlar_guncel.xlsx',
-              test_mode=True
+          python - <<'PY'
+          from scraper_denizbank import (
+              _scrape_with_requests,
+              _print_integrity_report,
+              _print_transfer_report,
+              _print_product_checks,
           )
-          "
 
-          elif [ -f komisyonlar_guncel_eski.xlsx ]; then
+          print()
+          print("========================================")
+          print("DENİZBANK TESTİ BAŞLIYOR")
+          print("========================================")
 
-            echo "[notify] Eski ve yeni Excel karşılaştırılıyor."
+          rows, stats = _scrape_with_requests()
 
-            python -c "
-          from notify import check_and_notify
-          check_and_notify(
-              'komisyonlar_guncel_eski.xlsx',
-              'komisyonlar_guncel.xlsx'
-          )
-          "
+          print(f"DenizBank toplam benzersiz satır: {len(rows)}")
 
-          else
+          _print_integrity_report(stats, len(rows))
+          _print_transfer_report(rows)
+          _print_product_checks(rows)
 
-            echo "[notify] İlk çalışma, karşılaştırma yapılmadı."
-
-          fi
-
-
-      # =====================================================
-      # ARTIFACT
-      # =====================================================
-
-      - name: Excel dosyasını artifact olarak kaydet
-        uses: actions/upload-artifact@v4
-        with:
-          name: komisyon-raporu
-          path: komisyonlar_guncel.xlsx
-          retention-days: 30
-
-
-      # =====================================================
-      # GIT DEĞİŞİKLİK KONTROLÜ
-      # =====================================================
-
-      - name: Değişiklik var mı kontrol et
-        id: git_check
-        run: |
-          if [ -n "$(git status --porcelain komisyonlar_guncel.xlsx)" ]; then
-
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-            echo "[git] Excel dosyasında değişiklik var."
-
-          else
-
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-            echo "[git] Excel dosyasında değişiklik yok."
-
-          fi
-
-
-      # =====================================================
-      # COMMIT + REBASE + PUSH
-      # =====================================================
-
-      - name: Excel dosyasını commit et ve push et
-        if: steps.git_check.outputs.changed == 'true'
-
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          echo "[git] Excel commit hazırlanıyor..."
-
-          git add komisyonlar_guncel.xlsx
-
-          git commit -m "Komisyon ücretleri güncellendi ($(TZ='Europe/Istanbul' date +'%d.%m.%Y %H:%M'))"
-
-          echo ""
-          echo "[git] GitHub'daki en güncel main alınıyor..."
-
-          git fetch origin main
-
-          echo ""
-          echo "[git] Excel commit'i güncel main üzerine taşınıyor..."
-
-          git rebase origin/main
-
-          echo ""
-          echo "[git] Push yapılıyor..."
-
-          git push origin HEAD:main
-
-          echo ""
-          echo "[git] Push başarıyla tamamlandı."
+          print()
+          print("========================================")
+          print("DENİZBANK TESTİ TAMAMLANDI")
+          print("========================================")
+          PY
