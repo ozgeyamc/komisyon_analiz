@@ -1,47 +1,89 @@
 """
-Ziraat Bankası "Ürün ve Hizmet Ücretleri" sayfasını çeken scraper modülü.
+Ziraat Bankası "Ürün ve Hizmet Ücretleri" scraper.
+
+Bu sürüm:
+- Güncel Ziraat Ürün ve Hizmet Ücretleri sayfasındaki tüm ücret tablolarını tarar.
+- requests'i birincil kullanır; sonuç eksik görünürse Playwright fallback yapar.
+- Root table + ücret header kontrolü ile ilgisiz tabloları ayırır.
+- Ana kategoriyi güncel Ziraat bölüm adlarından belirler.
+- Kategori altındaki başlık hiyerarşisini MASRAF alanında korur.
+
+Örnek:
+    Para Aktarma | EFT - Eft Mesaj Ücreti - 0-14.000 TL arası
+    Para Aktarma | FAST - Mobil/ İnternet/Düzenli Ödeme - 0-8.300 TL
+    Para Aktarma | Swift - Bankamızdan Hesaptan Ödenen Havaleler(YP) - 0 - 250 USD arası (USD)
+
+- Duplicate kayıtları temizler.
+- Bütünlük, kategori, FAST/EFT/Havale/SWIFT ve ek ürün raporları üretir.
+- main.py / update_excel.py ile uyumlu UcretSatiri listesi döndürür.
 """
 
 import re
 import sys
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Dict, List, Optional, Set, Tuple
 
 import requests
 from bs4 import BeautifulSoup
 
+
+SCRAPER_VERSION = "2026-08-19-v2-ziraat-integrity-hierarchy"
+
 ZIRAAT_URL = "https://www.ziraatbank.com.tr/tr/urun-ve-hizmet-ucretleri"
-
-DATE_PATTERN = re.compile(
-    r"G[üu]ncellenme\s*Tarihi\s*:\s*[\s\xa0]*(\d{2}[./]\d{2}[./]\d{4}(?:[\s\xa0]+\d{2}:\d{2})?)",
-    re.IGNORECASE,
-)
-
-DATE_PATTERN_ITIBAR = re.compile(
-    r"(\d{2}[./]\d{2}[./]\d{4})\s+tarihi\s+itibar",
-    re.IGNORECASE,
-)
-
-DATE_PATTERN_TR = re.compile(
-    r"(?:son\s+)?g[üu]ncellenme\s+tarihi\s*:?\s*[\s\xa0]*"
-    r"(\d{1,2})\s+(ocak|şubat|mart|nisan|mayıs|haziran|temmuz|ağustos|eylül|ekim|kasım|aralık)\s+(\d{4})",
-    re.IGNORECASE,
-)
-
-TURKCE_AYLAR = {
-    "ocak": "01", "şubat": "02", "mart": "03", "nisan": "04",
-    "mayıs": "05", "haziran": "06", "temmuz": "07", "ağustos": "08",
-    "eylül": "09", "ekim": "10", "kasım": "11", "aralık": "12",
-}
 
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/124.0.0.0 Safari/537.36"
-    )
+    ),
+    "Accept-Language": "tr-TR,tr;q=0.9,en;q=0.8",
 }
 
+
+# =========================================================
+# TARİH
+# =========================================================
+
+DATE_PATTERN = re.compile(
+    r"G[üu]ncellenme\s*Tarihi\s*:\s*[\s\xa0]*"
+    r"(\d{1,2}[./]\d{1,2}[./]\d{4}"
+    r"(?:[\s\xa0]+\d{1,2}:\d{2}(?::\d{2})?)?)",
+    re.IGNORECASE,
+)
+
+DATE_PATTERN_ITIBAR = re.compile(
+    r"(\d{1,2}[./]\d{1,2}[./]\d{4})\s+tarihi\s+itibar",
+    re.IGNORECASE,
+)
+
+DATE_PATTERN_TR = re.compile(
+    r"(?:son\s+)?g[üu]ncellenme\s+tarihi\s*:?\s*[\s\xa0]*"
+    r"(\d{1,2})\s+"
+    r"(ocak|şubat|mart|nisan|mayıs|haziran|temmuz|ağustos|eylül|ekim|kasım|aralık)"
+    r"\s+(\d{4})",
+    re.IGNORECASE,
+)
+
+TURKCE_AYLAR = {
+    "ocak": "01",
+    "şubat": "02",
+    "mart": "03",
+    "nisan": "04",
+    "mayıs": "05",
+    "haziran": "06",
+    "temmuz": "07",
+    "ağustos": "08",
+    "eylül": "09",
+    "ekim": "10",
+    "kasım": "11",
+    "aralık": "12",
+}
+
+
+# =========================================================
+# VERİ YAPISI
+# =========================================================
 
 @dataclass
 class UcretSatiri:
@@ -59,300 +101,1943 @@ class ScraperError(Exception):
     pass
 
 
-def _normalize(val: str) -> str:
-    return val.strip().replace("\xa0", " ").replace("\u200b", "").strip()
+# =========================================================
+# NORMALİZASYON
+# =========================================================
 
-
-def _normalize_tutar(val) -> str:
-    if val is None:
+def _normalize(value) -> str:
+    if value is None:
         return ""
-    if isinstance(val, (int, float)):
-        if val == 0:
+
+    text = str(value)
+    text = text.replace("\xa0", " ")
+    text = text.replace("\u200b", "")
+    text = text.replace("\r", " ")
+    text = text.replace("\n", " ")
+    text = re.sub(r"\s+", " ", text)
+
+    return text.strip()
+
+
+def _normalize_key(value) -> str:
+    text = _normalize(value).lower()
+
+    replacements = {
+        "ı": "i",
+        "ğ": "g",
+        "ü": "u",
+        "ş": "s",
+        "ö": "o",
+        "ç": "c",
+    }
+
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+
+    text = re.sub(r"\s+", " ", text)
+
+    return text.strip()
+
+
+def _normalize_tutar(value) -> str:
+    if value is None:
+        return ""
+
+    if isinstance(value, bool):
+        return ""
+
+    if isinstance(value, (int, float)):
+        if value == 0:
             return ""
-        if isinstance(val, float) and val == int(val):
-            return str(int(val))
-        return str(val)
-    v = str(val).strip().replace("\xa0", " ").replace("\u200b", "").strip()
-    if not v or v in ("0", "0.0", "0.00", "-"):
+
+        if isinstance(value, float) and value.is_integer():
+            return str(int(value))
+
+        return str(value)
+
+    text = _normalize(value)
+
+    if not text:
         return ""
+
+    if text in {
+        "0",
+        "0.0",
+        "0.00",
+        "0,0",
+        "0,00",
+        "-",
+    }:
+        return ""
+
     try:
-        if float(v.replace(",", ".")) == 0:
+        # "1.234,56" -> 1234.56
+        numeric_text = text
+
+        if "," in numeric_text:
+            numeric_text = (
+                numeric_text
+                .replace(".", "")
+                .replace(",", ".")
+            )
+
+        if float(numeric_text) == 0:
             return ""
-    except (ValueError, TypeError):
+
+    except Exception:
         pass
-    return v
+
+    return text
 
 
-def _normalize_tarih(val) -> str:
-    """
-    Ziraat tarih formatını dd.mm.yyyy HH:MM'e çevirir.
-      "08.05.202613:58:49"  → "08.05.2026 13:58"
-      "08.05.2026 13:58:49" → "08.05.2026 13:58"
-      "08.05.2026 13:58"    → "08.05.2026 13:58"
-      "08.05.2026"          → "08.05.2026"
-    """
-    v = str(val).strip().replace("\xa0", " ").replace("\u200b", "").strip() if val else ""
-    if not v:
+def _normalize_tarih(value) -> str:
+    text = _normalize(value)
+
+    if not text:
         return ""
 
-    # ISO format: "2026-04-28T10:10:41"
-    m = re.match(r"(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})", v)
-    if m:
-        return f"{m.group(3)}.{m.group(2)}.{m.group(1)} {m.group(4)}:{m.group(5)}"
+    # ISO: 2026-04-28T10:10:41
+    match = re.match(
+        r"^(\d{4})-(\d{2})-(\d{2})"
+        r"[T\s](\d{2}):(\d{2})",
+        text,
+    )
 
-    # "dd.mm.yyyyHH:MM" — boşluksuz yapışık
-    m = re.match(r"(\d{2}[./]\d{2}[./]\d{4})(\d{2}:\d{2})", v)
-    if m:
-        return f"{m.group(1)} {m.group(2)}"
-
-    # "dd.mm.yyyy HH:MM:SS" — saniyeyi at
-    m = re.match(r"(\d{2}[./]\d{2}[./]\d{4})\s+(\d{2}:\d{2}):\d{2}", v)
-    if m:
-        return f"{m.group(1)} {m.group(2)}"
-
-    # "dd.mm.yyyy HH:MM" — zaten temiz
-    m = re.match(r"(\d{2}[./]\d{2}[./]\d{4})\s+(\d{2}:\d{2})", v)
-    if m:
-        return f"{m.group(1)} {m.group(2)}"
-
-    # "dd.mm.yyyy" — sadece tarih
-    m = re.match(r"(\d{2}[./]\d{2}[./]\d{4})$", v)
-    if m:
-        return m.group(1)
-
-    return v
-
-
-def _parse_aciklama(raw_aciklama: str):
-    raw_aciklama = raw_aciklama.strip()
-
-    match = DATE_PATTERN.search(raw_aciklama)
     if match:
-        tarih = match.group(1).replace("/", ".").strip()
-        temiz = DATE_PATTERN.sub("", raw_aciklama).strip(" .")
-        return _normalize(temiz), tarih
+        return (
+            f"{match.group(3)}."
+            f"{match.group(2)}."
+            f"{match.group(1)} "
+            f"{match.group(4)}:"
+            f"{match.group(5)}"
+        )
 
-    match2 = DATE_PATTERN_ITIBAR.search(raw_aciklama)
-    if match2:
-        tarih = match2.group(1).replace("/", ".").strip()
-        return _normalize(raw_aciklama), tarih
+    # 08.05.202613:58:49
+    match = re.match(
+        r"^(\d{1,2}[./]\d{1,2}[./]\d{4})"
+        r"(\d{1,2}:\d{2})(?::\d{2})?",
+        text,
+    )
 
-    match_tr = DATE_PATTERN_TR.search(raw_aciklama)
-    if match_tr:
-        gun = match_tr.group(1).zfill(2)
-        ay = TURKCE_AYLAR.get(match_tr.group(2).lower(), "00")
-        yil = match_tr.group(3)
-        tarih = f"{gun}.{ay}.{yil}"
-        temiz = DATE_PATTERN_TR.sub("", raw_aciklama).strip(" .")
-        return _normalize(temiz), tarih
+    if match:
+        return (
+            match.group(1).replace("/", ".")
+            + " "
+            + match.group(2)
+        )
 
-    return _normalize(raw_aciklama), ""
+    # 08.05.2026 13:58:49
+    match = re.match(
+        r"^(\d{1,2}[./]\d{1,2}[./]\d{4})"
+        r"\s+(\d{1,2}:\d{2})(?::\d{2})?",
+        text,
+    )
+
+    if match:
+        return (
+            match.group(1).replace("/", ".")
+            + " "
+            + match.group(2)
+        )
+
+    # 08.05.2026
+    match = re.match(
+        r"^(\d{1,2}[./]\d{1,2}[./]\d{4})$",
+        text,
+    )
+
+    if match:
+        return (
+            match.group(1)
+            .replace("/", ".")
+        )
+
+    return text.replace("/", ".")
 
 
-def _find_category_title(table) -> str:
-    el = table.parent
-    depth = 0
-    while el is not None and depth < 8:
-        for sibling in el.find_all_previous(["h1", "h2", "h3", "h4", "h5", "button"], limit=3):
-            text = _normalize(sibling.get_text())
-            if len(text) > 5 and text not in ["Müşteri Ol", "Ara", "Kapat", "Menü"]:
-                return text
-        el = el.parent
-        depth += 1
-    return "Genel"
+def _parse_aciklama(
+    raw_aciklama: str,
+) -> Tuple[str, str]:
+    text = _normalize(
+        raw_aciklama
+    )
+
+    if not text:
+        return "", ""
+
+    match = DATE_PATTERN.search(
+        text
+    )
+
+    if match:
+        date = _normalize_tarih(
+            match.group(1)
+        )
+
+        clean = _normalize(
+            DATE_PATTERN.sub(
+                "",
+                text,
+            )
+        ).strip(" .:-")
+
+        return clean, date
+
+    match = DATE_PATTERN_ITIBAR.search(
+        text
+    )
+
+    if match:
+        return (
+            text,
+            _normalize_tarih(
+                match.group(1)
+            ),
+        )
+
+    match = DATE_PATTERN_TR.search(
+        text
+    )
+
+    if match:
+        day = match.group(1).zfill(2)
+        month = TURKCE_AYLAR.get(
+            match.group(2).lower(),
+            "",
+        )
+        year = match.group(3)
+
+        date = (
+            f"{day}.{month}.{year}"
+            if month
+            else ""
+        )
+
+        clean = _normalize(
+            DATE_PATTERN_TR.sub(
+                "",
+                text,
+            )
+        ).strip(" .:-")
+
+        return clean, date
+
+    return text, ""
 
 
-def _extract_rows_from_table(table, kategori: str) -> List[UcretSatiri]:
-    satirlar: List[UcretSatiri] = []
+# =========================================================
+# TRANSFER TERİMLERİ
+# =========================================================
 
-    thead = table.find("thead")
-    tbody = table.find("tbody")
+def _has_transfer_term(
+    text: str,
+    term: str,
+) -> bool:
+    normalized = _normalize_key(
+        text
+    )
 
-    header_texts = []
-    if thead:
-        header_row = thead.find("tr")
-        if header_row:
-            header_texts = [
-                _normalize(c.get_text(strip=True)).lower()
-                for c in header_row.find_all(["th", "td"])
+    patterns = {
+        "fast": r"(?<![a-z0-9])fast(?![a-z0-9])",
+        "eft": r"(?<![a-z0-9])eft(?![a-z0-9])",
+        "havale": r"(?<![a-z0-9])havale(?![a-z0-9])",
+        "swift": r"(?<![a-z0-9])swift(?![a-z0-9])",
+    }
+
+    pattern = patterns.get(
+        term
+    )
+
+    if pattern:
+        return re.search(
+            pattern,
+            normalized,
+        ) is not None
+
+    return term in normalized
+
+
+# =========================================================
+# GÜNCEL ANA KATEGORİLER
+# =========================================================
+
+CATEGORY_ALIASES = {
+    "atm kullanim": "ATM Kullanım",
+    "bireysel krediler": "Bireysel Krediler",
+    "cekler ve senetler": "Çekler ve Senetler",
+    "dis ticaret": "Dış Ticaret",
+    "kiralik kasa ucretleri": "Kiralık Kasa Ücretleri",
+    "ticari krediler": "Ticari Krediler",
+    "kredi kartlari ve banka kartlari": "Kredi Kartları ve Banka Kartları",
+    "menkul kiymet islemleri": "Menkul Kıymet İşlemleri",
+    "mevduat hesaplari": "Mevduat Hesapları",
+    "para aktarma": "Para Aktarma",
+    "uye isyeri ve pos urun ve hizmetleri azami ucretleri":
+        "Üye İşyeri ve POS Ürün ve Hizmetleri Azami Ücretleri",
+    "diger": "Diğer",
+}
+
+IGNORE_HEADINGS = {
+    "ürün ve hizmet ücretleri",
+    "urun ve hizmet ucretleri",
+    "fiyatlar ve oranlar",
+    "diğer faiz oranları",
+    "diger faiz oranlari",
+    "geçmiş dönem mevduat / kredi faiz oranları",
+    "gecmis donem mevduat / kredi faiz oranlari",
+    "müşteri ol",
+    "musteri ol",
+    "ara",
+    "menü",
+    "menu",
+    "kapat",
+    "ana sayfa",
+    "anasayfa",
+}
+
+
+def _heading_text(
+    heading,
+) -> str:
+    return _normalize(
+        heading.get_text(
+            " ",
+            strip=True,
+        )
+    )
+
+
+def _context_headings(
+    table,
+    limit: int = 30,
+) -> List[str]:
+    """
+    Tabloya en yakın h1-h6 başlıklarını yakın -> uzak sırasıyla döndürür.
+    """
+    result: List[str] = []
+
+    for heading in table.find_all_previous(
+        ["h1", "h2", "h3", "h4", "h5", "h6"],
+        limit=limit,
+    ):
+        text = _heading_text(
+            heading
+        )
+
+        if not text:
+            continue
+
+        key = _normalize_key(
+            text
+        )
+
+        if key in {
+            _normalize_key(x)
+            for x in IGNORE_HEADINGS
+        }:
+            continue
+
+        if text not in result:
+            result.append(
+                text
+            )
+
+    return result
+
+
+def _find_category_and_hierarchy(
+    table,
+) -> Tuple[str, List[str]]:
+    """
+    Örnek DOM:
+        Para Aktarma   <- ana kategori
+        FAST           <- alt bölüm
+        Mobil/ İnternet/Düzenli Ödeme <- tablo başlığı
+        <table>
+
+    Sonuç:
+        kategori = Para Aktarma
+        hierarchy = ["FAST", "Mobil/ İnternet/Düzenli Ödeme"]
+    """
+    nearby = _context_headings(
+        table,
+        limit=40,
+    )
+
+    category = "Genel"
+    hierarchy_near_to_far: List[
+        str
+    ] = []
+
+    for text in nearby:
+        key = _normalize_key(
+            text
+        )
+
+        if key in CATEGORY_ALIASES:
+            category = CATEGORY_ALIASES[
+                key
             ]
+            break
 
-    if tbody:
-        data_rows = tbody.find_all("tr")
-        if not header_texts and data_rows:
-            header_texts = [
-                _normalize(c.get_text(strip=True)).lower()
-                for c in data_rows[0].find_all(["th", "td"])
-            ]
-            data_rows = data_rows[1:]
-    else:
-        all_rows = table.find_all("tr")
-        if not all_rows:
-            return satirlar
-        if not header_texts:
-            header_texts = [
-                _normalize(c.get_text(strip=True)).lower()
-                for c in all_rows[0].find_all(["th", "td"])
-            ]
-        data_rows = all_rows[1:]
+        hierarchy_near_to_far.append(
+            text
+        )
 
-    def find_col(keywords):
-        for i, h in enumerate(header_texts):
-            if all(k in h for k in keywords):
-                return i
+    # DOM'da en yakın başlık önce geldiği için hiyerarşiyi ters çevir.
+    hierarchy = list(
+        reversed(
+            hierarchy_near_to_far
+        )
+    )
+
+    # Gürültülü veya tekrar başlıkları ayıkla.
+    clean: List[str] = []
+
+    for text in hierarchy:
+        key = _normalize_key(
+            text
+        )
+
+        if not text:
+            continue
+
+        if key in CATEGORY_ALIASES:
+            continue
+
+        if key in {
+            _normalize_key(x)
+            for x in IGNORE_HEADINGS
+        }:
+            continue
+
+        if len(text) > 180:
+            continue
+
+        if any(
+            _normalize_key(existing)
+            == key
+            for existing in clean
+        ):
+            continue
+
+        clean.append(
+            text
+        )
+
+    # Ziraat'ta pratikte kategori ile tablo arasında en fazla 2-3
+    # anlamlı başlık bulunuyor. Aşırı breadcrumb birikimini engelle.
+    if len(clean) > 3:
+        clean = clean[-3:]
+
+    return category, clean
+
+
+def _build_masraf(
+    raw_masraf: str,
+    hierarchy: List[str],
+) -> str:
+    raw = _normalize(
+        raw_masraf
+    )
+
+    parts: List[str] = []
+
+    for value in hierarchy:
+        value = _normalize(
+            value
+        )
+
+        if not value:
+            continue
+
+        value_key = _normalize_key(
+            value
+        )
+
+        if any(
+            _normalize_key(existing)
+            == value_key
+            for existing in parts
+        ):
+            continue
+
+        parts.append(
+            value
+        )
+
+    raw_key = _normalize_key(
+        raw
+    )
+
+    # Ham satır zaten üst başlığı içeriyorsa tekrar yazma.
+    if not any(
+        raw_key == _normalize_key(part)
+        or _normalize_key(part) in raw_key
+        for part in parts
+    ):
+        parts.append(
+            raw
+        )
+
+    masraf = (
+        " - ".join(parts)
+        if parts
+        else raw
+    )
+
+    # SWIFT başlığını büyük/küçük harfe bağlı olmadan standartlaştır.
+    if any(
+        _normalize_key(part)
+        == "swift"
+        for part in hierarchy
+    ) and not _has_transfer_term(
+        masraf,
+        "swift",
+    ):
+        masraf = (
+            f"SWIFT - {masraf}"
+        )
+
+    return _normalize(
+        masraf
+    )
+
+
+# =========================================================
+# TABLO GRID
+# =========================================================
+
+def _root_tables(
+    soup: BeautifulSoup,
+):
+    return [
+        table
+        for table in soup.find_all(
+            "table"
+        )
+        if table.find_parent(
+            "table"
+        ) is None
+    ]
+
+
+def _table_to_rows(
+    table,
+) -> List[List[str]]:
+    """
+    rowspan / colspan içeren tabloları düz grid'e çevirir.
+    """
+    rows: List[List[str]] = []
+
+    active_spans: Dict[
+        int,
+        Tuple[str, int],
+    ] = {}
+
+    trs = [
+        tr
+        for tr in table.find_all(
+            "tr"
+        )
+        if tr.find_parent(
+            "table"
+        ) is table
+    ]
+
+    for tr in trs:
+        cells = tr.find_all(
+            ["th", "td"],
+            recursive=False,
+        )
+
+        if (
+            not cells
+            and not active_spans
+        ):
+            continue
+
+        row: List[str] = []
+        col = 0
+        cell_index = 0
+
+        guard = max(
+            len(cells) * 8
+            + len(active_spans)
+            + 20,
+            30,
+        )
+
+        while (
+            cell_index < len(cells)
+            or active_spans
+        ) and col < guard:
+
+            if col in active_spans:
+                text, remaining = (
+                    active_spans[col]
+                )
+
+                row.append(
+                    text
+                )
+
+                if remaining <= 1:
+                    del active_spans[
+                        col
+                    ]
+                else:
+                    active_spans[
+                        col
+                    ] = (
+                        text,
+                        remaining - 1,
+                    )
+
+                col += 1
+                continue
+
+            if cell_index >= len(
+                cells
+            ):
+                future_cols = [
+                    c
+                    for c in active_spans
+                    if c > col
+                ]
+
+                if not future_cols:
+                    break
+
+                next_col = min(
+                    future_cols
+                )
+
+                while col < next_col:
+                    row.append("")
+                    col += 1
+
+                continue
+
+            cell = cells[
+                cell_index
+            ]
+            cell_index += 1
+
+            text = _normalize(
+                cell.get_text(
+                    " ",
+                    strip=True,
+                )
+            )
+
+            try:
+                rowspan = max(
+                    int(
+                        cell.get(
+                            "rowspan",
+                            1,
+                        )
+                    ),
+                    1,
+                )
+            except Exception:
+                rowspan = 1
+
+            try:
+                colspan = max(
+                    int(
+                        cell.get(
+                            "colspan",
+                            1,
+                        )
+                    ),
+                    1,
+                )
+            except Exception:
+                colspan = 1
+
+            for _ in range(
+                colspan
+            ):
+                row.append(
+                    text
+                )
+
+                if rowspan > 1:
+                    active_spans[
+                        col
+                    ] = (
+                        text,
+                        rowspan - 1,
+                    )
+
+                col += 1
+
+        if any(
+            _normalize(value)
+            for value in row
+        ):
+            rows.append(
+                row
+            )
+
+    return rows
+
+
+# =========================================================
+# HEADER
+# =========================================================
+
+def _header_score(
+    row: List[str],
+) -> int:
+    headers = [
+        _normalize_key(
+            value
+        )
+        for value in row
+    ]
+
+    tests = [
+        ["masraf"],
+        ["asgari", "tutar"],
+        ["asgari", "oran"],
+        ["azami", "tutar"],
+        ["azami", "oran"],
+        ["aciklama"],
+        ["guncelleme"],
+    ]
+
+    score = 0
+
+    for keywords in tests:
+        if any(
+            all(
+                keyword in header
+                for keyword in keywords
+            )
+            for header in headers
+        ):
+            score += 1
+
+    return score
+
+
+def _find_header_index(
+    rows: List[List[str]],
+) -> int:
+    best_index = -1
+    best_score = 0
+
+    for index, row in enumerate(
+        rows[:8]
+    ):
+        score = _header_score(
+            row
+        )
+
+        if score > best_score:
+            best_score = score
+            best_index = index
+
+    if best_score < 4:
         return -1
 
-    col_masraf    = find_col(["masraf"])
-    col_asg_tutar = find_col(["asgari", "tutar"])
-    col_asg_oran  = find_col(["asgari", "oran"])
-    col_azm_tutar = find_col(["azami", "tutar"])
-    col_azm_oran  = find_col(["azami", "oran"])
-    col_aciklama  = find_col(["açıklama"])
-    if col_aciklama == -1:
-        col_aciklama = find_col(["aciklama"])
-    col_tarih     = find_col(["güncelleme"])
-    if col_tarih == -1:
-        col_tarih = find_col(["guncelleme"])
-    if col_tarih == -1:
-        col_tarih = find_col(["tarih"])
+    return best_index
 
-    if col_masraf == -1:
-        col_masraf    = 0
-        col_asg_tutar = 1
-        col_asg_oran  = 2
-        col_azm_tutar = 3
-        col_azm_oran  = 4
-        col_aciklama  = 5
 
-    for row in data_rows:
-        cells = row.find_all(["th", "td"])
-        if not cells or len(cells) < 2:
+def _find_col(
+    headers: List[str],
+    keywords: List[str],
+) -> int:
+    for index, header in enumerate(
+        headers
+    ):
+        if all(
+            keyword in header
+            for keyword in keywords
+        ):
+            return index
+
+    return -1
+
+
+def _find_columns(
+    header_row: List[str],
+) -> Dict[str, int]:
+    headers = [
+        _normalize_key(
+            value
+        )
+        for value in header_row
+    ]
+
+    cols = {
+        "masraf": _find_col(
+            headers,
+            ["masraf"],
+        ),
+        "asgari_tutar": _find_col(
+            headers,
+            ["asgari", "tutar"],
+        ),
+        "asgari_oran": _find_col(
+            headers,
+            ["asgari", "oran"],
+        ),
+        "azami_tutar": _find_col(
+            headers,
+            ["azami", "tutar"],
+        ),
+        "azami_oran": _find_col(
+            headers,
+            ["azami", "oran"],
+        ),
+        "aciklama": _find_col(
+            headers,
+            ["aciklama"],
+        ),
+        "tarih": _find_col(
+            headers,
+            ["guncelleme"],
+        ),
+    }
+
+    # Güncel Ziraat ücret tablosu 7 kolon.
+    if len(header_row) >= 7:
+        fallback = {
+            "masraf": 0,
+            "asgari_tutar": 1,
+            "asgari_oran": 2,
+            "azami_tutar": 3,
+            "azami_oran": 4,
+            "aciklama": 5,
+            "tarih": 6,
+        }
+
+        for key, index in fallback.items():
+            if cols[
+                key
+            ] == -1:
+                cols[
+                    key
+                ] = index
+
+    return cols
+
+
+def _row_is_same_header(
+    row: List[str],
+    header: List[str],
+) -> bool:
+    left = [
+        _normalize_key(
+            value
+        )
+        for value in row
+    ]
+    right = [
+        _normalize_key(
+            value
+        )
+        for value in header
+    ]
+
+    while (
+        left
+        and not left[-1]
+    ):
+        left.pop()
+
+    while (
+        right
+        and not right[-1]
+    ):
+        right.pop()
+
+    return left == right
+
+
+# =========================================================
+# HTML PARSER
+# =========================================================
+
+def _parse_html(
+    html: str,
+    source_name: str,
+) -> Tuple[
+    List[UcretSatiri],
+    Dict[str, int],
+]:
+    soup = BeautifulSoup(
+        html,
+        "lxml",
+    )
+
+    tables = _root_tables(
+        soup
+    )
+
+    stats: Dict[str, int] = {
+        "root_tables": len(
+            tables
+        ),
+        "fee_tables": 0,
+        "ignored_tables": 0,
+        "zero_record_tables": 0,
+        "candidate_rows": 0,
+        "parsed_before_dedup": 0,
+        "repeated_headers": 0,
+        "notes": 0,
+        "invalid_rows": 0,
+        "missing_category_tables": 0,
+    }
+
+    rows_out: List[
+        UcretSatiri
+    ] = []
+
+    for table_index, table in enumerate(
+        tables
+    ):
+        grid = _table_to_rows(
+            table
+        )
+
+        if not grid:
+            stats[
+                "ignored_tables"
+            ] += 1
             continue
 
-        values = [_normalize(c.get_text(strip=True)) for c in cells]
-
-        def get(idx):
-            return values[idx] if 0 <= idx < len(values) else ""
-
-        masraf = get(col_masraf)
-        if not masraf:
-            continue
-
-        site_tarihi = _normalize_tarih(get(col_tarih)) if col_tarih >= 0 else ""
-        temiz_aciklama, aciklama_tarihi = _parse_aciklama(get(col_aciklama))
-        if not site_tarihi:
-            site_tarihi = aciklama_tarihi
-
-        satirlar.append(
-            UcretSatiri(
-                kategori=kategori,
-                masraf=masraf,
-                asgari_tutar=_normalize_tutar(get(col_asg_tutar)),
-                asgari_oran=_normalize_tutar(get(col_asg_oran)),
-                azami_tutar=_normalize_tutar(get(col_azm_tutar)),
-                azami_oran=_normalize_tutar(get(col_azm_oran)),
-                aciklama=temiz_aciklama,
-                site_guncelleme_tarihi=site_tarihi,
+        header_index = (
+            _find_header_index(
+                grid
             )
         )
 
-    return satirlar
+        if header_index == -1:
+            stats[
+                "ignored_tables"
+            ] += 1
+            continue
+
+        stats[
+            "fee_tables"
+        ] += 1
+
+        header = [
+            _normalize(
+                value
+            )
+            for value in grid[
+                header_index
+            ]
+        ]
+
+        columns = _find_columns(
+            header
+        )
+
+        (
+            category,
+            hierarchy,
+        ) = _find_category_and_hierarchy(
+            table
+        )
+
+        if category == "Genel":
+            stats[
+                "missing_category_tables"
+            ] += 1
+
+        table_record_count = 0
+
+        for raw_row in grid[
+            header_index + 1:
+        ]:
+            row = [
+                _normalize(
+                    value
+                )
+                for value in raw_row
+            ]
+
+            if (
+                not row
+                or not any(row)
+            ):
+                continue
+
+            stats[
+                "candidate_rows"
+            ] += 1
+
+            if _row_is_same_header(
+                row,
+                header,
+            ):
+                stats[
+                    "repeated_headers"
+                ] += 1
+                continue
+
+            meaningful = sum(
+                1
+                for value in row
+                if value
+            )
+
+            if meaningful < 2:
+                stats[
+                    "notes"
+                ] += 1
+                continue
+
+            def get(
+                index: int,
+            ) -> str:
+                if (
+                    index < 0
+                    or index >= len(row)
+                ):
+                    return ""
+
+                return _normalize(
+                    row[index]
+                )
+
+            raw_masraf = get(
+                columns[
+                    "masraf"
+                ]
+            )
+
+            if not raw_masraf:
+                stats[
+                    "invalid_rows"
+                ] += 1
+                continue
+
+            asgari_tutar = (
+                _normalize_tutar(
+                    get(
+                        columns[
+                            "asgari_tutar"
+                        ]
+                    )
+                )
+            )
+
+            asgari_oran = (
+                _normalize_tutar(
+                    get(
+                        columns[
+                            "asgari_oran"
+                        ]
+                    )
+                )
+            )
+
+            azami_tutar = (
+                _normalize_tutar(
+                    get(
+                        columns[
+                            "azami_tutar"
+                        ]
+                    )
+                )
+            )
+
+            azami_oran = (
+                _normalize_tutar(
+                    get(
+                        columns[
+                            "azami_oran"
+                        ]
+                    )
+                )
+            )
+
+            aciklama_raw = get(
+                columns[
+                    "aciklama"
+                ]
+            )
+
+            (
+                aciklama,
+                aciklama_tarihi,
+            ) = _parse_aciklama(
+                aciklama_raw
+            )
+
+            site_tarihi = (
+                _normalize_tarih(
+                    get(
+                        columns[
+                            "tarih"
+                        ]
+                    )
+                )
+            )
+
+            if not site_tarihi:
+                site_tarihi = (
+                    aciklama_tarihi
+                )
+
+            if not any(
+                [
+                    asgari_tutar,
+                    asgari_oran,
+                    azami_tutar,
+                    azami_oran,
+                    aciklama,
+                    site_tarihi,
+                ]
+            ):
+                stats[
+                    "invalid_rows"
+                ] += 1
+                continue
+
+            masraf = _build_masraf(
+                raw_masraf,
+                hierarchy,
+            )
+
+            rows_out.append(
+                UcretSatiri(
+                    kategori=category,
+                    masraf=masraf,
+                    asgari_tutar=asgari_tutar,
+                    asgari_oran=asgari_oran,
+                    azami_tutar=azami_tutar,
+                    azami_oran=azami_oran,
+                    aciklama=aciklama,
+                    site_guncelleme_tarihi=site_tarihi,
+                )
+            )
+
+            stats[
+                "parsed_before_dedup"
+            ] += 1
+
+            table_record_count += 1
+
+        if table_record_count == 0:
+            stats[
+                "zero_record_tables"
+            ] += 1
+
+            print(
+                f"[ziraat][DEBUG][{source_name}] "
+                f"tablo={table_index} | "
+                f"kategori={category} | "
+                f"hiyerarşi={hierarchy} | "
+                f"header={header}",
+                file=sys.stderr,
+            )
+
+    return rows_out, stats
 
 
-def _scrape_with_playwright(url: str = ZIRAAT_URL) -> List[UcretSatiri]:
+# =========================================================
+# ÇEKME YÖNTEMLERİ
+# =========================================================
+
+def _scrape_requests(
+    url: str,
+) -> Tuple[
+    List[UcretSatiri],
+    Dict[str, int],
+]:
+    response = requests.get(
+        url,
+        headers=HEADERS,
+        timeout=45,
+    )
+    response.raise_for_status()
+
+    return _parse_html(
+        response.text,
+        "requests",
+    )
+
+
+def _scrape_playwright(
+    url: str,
+) -> Tuple[
+    List[UcretSatiri],
+    Dict[str, int],
+]:
     try:
-        from playwright.sync_api import sync_playwright
+        from playwright.sync_api import (
+            sync_playwright,
+        )
     except ImportError as exc:
-        raise ScraperError("Playwright kurulu değil.") from exc
+        raise ScraperError(
+            "Playwright kurulu değil."
+        ) from exc
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        browser = p.chromium.launch(
+            headless=True
+        )
+
         try:
-            page = browser.new_page(user_agent=HEADERS["User-Agent"])
-            page.goto(url, timeout=60000, wait_until="networkidle")
+            context = browser.new_context(
+                user_agent=HEADERS[
+                    "User-Agent"
+                ],
+                locale="tr-TR",
+                timezone_id="Europe/Istanbul",
+                viewport={
+                    "width": 1440,
+                    "height": 1000,
+                },
+                extra_http_headers={
+                    "Accept-Language": (
+                        HEADERS[
+                            "Accept-Language"
+                        ]
+                    ),
+                },
+            )
 
-            for selector in [
-                "button[aria-expanded='false']",
-                ".accordion-button.collapsed",
-                "[data-bs-toggle='collapse']",
-                ".card-header button",
-                "li[role='tab']",
-                ".nav-link:not(.active)",
-            ]:
+            page = context.new_page()
+
+            page.goto(
+                url,
+                timeout=90000,
+                wait_until=(
+                    "domcontentloaded"
+                ),
+            )
+
+            page.wait_for_timeout(
+                1000
+            )
+
+            # Gizli accordion/tab içeriği varsa topluca aç.
+            try:
+                page.evaluate("""
+                () => {
+                    const targets = new Set();
+
+                    document.querySelectorAll(
+                        "[aria-expanded='false'], "
+                        "[data-bs-toggle='collapse'], "
+                        "[data-toggle='collapse'], "
+                        ".accordion-button, "
+                        "[role='button']"
+                    ).forEach(el => targets.add(el));
+
+                    for (const el of targets) {
+                        try {
+                            el.click();
+                        } catch (_) {}
+                    }
+                }
+                """)
+            except Exception:
+                pass
+
+            page.wait_for_timeout(
+                700
+            )
+
+            # Lazy load ihtimaline karşı kısa scroll.
+            for _ in range(50):
                 try:
-                    elements = page.query_selector_all(selector)
-                    for el in elements:
-                        try:
-                            el.click(timeout=2000)
-                            page.wait_for_timeout(300)
-                        except Exception:
-                            continue
-                except Exception:
-                    continue
+                    page.evaluate(
+                        "() => window.scrollBy("
+                        "0, Math.max("
+                        "window.innerHeight * 0.9, 700"
+                        "))"
+                    )
 
-            page.wait_for_timeout(2000)
+                    page.wait_for_timeout(
+                        50
+                    )
+
+                    bottom = page.evaluate(
+                        "() => "
+                        "(window.innerHeight + window.scrollY) >= "
+                        "((document.documentElement "
+                        "? document.documentElement.scrollHeight "
+                        ": 0) - 120)"
+                    )
+
+                    if bottom:
+                        break
+
+                except Exception:
+                    break
+
             html = page.content()
+
         finally:
             browser.close()
 
-    soup = BeautifulSoup(html, "lxml")
-    tables = soup.find_all("table")
-
-    if not tables:
-        raise ScraperError("Playwright ile tablo bulunamadı.")
-
-    tum_satirlar: List[UcretSatiri] = []
-    for table in tables:
-        kategori = _find_category_title(table)
-        rows = _extract_rows_from_table(table, kategori)
-        tum_satirlar.extend(rows)
-
-    return tum_satirlar
+    return _parse_html(
+        html,
+        "playwright",
+    )
 
 
-def _scrape_with_requests(url: str = ZIRAAT_URL) -> Optional[List[UcretSatiri]]:
+# =========================================================
+# DEDUP
+# =========================================================
+
+def _deduplicate(
+    rows: List[UcretSatiri],
+    stats: Dict[str, int],
+) -> List[UcretSatiri]:
+    result: List[
+        UcretSatiri
+    ] = []
+
+    seen: Set[
+        Tuple[
+            str,
+            str,
+            str,
+            str,
+            str,
+            str,
+            str,
+            str,
+        ]
+    ] = set()
+
+    duplicates = 0
+
+    for row in rows:
+        key = (
+            row.kategori,
+            row.masraf,
+            row.asgari_tutar,
+            row.asgari_oran,
+            row.azami_tutar,
+            row.azami_oran,
+            row.aciklama,
+            row.site_guncelleme_tarihi,
+        )
+
+        if key in seen:
+            duplicates += 1
+            continue
+
+        seen.add(
+            key
+        )
+
+        result.append(
+            row
+        )
+
+    stats[
+        "duplicates"
+    ] = duplicates
+
+    return result
+
+
+# =========================================================
+# RAPORLAR
+# =========================================================
+
+def _print_category_report(
+    rows: List[UcretSatiri],
+) -> None:
+    counts: Dict[
+        str,
+        int,
+    ] = {}
+
+    for row in rows:
+        counts[
+            row.kategori
+        ] = (
+            counts.get(
+                row.kategori,
+                0,
+            )
+            + 1
+        )
+
+    print(
+        "",
+        file=sys.stderr,
+    )
+
+    print(
+        "[ziraat] ===== KATEGORİ RAPORU =====",
+        file=sys.stderr,
+    )
+
+    for category, count in sorted(
+        counts.items(),
+        key=lambda item: (
+            -item[1],
+            item[0],
+        ),
+    ):
+        print(
+            f"[ziraat] "
+            f"{category} -> "
+            f"{count} kayıt",
+            file=sys.stderr,
+        )
+
+    print(
+        "[ziraat] ===========================",
+        file=sys.stderr,
+    )
+
+
+def _print_integrity_report(
+    stats: Dict[str, int],
+    result_count: int,
+) -> None:
+    candidate_rows = stats.get(
+        "candidate_rows",
+        0,
+    )
+
+    explained = (
+        stats.get(
+            "parsed_before_dedup",
+            0,
+        )
+        + stats.get(
+            "repeated_headers",
+            0,
+        )
+        + stats.get(
+            "notes",
+            0,
+        )
+        + stats.get(
+            "invalid_rows",
+            0,
+        )
+    )
+
+    print(
+        "",
+        file=sys.stderr,
+    )
+
+    print(
+        "[ziraat] ===== BÜTÜNLÜK KONTROLÜ =====",
+        file=sys.stderr,
+    )
+
+    print(
+        f"[ziraat] Toplam root tablo: "
+        f"{stats.get('root_tables', 0)}",
+        file=sys.stderr,
+    )
+
+    print(
+        f"[ziraat] Ücret tablosu: "
+        f"{stats.get('fee_tables', 0)}",
+        file=sys.stderr,
+    )
+
+    print(
+        f"[ziraat] İlgisiz/atlanan tablo: "
+        f"{stats.get('ignored_tables', 0)}",
+        file=sys.stderr,
+    )
+
+    print(
+        f"[ziraat] Ham ücret satırı adayı: "
+        f"{candidate_rows}",
+        file=sys.stderr,
+    )
+
+    print(
+        f"[ziraat] Parse edilen "
+        f"(dedup öncesi): "
+        f"{stats.get('parsed_before_dedup', 0)}",
+        file=sys.stderr,
+    )
+
+    print(
+        f"[ziraat] Duplicate: "
+        f"{stats.get('duplicates', 0)}",
+        file=sys.stderr,
+    )
+
+    print(
+        f"[ziraat] Tekrarlanan header: "
+        f"{stats.get('repeated_headers', 0)}",
+        file=sys.stderr,
+    )
+
+    print(
+        f"[ziraat] Not / tek hücreli satır: "
+        f"{stats.get('notes', 0)}",
+        file=sys.stderr,
+    )
+
+    print(
+        f"[ziraat] Geçersiz / boş veri satırı: "
+        f"{stats.get('invalid_rows', 0)}",
+        file=sys.stderr,
+    )
+
+    print(
+        f"[ziraat] 0 kayıt üreten ücret tablosu: "
+        f"{stats.get('zero_record_tables', 0)}",
+        file=sys.stderr,
+    )
+
+    print(
+        f"[ziraat] Kategorisi Genel kalan ücret tablosu: "
+        f"{stats.get('missing_category_tables', 0)}",
+        file=sys.stderr,
+    )
+
+    print(
+        f"[ziraat] Excel'e gidecek "
+        f"benzersiz satır: "
+        f"{result_count}",
+        file=sys.stderr,
+    )
+
+    if (
+        candidate_rows == explained
+        and stats.get(
+            "zero_record_tables",
+            0,
+        ) == 0
+        and stats.get(
+            "missing_category_tables",
+            0,
+        ) == 0
+        and stats.get(
+            "fee_tables",
+            0,
+        ) > 0
+    ):
+        print(
+            "[ziraat] BÜTÜNLÜK: OK - "
+            "tüm tanınan ücret tabloları "
+            "kategoriye bağlandı ve aday "
+            "satırların tamamı açıklandı.",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            "[ziraat] BÜTÜNLÜK: UYARI",
+            file=sys.stderr,
+        )
+
+    print(
+        "[ziraat] ===============================",
+        file=sys.stderr,
+    )
+
+
+def _print_transfer_report(
+    rows: List[UcretSatiri],
+) -> None:
+    print(
+        "",
+        file=sys.stderr,
+    )
+
+    print(
+        "[ziraat] ===== PARA AKTARMA KONTROLÜ =====",
+        file=sys.stderr,
+    )
+
+    for label, term in [
+        ("FAST", "fast"),
+        ("EFT", "eft"),
+        ("Havale", "havale"),
+        ("SWIFT", "swift"),
+    ]:
+        found = [
+            row
+            for row in rows
+            if _has_transfer_term(
+                row.masraf,
+                term,
+            )
+        ]
+
+        print(
+            f"[ziraat] {label}: "
+            f"{len(found)} kayıt",
+            file=sys.stderr,
+        )
+
+        for row in found[:15]:
+            print(
+                f"    - "
+                f"[{row.kategori}] "
+                f"{row.masraf}",
+                file=sys.stderr,
+            )
+
+        if not found:
+            print(
+                f"[ziraat][UYARI] "
+                f"{label} MASRAF alanında "
+                "hiç bulunamadı.",
+                file=sys.stderr,
+            )
+
+    print(
+        "[ziraat] =================================",
+        file=sys.stderr,
+    )
+
+
+def _print_extra_product_report(
+    rows: List[UcretSatiri],
+) -> None:
+    print(
+        "",
+        file=sys.stderr,
+    )
+
+    print(
+        "[ziraat] ===== EK ÜRÜN KONTROLÜ =====",
+        file=sys.stderr,
+    )
+
+    for label, term in [
+        ("Fatura", "fatura"),
+        ("HGS", "hgs"),
+        ("Kiralık Kasa", "kiralik kasa"),
+        ("POS", "pos"),
+    ]:
+        found = [
+            row
+            for row in rows
+            if (
+                term
+                in _normalize_key(
+                    row.masraf
+                )
+                or term
+                in _normalize_key(
+                    row.kategori
+                )
+            )
+        ]
+
+        print(
+            f"[ziraat] {label}: "
+            f"{len(found)} kayıt",
+            file=sys.stderr,
+        )
+
+        for row in found[:10]:
+            print(
+                f"    - "
+                f"[{row.kategori}] "
+                f"{row.masraf}",
+                file=sys.stderr,
+            )
+
+    print(
+        "[ziraat] =============================",
+        file=sys.stderr,
+    )
+
+
+def _print_context_examples(
+    rows: List[UcretSatiri],
+) -> None:
+    print(
+        "",
+        file=sys.stderr,
+    )
+
+    print(
+        "[ziraat] ===== MASRAF ÖRNEKLERİ =====",
+        file=sys.stderr,
+    )
+
+    # Transfer ve birkaç genel örnek.
+    selected: List[
+        UcretSatiri
+    ] = []
+
+    for row in rows:
+        if (
+            row.kategori
+            == "Para Aktarma"
+            and len(selected) < 20
+        ):
+            selected.append(
+                row
+            )
+
+    if len(selected) < 20:
+        for row in rows:
+            if row in selected:
+                continue
+
+            selected.append(
+                row
+            )
+
+            if len(selected) >= 20:
+                break
+
+    for row in selected:
+        print(
+            f"    - "
+            f"[{row.kategori}] "
+            f"{row.masraf}",
+            file=sys.stderr,
+        )
+
+    print(
+        "[ziraat] ===========================",
+        file=sys.stderr,
+    )
+
+
+# =========================================================
+# ANA SCRAPER
+# =========================================================
+
+def scrape_ziraat(
+    url: str = ZIRAAT_URL,
+) -> List[UcretSatiri]:
+    print(
+        f"[ziraat] SÜRÜM: "
+        f"{SCRAPER_VERSION}",
+        file=sys.stderr,
+    )
+
+    print(
+        f"[ziraat] "
+        f"{url} adresinden "
+        "veri çekiliyor...",
+        file=sys.stderr,
+    )
+
+    rows: List[
+        UcretSatiri
+    ] = []
+
+    stats: Optional[
+        Dict[str, int]
+    ] = None
+
+    source = ""
+
+    # -----------------------------------------------------
+    # REQUESTS - birincil ve hızlı yol
+    # -----------------------------------------------------
+
     try:
-        response = requests.get(url, headers=HEADERS, timeout=30)
-        response.raise_for_status()
-    except requests.RequestException as exc:
-        raise ScraperError(f"Sayfaya erişilemedi: {exc}") from exc
+        request_rows, request_stats = (
+            _scrape_requests(
+                url
+            )
+        )
 
-    soup = BeautifulSoup(response.text, "lxml")
-    tables = soup.find_all("table")
+        print(
+            f"[ziraat][requests] "
+            f"root={request_stats['root_tables']}, "
+            f"ücret={request_stats['fee_tables']}, "
+            f"aday={request_stats['candidate_rows']}, "
+            f"parse={len(request_rows)}",
+            file=sys.stderr,
+        )
 
-    if not tables:
-        return None
+        # Güncel Ziraat sayfası çok sayıda server-rendered ücret tablosu
+        # içeriyor. Küçük bir sonuç gelirse eksik HTML varsay.
+        if (
+            request_stats.get(
+                "fee_tables",
+                0,
+            ) >= 30
+            and request_stats.get(
+                "candidate_rows",
+                0,
+            ) >= 120
+            and len(
+                request_rows
+            ) >= 120
+        ):
+            rows = request_rows
+            stats = request_stats
+            source = "requests"
 
-    tum_satirlar: List[UcretSatiri] = []
-    for table in tables:
-        kategori = _find_category_title(table)
-        rows = _extract_rows_from_table(table, kategori)
-        tum_satirlar.extend(rows)
+        else:
+            print(
+                "[ziraat][UYARI] "
+                "requests sonucu eksik görünüyor; "
+                "Playwright fallback çalışacak.",
+                file=sys.stderr,
+            )
 
-    return tum_satirlar if tum_satirlar else None
-
-
-def scrape_ziraat(url: str = ZIRAAT_URL) -> List[UcretSatiri]:
-    print(f"[ziraat] {url} adresinden veri çekiliyor...", file=sys.stderr)
-
-    try:
-        satirlar = _scrape_with_playwright(url)
-        if satirlar:
-            print(f"[ziraat] Playwright ile {len(satirlar)} satır bulundu.", file=sys.stderr)
-            return satirlar
     except Exception as exc:
-        print(f"[ziraat] Playwright başarısız: {exc}", file=sys.stderr)
+        print(
+            f"[ziraat][UYARI] "
+            f"requests başarısız: {exc}",
+            file=sys.stderr,
+        )
 
-    satirlar = _scrape_with_requests(url)
-    if satirlar:
-        print(f"[ziraat] requests ile {len(satirlar)} satır bulundu.", file=sys.stderr)
-        return satirlar
+    # -----------------------------------------------------
+    # PLAYWRIGHT - yalnız gerektiğinde
+    # -----------------------------------------------------
 
-    raise ScraperError("Ziraat sayfasından hiçbir ücret satırı çekilemedi.")
+    if not rows:
+        playwright_rows, playwright_stats = (
+            _scrape_playwright(
+                url
+            )
+        )
 
+        print(
+            f"[ziraat][playwright] "
+            f"root={playwright_stats['root_tables']}, "
+            f"ücret={playwright_stats['fee_tables']}, "
+            f"aday={playwright_stats['candidate_rows']}, "
+            f"parse={len(playwright_rows)}",
+            file=sys.stderr,
+        )
+
+        rows = playwright_rows
+        stats = playwright_stats
+        source = "playwright"
+
+    if (
+        not rows
+        or stats is None
+    ):
+        raise ScraperError(
+            "Ziraat sayfasından "
+            "hiçbir ücret satırı "
+            "çekilemedi."
+        )
+
+    rows = _deduplicate(
+        rows,
+        stats,
+    )
+
+    rows = sorted(
+        rows,
+        key=lambda row: (
+            _normalize_key(
+                row.kategori
+            ),
+            _normalize_key(
+                row.masraf
+            ),
+        ),
+    )
+
+    print(
+        f"[ziraat] Kullanılan kaynak: "
+        f"{source}",
+        file=sys.stderr,
+    )
+
+    _print_category_report(
+        rows
+    )
+
+    _print_integrity_report(
+        stats,
+        len(rows),
+    )
+
+    _print_transfer_report(
+        rows
+    )
+
+    _print_extra_product_report(
+        rows
+    )
+
+    _print_context_examples(
+        rows
+    )
+
+    print(
+        f"[ziraat] Toplam "
+        f"{len(rows)} benzersiz "
+        "satır bulundu.",
+        file=sys.stderr,
+    )
+
+    return rows
+
+
+# =========================================================
+# TEST
+# =========================================================
 
 if __name__ == "__main__":
-    veriler = scrape_ziraat()
-    for v in veriler[:5]:
-        print(v)
-    print(f"Toplam {len(veriler)} satır bulundu.")
+    try:
+        veriler = scrape_ziraat()
+
+        print()
+        print("=" * 70)
+        print("ZİRAAT SCRAPER")
+        print("=" * 70)
+        print(
+            f"Toplam çekilen ücret: "
+            f"{len(veriler)}"
+        )
+        print()
+
+        for i, row in enumerate(
+            veriler[:50],
+            start=1,
+        ):
+            print(
+                f"{i}. "
+                f"[{row.kategori}] "
+                f"{row.masraf}"
+            )
+            print(
+                f"   Asgari Tutar : "
+                f"{row.asgari_tutar}"
+            )
+            print(
+                f"   Asgari Oran  : "
+                f"{row.asgari_oran}"
+            )
+            print(
+                f"   Azami Tutar  : "
+                f"{row.azami_tutar}"
+            )
+            print(
+                f"   Azami Oran   : "
+                f"{row.azami_oran}"
+            )
+            print(
+                f"   Açıklama     : "
+                f"{row.aciklama}"
+            )
+            print(
+                f"   Tarih        : "
+                f"{row.site_guncelleme_tarihi}"
+            )
+            print("-" * 70)
+
+    except Exception as exc:
+        print(
+            f"[ziraat][HATA] "
+            f"{exc}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
