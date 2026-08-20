@@ -16,6 +16,7 @@ Kullanım:
 import sys
 
 from safety_guard import print_guard_report, validate_run
+from update_comparison import update_comparison_sheet
 from update_excel import EXCEL_DOSYA_ADI, excel_guncelle_coklu
 
 
@@ -218,6 +219,26 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
+
+    # Ana veri Excel'i başarıyla yazıldıktan sonra aynı dosya içindeki
+    # KARŞILAŞTIRMA sayfasını da yeniden üret.
+    try:
+        comparison = update_comparison_sheet(
+            EXCEL_DOSYA_ADI
+        )
+
+    except Exception as exc:
+        print(
+            f"[HATA] KARŞILAŞTIRMA sayfası güncellenirken hata: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+
+    print(
+        f"Karşılaştırma sayfası: "
+        f"{comparison['comparison_rows']} satır | "
+        f"not korundu: {comparison['notes_preserved']}"
+    )
 
     print()
     print("=" * 60)
