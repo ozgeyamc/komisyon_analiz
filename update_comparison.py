@@ -36,12 +36,12 @@ from openpyxl import load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
 
-COMPARISON_VERSION = "2026-08-20-v6-expanded-canonical-matching"
+COMPARISON_VERSION = "2026-08-20-v7-more-matches-kasa-deposit"
 COMPARISON_SHEET = "KARŞILAŞTIRMA"
 PREVIEW_LAYOUT_SIGNATURE = "4BANKS|A:I|J:L_EMPTY|M_NOTES|CANONICAL_BANDS"
 
 # Eski denemelerde oluşmuş karşılaştırma sayfaları kullanıcıyı yanıltmasın.
-# v5 çalıştığında KARŞILAŞTIRMA ile başlayan eski sayfaların tamamı silinir
+# v7 çalıştığında KARŞILAŞTIRMA ile başlayan eski sayfaların tamamı silinir
 # ve sadece preview ile aynı kompakt sayfa yeniden oluşturulur.
 
 # Kullanıcının karşılaştırma şablonundaki banka seti.
@@ -614,14 +614,23 @@ def _service_tags(row: FeeRow) -> Set[str]:
     ):
         tags.add("OZEL_OKUL")
 
-    if any(
-        x in short
-        for x in (
-            "telefon odeme",
-            "gsm odeme",
-            "telekom odeme",
-            "turkcell",
-            "vodafone",
+    if (
+        any(
+            x in short
+            for x in (
+                "telefon odeme",
+                "telefon operatorleri odemelerine aracilik",
+                "telefon operatorleri",
+                "gsm odeme",
+                "telekom odeme",
+                "tl/paket yukleme",
+                "turkcell",
+                "vodafone",
+            )
+        )
+        or (
+            any(x in full for x in ("turkcell", "vodafone", "superonline", "tellcom"))
+            and any(x in short for x in ("fatura", "kurum odeme", "otomatik fatura"))
         )
     ):
         tags.add("TELEFON")
@@ -651,22 +660,38 @@ def _service_tags(row: FeeRow) -> Set[str]:
         tags.add("VERGI")
 
     # ---------------- BELGE / HESAP ----------------
-    if any(
-        x in full
-        for x in (
-            "arsiv arastirma",
-            "gecmis donem ekstre arsiv",
-            "arsivden belge",
-            "dokuman arastirma",
+    if (
+        any(
+            x in full
+            for x in (
+                "arsiv arastirma",
+                "gecmis donem ekstre arsiv",
+                "gecmis donem bankacilik islemleri bildirimi",
+                "arsivden belge",
+                "dokuman arastirma",
+                "dokuman talebi",
+                "1 yildan eski islemlere ait gecmise yonelik dekont",
+                "gecmise yonelik dekont",
+                "gecmis donem ekstre",
+                "dekont masrafi - gecmise yonelik",
+            )
         )
+        or ("arsiv" in full and "arastirma" in full)
     ):
         tags.add("ARSIV")
 
-    if any(
-        x in full
-        for x in (
-            "mevduat arastirma",
-            "mevduat hesap arastirma",
+    if (
+        any(
+            x in full
+            for x in (
+                "mevduat arastirma",
+                "mevduat hesap arastirma",
+            )
+        )
+        or (
+            "arsiv" in cat
+            and "arastirma" in cat
+            and mas.startswith("merkezden")
         )
     ):
         tags.add("MEVDUAT_ARASTIRMA")
@@ -708,9 +733,13 @@ def _service_tags(row: FeeRow) -> Set[str]:
         x in full
         for x in (
             "posta ile aylik hesap ozeti",
-            "basili ekstre gonder",
+            "basili ekstre",
+            "basili hesap ozeti",
+            "ekstre gonderim",
+            "hesap ozeti gonderimi",
             "hesap ozeti posta",
             "ekstre posta",
+            "gecmis donem kredi karti hesap ozeti gonderimi",
         )
     ):
         tags.add("HESAP_OZETI")
@@ -746,12 +775,15 @@ def _service_tags(row: FeeRow) -> Set[str]:
                 "bakiye goruntule",
             )
         )
-        and any(
-            x in full
-            for x in (
-                "atm",
-                "bankamatik",
+        and (
+            any(
+                x in full
+                for x in (
+                    "atm",
+                    "bankamatik",
+                )
             )
+            or "baska kurulus araciligiyla yapilan islemler" in full
         )
     ):
         if any(
@@ -796,6 +828,11 @@ def _service_tags(row: FeeRow) -> Set[str]:
         for x in (
             "ozel nitelikli cek",
             "ozel cek duzenleme",
+            "dovizli cek duzenleme",
+            "dovizi natik cek duzenleme",
+            "dth'dan cek duzenlenmesi",
+            "dth dan cek duzenlenmesi",
+            "seyahat ceki duzenleme",
         )
     ):
         tags.add("CEK_OZEL")
@@ -803,19 +840,23 @@ def _service_tags(row: FeeRow) -> Set[str]:
     if (
         "cek iade" in full
         or "cek iadesi" in full
+        or "cek muamelesiz iade" in full
         or "cekin islemsiz iades" in full
         or "ceklerin islemsiz iades" in full
     ):
         tags.add("CEK_IADE")
 
-    if any(
-        x in full
-        for x in (
-            "cek tahsil",
-            "tahsile alinan cek",
-            "cek takas",
-            "cek odeme",
+    if (
+        any(
+            x in full
+            for x in (
+                "cek tahsil",
+                "tahsile alinan cek",
+                "cek takas",
+                "cek odeme",
+            )
         )
+        or ("tahsile alinan" in full and "cek" in full)
     ):
         tags.add("CEK_TAHSIL")
 
@@ -1077,7 +1118,52 @@ def _candidate_score(row: FeeRow, spec: RowSpec, wanted_channel: str) -> int:
 
     # ---------------- DETAY ----------------
     if not _detail_match(row, spec.detail):
-        return -10_000
+        generic_detail_fallback = False
+
+        # Bazı bankalar aynı/diğer banka ayrımı yapmadan tek bir genel
+        # çek veya senet tahsil tarifesi yayımlıyor. Böyle bir durumda
+        # boş bırakmak yerine aynı genel tarifeyi ilgili ortak satırda
+        # düşük öncelikli fallback olarak kullan.
+        if spec.service == "SENET_TAHSIL":
+            generic_detail_fallback = (
+                "senet tahsil" in full
+                and not any(
+                    x in full
+                    for x in (
+                        "ayni sube",
+                        "diger sube",
+                        "muhabir",
+                        "baska banka",
+                    )
+                )
+            )
+
+        elif spec.service == "CEK_TAHSIL":
+            generic_detail_fallback = (
+                (
+                    "cek tahsil" in full
+                    or ("tahsile alinan" in full and "cek" in full)
+                )
+                and not any(
+                    x in full
+                    for x in (
+                        "ayni banka",
+                        "bankamiz ceki",
+                        "ykb ceki",
+                        "garanti bankasi",
+                        "diger banka",
+                        "baska banka",
+                        "yabanci banka",
+                        "dovizli cek",
+                        "dovizi natik",
+                    )
+                )
+            )
+
+        if generic_detail_fallback:
+            score -= 18
+        else:
+            return -10_000
 
     # ---------------- KANAL ----------------
     if spec.split_channel:
@@ -1105,6 +1191,49 @@ def _candidate_score(row: FeeRow, spec: RowSpec, wanted_channel: str) -> int:
         )
     ):
         score += 20
+
+    # Arşiv kategorisi birçok farklı özel raporu içeriyor.
+    # "Borcu Yoktur", Risk Raporu, Vize Mektubu gibi alt hizmetlerin
+    # Arşiv Araştırma satırına yanlış düşmesini engelle.
+    if spec.service == "ARSIV":
+        specialized = {
+            "BORCU_YOKTUR",
+            "KREDI_RISK",
+            "VIZE_MEKTUBU",
+            "REFERANS_MEKTUBU",
+            "MEVDUAT_ARASTIRMA",
+        }
+
+        if tags & specialized:
+            score -= 90
+
+        if any(
+            x in mas
+            for x in (
+                "gecmis donem bankacilik islemleri bildirimi",
+                "sozlesme, dekont",
+                "dokuman talebi",
+                "1 yildan eski",
+                "gecmise yonelik",
+                "arsiv arastirma",
+            )
+        ):
+            score += 65
+
+    if spec.service == "HESAP_OZETI_POSTA":
+        if "kktc" in full:
+            score -= 20
+
+        if any(
+            x in full
+            for x in (
+                "posta ile",
+                "basili ekstre",
+                "ekstre gonderim",
+                "hesap ozeti gonderimi",
+            )
+        ):
+            score += 35
 
     # Standart işlem ücretini özel varyantlardan öne al.
     if any(
@@ -1338,6 +1467,163 @@ def _display_amount(value: str) -> str:
     return f"{formatted} {currency}".strip()
 
 
+
+def _fee_value_compact(row: Optional[FeeRow]) -> str:
+    """Tutar/oranı BSMV notu olmadan tek satırda özetler."""
+    if row is None:
+        return ""
+
+    min_amount = _display_amount(row.asgari_tutar)
+    max_amount = _display_amount(row.azami_tutar)
+    min_rate = _percent(row.asgari_oran)
+    max_rate = _percent(row.azami_oran)
+
+    if min_amount and max_amount:
+        amount = (
+            min_amount
+            if _norm(min_amount) == _norm(max_amount)
+            else f"{min_amount} - {max_amount}"
+        )
+    else:
+        amount = max_amount or min_amount
+
+    if min_rate and max_rate:
+        rate = (
+            min_rate
+            if _norm(min_rate) == _norm(max_rate)
+            else f"{min_rate} - {max_rate}"
+        )
+    else:
+        rate = max_rate or min_rate
+
+    if amount and rate:
+        return f"{amount} / {rate}"
+
+    return amount or rate
+
+
+def _extract_deposit_from_description(row: Optional[FeeRow]) -> str:
+    """
+    Akbank gibi depozitoyu ayrı satır yerine yıllık kira açıklamasında
+    yayımlayan bankalar için açıklamadan depozito tutarını çıkarır.
+    """
+    if row is None:
+        return ""
+
+    raw = _clean(row.aciklama)
+
+    patterns = (
+        r"depozito\s+bedeli\s*[:\-]?\s*([0-9][0-9.\s]*(?:,[0-9]+)?)\s*(TL|TRY)",
+        r"depozito\s+ucreti\s*[:\-]?\s*([0-9][0-9.\s]*(?:,[0-9]+)?)\s*(TL|TRY)",
+    )
+
+    norm_raw = _norm(raw)
+
+    # _norm Türkçe karakterleri sadeleştirir fakat rakam biçimini korur.
+    for pattern in patterns:
+        m = re.search(pattern, norm_raw, flags=re.I)
+        if not m:
+            continue
+
+        amount = _display_amount(f"{m.group(1).strip()} {m.group(2)}")
+        if amount:
+            return amount
+
+    return ""
+
+
+def _deposit_match_score(row: FeeRow, spec: RowSpec) -> int:
+    full = _norm(row.text)
+    short = _norm(
+        f"{row.kategori} | {row.masraf}"
+    )
+
+    # Açıklamasında "depozito bedeli ..." geçen yıllık kira satırını
+    # ayrı depozito kaydı sanma. Ayrı satır fallback'i yalnız kategori
+    # veya MASRAF adında depozito açıkça yazıyorsa çalışır.
+    if "depozito" not in short:
+        return -10_000
+
+    if "KASA" not in _service_tags(row):
+        return -10_000
+
+    score = 100
+
+    if spec.detail == "BUYUK":
+        if "buyuk" in full:
+            score += 50
+        elif "standart kasa depozito" in full:
+            score += 15
+        elif any(x in full for x in ("orta", "kucuk", "ozel")):
+            return -10_000
+
+    elif spec.detail == "ORTA":
+        if "orta" in full:
+            score += 50
+        elif "standart kasa depozito" in full:
+            score += 15
+        elif any(x in full for x in ("buyuk", "kucuk", "ozel")):
+            return -10_000
+
+    elif spec.detail == "KUCUK":
+        if "kucuk" in full:
+            score += 50
+        elif "standart kasa depozito" in full:
+            score += 15
+        elif any(x in full for x in ("buyuk", "orta", "ozel")):
+            return -10_000
+
+    elif spec.detail == "OZEL":
+        if "ozel" in full:
+            score += 60
+        else:
+            return -10_000
+
+    # Kasa24 tipleri boy adı olmayan ayrı sınıflar; yanlış boyla
+    # eşleştirmemek için standart büyük/orta/küçük satırlarda geriye at.
+    if "kasa24" in full and spec.detail in {"BUYUK", "ORTA", "KUCUK"}:
+        score -= 40
+
+    return score
+
+
+def _best_deposit_match(
+    rows: Sequence[FeeRow],
+    bank: str,
+    spec: RowSpec,
+    annual_row: Optional[FeeRow],
+) -> str:
+    # 1) Önce ayrı depozito satırı.
+    candidates = []
+
+    for row in rows:
+        if row.banka != bank:
+            continue
+
+        score = _deposit_match_score(row, spec)
+        if score <= -10_000:
+            continue
+
+        candidates.append((score, row))
+
+    if candidates:
+        candidates.sort(
+            key=lambda item: (
+                item[0],
+                -len(_norm(item[1].masraf)),
+            ),
+            reverse=True,
+        )
+
+        value = _fee_value_compact(candidates[0][1])
+        if value:
+            return value
+
+    # 2) Ayrı satır yoksa yıllık kira açıklamasından oku.
+    return _extract_deposit_from_description(annual_row)
+
+
+
 def _fee_text(
     row: Optional[FeeRow],
     spec: Optional[RowSpec] = None,
@@ -1560,6 +1846,23 @@ def _write_comparison(ws, rows: Sequence[FeeRow], notes: Mapping[Tuple[str, str]
                     row = candidates[0] if candidates else None
 
                 value = _fee_text(row, spec)
+
+                if (
+                    row is not None
+                    and spec.service == "KASA"
+                ):
+                    deposit = _best_deposit_match(
+                        rows,
+                        bank,
+                        spec,
+                        row,
+                    )
+
+                    if deposit:
+                        value = (
+                            f"{value}\nDepozito: {deposit}"
+                        )
+
                 c = ws.cell(row=current_row, column=col)
                 c.value = value
                 c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
@@ -1580,7 +1883,11 @@ def _write_comparison(ws, rows: Sequence[FeeRow], notes: Mapping[Tuple[str, str]
         if note:
             ws.cell(row=current_row, column=13).value = note
 
-        ws.row_dimensions[current_row].height = 48
+        ws.row_dimensions[current_row].height = (
+            64
+            if spec.service == "KASA"
+            else 48
+        )
         current_row += 1
 
     # Stil / ölçüler.
