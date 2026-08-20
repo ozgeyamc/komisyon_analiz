@@ -1,23 +1,44 @@
 """
-Banka komisyon ücretleri takip botu - ana çalıştırma script'i.
+Banka komisyon ücretleri takip botu - final güvenli ana akış.
 
-Global güvenlik davranışı:
-1) 10 scraper'ın tamamı çalıştırılır.
-2) Scraper sürümleri doğrulanır.
-3) Satır sayıları + temel veri kalitesi global guard'dan geçer.
-4) TEK BİR banka bile kritik kontrolden kalırsa Excel'e hiç yazılmaz.
-   Böylece son doğru komisyonlar_guncel.xlsx korunur.
-5) Yalnız tüm kontrol OK ise excel_guncelle_coklu() çağrılır.
+Akış:
+1) 10 doğrulanmış primary scraper çalışır.
+2) Scraper sürümleri + global safety guard doğrulanır.
+3) supplemental_sources.py resmî ikincil kaynaklarla eksikleri tamamlar.
+4) Excel önce geçici dosyaya yazılır.
+5) update_comparison.py aynı geçici dosyada KARŞILAŞTIRMA sayfasını üretir.
+6) KARŞILAŞTIRMA sayfası gerçekten oluşmadan final Excel değiştirilmez.
+7) Her şey başarılıysa geçici dosya atomik olarak komisyonlar_guncel.xlsx olur.
 
 Kullanım:
     python main.py
 """
 
+from __future__ import annotations
+
+import shutil
 import sys
+import zipfile
+from pathlib import Path
+from xml.etree import ElementTree as ET
 
 from safety_guard import print_guard_report, validate_run
+from supplemental_sources import (
+    SUPPLEMENTAL_VERSION,
+    enrich_all,
+    print_supplemental_report,
+)
+from update_comparison import (
+    COMPARISON_SHEET,
+    COMPARISON_VERSION,
+    update_comparison_sheet,
+)
 from update_excel import EXCEL_DOSYA_ADI, excel_guncelle_coklu
 
+
+MAIN_VERSION = "2026-08-20-v6-comparison-guaranteed-screenshot-order"
+EXPECTED_SUPPLEMENTAL_VERSION = "2026-08-20-v5-complete-official-secondary"
+EXPECTED_COMPARISON_VERSION = "2026-08-20-v13-screenshot-order-complete"
 
 BANKA_SIRASI = [
     ("GARANTİ",   "scraper",            "scrape_garanti_bbva"),
@@ -32,8 +53,6 @@ BANKA_SIRASI = [
     ("ZİRAAT",    "scraper_ziraat",     "scrape_ziraat"),
 ]
 
-
-# Doğruladığımız/dondurduğumuz scraper sürümleri.
 EXPECTED_VERSIONS = {
     "GARANTİ":   "2026-08-19-v2-garanti-integrity",
     "YAPIKREDI": "2026-08-18-v8-complete-fee-hierarchy",
@@ -48,56 +67,49 @@ EXPECTED_VERSIONS = {
 }
 
 
+def _component_versions_ok() -> bool:
+    ok = True
+    print(f"[main] SÜRÜM: {MAIN_VERSION}")
+    print(f"[main] supplemental: {SUPPLEMENTAL_VERSION}")
+    print(f"[main] comparison: {COMPARISON_VERSION}")
+
+    if SUPPLEMENTAL_VERSION != EXPECTED_SUPPLEMENTAL_VERSION:
+        print(
+            "[FATAL] supplemental_sources.py yanlış/eski sürüm. "
+            f"Beklenen={EXPECTED_SUPPLEMENTAL_VERSION} | Gelen={SUPPLEMENTAL_VERSION}",
+            file=sys.stderr,
+        )
+        ok = False
+
+    if COMPARISON_VERSION != EXPECTED_COMPARISON_VERSION:
+        print(
+            "[FATAL] update_comparison.py yanlış/eski sürüm. "
+            f"Beklenen={EXPECTED_COMPARISON_VERSION} | Gelen={COMPARISON_VERSION}",
+            file=sys.stderr,
+        )
+        ok = False
+
+    return ok
+
+
 def _try_scrape(banka_adi, fn):
     try:
         satirlar = fn()
-
         if satirlar is None:
-            print(
-                f"[HATA] {banka_adi}: scraper None döndürdü.",
-                file=sys.stderr,
-            )
+            print(f"[HATA] {banka_adi}: scraper None döndürdü.", file=sys.stderr)
             return None
-
-        print(
-            f"{banka_adi}: {len(satirlar)} satır bulundu."
-        )
+        print(f"{banka_adi}: {len(satirlar)} satır bulundu.")
         return satirlar
-
     except Exception as exc:
-        print(
-            f"[HATA] {banka_adi} çekilemedi: {exc}",
-            file=sys.stderr,
-        )
+        print(f"[HATA] {banka_adi} çekilemedi: {exc}", file=sys.stderr)
         return None
 
 
-def _version_ok(
-    banka_adi: str,
-    module,
-) -> bool:
-    expected = EXPECTED_VERSIONS[
-        banka_adi
-    ]
-
-    actual = getattr(
-        module,
-        "SCRAPER_VERSION",
-        None,
-    )
-
-    print(
-        f"[{banka_adi}] modül: "
-        f"{getattr(module, '__file__', '?')}",
-        file=sys.stderr,
-    )
-
-    print(
-        f"[{banka_adi}] sürüm: "
-        f"{actual or 'SÜRÜM BİLGİSİ YOK'}",
-        file=sys.stderr,
-    )
-
+def _version_ok(banka_adi: str, module) -> bool:
+    expected = EXPECTED_VERSIONS[banka_adi]
+    actual = getattr(module, "SCRAPER_VERSION", None)
+    print(f"[{banka_adi}] modül: {getattr(module, '__file__', '?')}")
+    print(f"[{banka_adi}] sürüm: {actual or 'SÜRÜM BİLGİSİ YOK'}")
     if actual != expected:
         print(
             f"[FATAL] {banka_adi} yanlış scraper sürümü. "
@@ -105,135 +117,178 @@ def _version_ok(
             file=sys.stderr,
         )
         return False
-
     return True
 
 
-def main() -> int:
-    print(
-        "=== Banka Komisyon Ücretleri Takip Botu ==="
-    )
+def _prepare_temp_excel(final_path: Path) -> Path:
+    temp_path = final_path.with_name(final_path.stem + ".pipeline.tmp" + final_path.suffix)
+    if temp_path.exists():
+        temp_path.unlink()
+    if final_path.exists():
+        shutil.copy2(final_path, temp_path)
+    return temp_path
 
-    banka_verileri = {}
-    version_errors = []
 
-    for (
-        banka_adi,
-        module_name,
-        func_name,
-    ) in BANKA_SIRASI:
+def _cleanup(path: Path) -> None:
+    try:
+        if path.exists():
+            path.unlink()
+    except Exception as exc:
+        print(f"[UYARI] Geçici dosya silinemedi: {path} | {exc}", file=sys.stderr)
 
-        print(
-            f"\n--- {banka_adi} çekiliyor ---"
+
+def _xlsx_sheet_names(path: Path) -> list[str]:
+    """openpyxl'e bağımlı olmadan final xlsx içindeki sheet isimlerini doğrular."""
+    ns = {"x": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+    with zipfile.ZipFile(path) as zf:
+        root = ET.fromstring(zf.read("xl/workbook.xml"))
+    sheets = root.find("x:sheets", ns)
+    if sheets is None:
+        return []
+    return [node.attrib.get("name", "") for node in sheets]
+
+
+def _verify_comparison_file(path: Path, comparison: dict) -> None:
+    if not path.exists() or path.stat().st_size < 10_000:
+        raise RuntimeError("Geçici Excel oluşmadı veya dosya beklenenden küçük.")
+
+    names = _xlsx_sheet_names(path)
+    if COMPARISON_SHEET not in names:
+        raise RuntimeError(
+            f"{COMPARISON_SHEET} sayfası Excel içinde bulunamadı. Sheetler={names}"
         )
 
-        try:
-            module = __import__(
-                module_name
-            )
+    rows = int(comparison.get("comparison_rows", 0) or 0)
+    possible = int(comparison.get("possible_cells", 0) or 0)
+    if rows < 40 or possible < 250:
+        raise RuntimeError(
+            "Karşılaştırma sayfası beklenenden küçük görünüyor: "
+            f"satır={rows}, hücre={possible}"
+        )
 
-            if not _version_ok(
-                banka_adi,
-                module,
-            ):
-                version_errors.append(
-                    banka_adi
-                )
-                continue
-
-            fn = getattr(
-                module,
-                func_name,
-            )
-
-            satirlar = _try_scrape(
-                banka_adi,
-                fn,
-            )
-
-            if satirlar is not None:
-                banka_verileri[
-                    banka_adi
-                ] = satirlar
-
-        except ImportError as exc:
-            print(
-                f"[HATA] {banka_adi} modülü bulunamadı: {exc}",
-                file=sys.stderr,
-            )
-
-        except AttributeError as exc:
-            print(
-                f"[HATA] {banka_adi} scraper fonksiyonu bulunamadı: {exc}",
-                file=sys.stderr,
-            )
-
-        except Exception as exc:
-            print(
-                f"[HATA] {banka_adi}: {exc}",
-                file=sys.stderr,
-            )
-
-    # -----------------------------------------------------
-    # GLOBAL GÜVENLİK KAPISI
-    # -----------------------------------------------------
-
-    guard = validate_run(
-        banka_verileri
+    print(
+        f"[main] KARŞILAŞTIRMA doğrulandı: sheet var | "
+        f"satır={rows} | hücre={possible}"
     )
 
-    # Yanlış scraper sürümü başlı başına fatal.
+
+def main() -> int:
+    print("=== Banka Komisyon Ücretleri Takip Botu ===")
+
+    # En başta yanlış dosya/sürüm kullanımı yakalanır. Böylece geçmişteki
+    # v1 update_comparison veya comparison çağırmayan eski main sessizce çalışamaz.
+    if not _component_versions_ok():
+        return 5
+
+    primary_data = {}
+    version_errors = []
+
+    # 1) PRIMARY SCRAPER'LAR
+    for banka_adi, module_name, func_name in BANKA_SIRASI:
+        print(f"\n--- {banka_adi} çekiliyor ---")
+        try:
+            module = __import__(module_name)
+            if not _version_ok(banka_adi, module):
+                version_errors.append(banka_adi)
+                continue
+            fn = getattr(module, func_name)
+            satirlar = _try_scrape(banka_adi, fn)
+            if satirlar is not None:
+                primary_data[banka_adi] = satirlar
+        except ImportError as exc:
+            print(f"[HATA] {banka_adi} modülü bulunamadı: {exc}", file=sys.stderr)
+        except AttributeError as exc:
+            print(f"[HATA] {banka_adi} scraper fonksiyonu bulunamadı: {exc}", file=sys.stderr)
+        except Exception as exc:
+            print(f"[HATA] {banka_adi}: {exc}", file=sys.stderr)
+
+    # 2) PRIMARY GLOBAL SAFETY GUARD
+    guard = validate_run(primary_data)
     if version_errors:
         for banka in version_errors:
-            guard.errors.append(
-                f"{banka}: doğrulanmış scraper sürümü yüklenmedi."
-            )
+            guard.errors.append(f"{banka}: doğrulanmış scraper sürümü yüklenmedi.")
         guard.ok = False
 
-    print_guard_report(
-        guard
-    )
-
+    print_guard_report(guard)
     if not guard.ok:
         print(
-            "\n[SONUÇ] Excel güncellenmedi. "
-            "Son doğru dosya korunuyor.",
+            "\n[SONUÇ] Primary güvenlik kontrolü geçmedi. "
+            "Excel güncellenmedi; son doğru dosya korunuyor.",
             file=sys.stderr,
         )
         return 2
 
-    # -----------------------------------------------------
-    # EXCEL YAZIMI - SADECE GÜVENLİ KOŞUDA
-    # -----------------------------------------------------
+    primary_total = sum(len(v) for v in primary_data.values())
 
+    # 3) RESMÎ EK KAYNAKLAR
     try:
-        ozet = excel_guncelle_coklu(
-            banka_verileri,
-            EXCEL_DOSYA_ADI,
-        )
-
+        enriched_data, supplemental_report = enrich_all(primary_data)
     except Exception as exc:
+        print(f"[FATAL] Ek resmî kaynak katmanı çalışamadı: {exc}", file=sys.stderr)
+        return 3
+
+    print_supplemental_report(supplemental_report)
+    if not supplemental_report.ok:
         print(
-            f"[HATA] Excel yazılırken hata: {exc}",
+            "\n[SONUÇ] Kritik ek resmî kaynak kontrolü geçmedi. "
+            "Excel güncellenmedi; son doğru dosya korunuyor.",
             file=sys.stderr,
         )
-        return 1
+        return 3
+
+    enriched_total = sum(len(v) for v in enriched_data.values())
+    print(
+        f"[main] Primary toplam={primary_total} | "
+        f"ek kaynak sonrası={enriched_total} | net ek={enriched_total - primary_total}"
+    )
+
+    # 4) ATOMİK EXCEL + KARŞILAŞTIRMA
+    final_path = Path(EXCEL_DOSYA_ADI)
+    temp_path = _prepare_temp_excel(final_path)
+
+    try:
+        ozet = excel_guncelle_coklu(enriched_data, str(temp_path))
+        comparison = update_comparison_sheet(str(temp_path))
+        _verify_comparison_file(temp_path, comparison)
+
+        # Yalnız yukarıdaki tüm kontroller başarılıysa final dosya değiştirilir.
+        temp_path.replace(final_path)
+
+        # Replace sonrasında da sheet varlığını bir kez daha doğrula.
+        final_names = _xlsx_sheet_names(final_path)
+        if COMPARISON_SHEET not in final_names:
+            raise RuntimeError(
+                f"Final Excel'e geçişten sonra {COMPARISON_SHEET} kayboldu: {final_names}"
+            )
+
+    except Exception as exc:
+        _cleanup(temp_path)
+        print(
+            f"[HATA] Excel/karşılaştırma pipeline'ı başarısız: {exc}\n"
+            "[SONUÇ] Son doğru Excel korunuyor.",
+            file=sys.stderr,
+        )
+        return 4
 
     print()
-    print("=" * 60)
+    print("=" * 68)
     print("Tamamlandı.")
+    print(f"Primary veri: {primary_total} satır")
+    print(f"Ek kaynak sonrası: {enriched_total} satır")
+    print(f"Excel yazılan: {ozet.get('eklendi', enriched_total)} satır")
     print(
-        f"Toplam {ozet['eklendi']} satır yazıldı."
+        "Karşılaştırma: "
+        f"{comparison['comparison_rows']} satır | "
+        f"çözülen {comparison.get('matched_cells', '?')}/"
+        f"{comparison.get('possible_cells', '?')} | "
+        f"N/A {comparison.get('missing_cells', '?')} | "
+        f"not korundu {comparison['notes_preserved']}"
     )
-    print(
-        f"Excel dosyası: {EXCEL_DOSYA_ADI}"
-    )
-    print("=" * 60)
-
+    print(f"Sheetler: {_xlsx_sheet_names(final_path)}")
+    print(f"Excel dosyası: {EXCEL_DOSYA_ADI}")
+    print("=" * 68)
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(
-        main()
-    )
+    sys.exit(main())
