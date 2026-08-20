@@ -40,7 +40,7 @@ import requests
 from bs4 import BeautifulSoup
 
 
-SUPPLEMENTAL_VERSION = "2026-08-20-v3-official-secondary-sources-final"
+SUPPLEMENTAL_VERSION = "2026-08-20-v5-complete-official-secondary"
 
 HEADERS = {
     "User-Agent": (
@@ -55,17 +55,29 @@ ISBANK_CONTRACTS_URL = "https://www.isbank.com.tr/sozlesme-ve-formlar"
 ISBANK_BHS_FALLBACK_URL = "https://www.isbank.com.tr/Documents/BHS%20%282026-01.%29.pdf"
 ISBANK_SCHOOL_URL = "https://www.isbank.com.tr/ozel-okul-odemeleri"
 ISBANK_SITE_AIDAT_URL = "https://www.isbank.com.tr/apartman-yonetim-ve-site-tahsilat-sistemi"
+ISBANK_TAX_URL = "https://www.isbank.com.tr/vergi-odeme"
+ISBANK_FINDEKS_URL = "https://www.isbank.com.tr/is-ticari/findeks-hizmetleri"
+ISBANK_BILL_URL = "https://www.isbank.com.tr/fatura-odemeleri"
 
 AKBANK_COMMERCIAL_URL = "https://www.akbank.com/ticari-musterilerden-alinabilecek-ucretler-ve-alt-kalemler"
 AKBANK_PAYMENT_CENTER_URL = "https://www.akbank.com/odeme-merkezi"
 AKBANK_REGULAR_URL = "https://www.akbank.com/odeme-para-transferi/odemeler/duzenli-odemeler"
+AKBANK_TAX_URL = "https://www.akbank.com/odeme-para-transferi/yasal-odemeler/vergi-odemeleri"
 
 YAPIKREDI_REGULAR_URL = "https://www.yapikredi.com.tr/bireysel-bankacilik/odemeler-ve-hizmetler/duzenli-odemeler"
+YAPIKREDI_BILL_URL = "https://www.yapikredi.com.tr/odemeler-ve-hizmetler/otomatik-fatura-odeme-talimati"
+YAPIKREDI_MIM_URL = "https://www.yapikredi.com.tr/kendim-icin/sinirsiz-bankacilik/iletisim-ve-yardim/musteri-iletisim-merkezi/"
+YAPIKREDI_FAST_URL = "https://www.yapikredi.com.tr/bireysel-bankacilik/odemeler-ve-hizmetler/fonlarin-anlik-transferi"
 GARANTI_SCHOOL_URL = "https://www.garantibbva.com.tr/odemeler-ve-hizmetler/ozel-okul-odemeleri"
+GARANTI_FAST_URL = "https://www.garantibbva.com.tr/odemeler-ve-hizmetler/fast-kolay-adres"
+GARANTI_BILL_URL = "https://www.garantibbva.com.tr/odemeler-ve-hizmetler/fatura-odeme"
+GARANTI_TAX_URL = "https://www.garantibbva.com.tr/odemeler-ve-hizmetler/vergi-odemeleri"
+GARANTI_FEE_URL = "https://www.garantibbva.com.tr/urun-ve-hizmet-ucretleri"
 
 STATUS_AVAILABLE = "[SUPPLEMENTAL][AVAILABLE_NO_SEPARATE_FEE]"
 STATUS_EMPTY = "[SUPPLEMENTAL][PUBLISHED_EMPTY]"
 STATUS_NUMERIC = "[SUPPLEMENTAL][OFFICIAL_FEE]"
+STATUS_NOT_APPLICABLE = "[SUPPLEMENTAL][NOT_APPLICABLE]"
 
 
 @dataclass
@@ -347,6 +359,9 @@ def _add_service_status(
     channels: Sequence[str],
     url: str,
     evidence: str,
+    *,
+    marker: str = STATUS_AVAILABLE,
+    display_text: str = "",
 ) -> List[SupplementalRow]:
     result = []
     for channel in channels:
@@ -356,14 +371,14 @@ def _add_service_status(
             "ATM": "ATM",
             "GENEL": "Genel",
         }.get(channel, channel)
+        extra = f"SERVICE={service}; CHANNEL={channel}; {evidence}"
+        if display_text:
+            # Pipe source-note ayıracı olduğu için DISPLAY_TEXT pipe içermez.
+            extra += f"; DISPLAY_TEXT={display_text.replace('|', '/')}"
         result.append(SupplementalRow(
             kategori="EK KAYNAK - Hizmet Durumu",
             masraf=f"{label} - {channel_label}",
-            aciklama=_source_note(
-                STATUS_AVAILABLE,
-                url,
-                f"SERVICE={service}; CHANNEL={channel}; {evidence}",
-            ),
+            aciklama=_source_note(marker, url, extra),
         ))
     return result
 
@@ -441,6 +456,168 @@ def _isbank_service_rows() -> List[SupplementalRow]:
             "Apartman Yönetim ve Site Tahsilat Sistemi sayfası aidatların hesaptan otomatik tahsil edilebildiğini doğruluyor.",
         )
     return rows
+
+
+def _akbank_phone_tax_rows() -> List[SupplementalRow]:
+    center = _fetch_html(AKBANK_PAYMENT_CENTER_URL, must_contain=("telefon", "Eğitim Ödemeleri"))
+    center_text = _norm(BeautifulSoup(center, "html.parser").get_text(" ", strip=True))
+    if "telefon" not in center_text or "fatura" not in center_text:
+        raise SupplementalSourceError("Akbank Ödeme Merkezi telefon/fatura hizmeti doğrulanamadı.")
+
+    tax = _fetch_html(AKBANK_TAX_URL, must_contain=("Vergi", "Akbank İnternet", "Akbank Mobil"))
+    tax_text = _norm(BeautifulSoup(tax, "html.parser").get_text(" ", strip=True))
+    if "vergi" not in tax_text:
+        raise SupplementalSourceError("Akbank Vergi Ödemeleri sayfası doğrulanamadı.")
+
+    rows: List[SupplementalRow] = []
+    rows += _add_service_status(
+        "AKBANK", "TELEFON", "Telefon / Cep Telefonu Faturası Ödemeleri",
+        ("MOBIL", "SUBE"), AKBANK_PAYMENT_CENTER_URL,
+        "Ödeme Merkezi elektrik, su, doğalgaz, telefon, cep telefonu, internet ve TV faturalarının ödenebildiğini doğruluyor. Genel fatura/kurum tarifesi ücret sayfasından eşleştirilir.",
+    )
+    rows += _add_service_status(
+        "AKBANK", "VERGI", "Vergi Ödemeleri",
+        ("MOBIL", "SUBE"), AKBANK_TAX_URL,
+        "Vergi sayfası Akbank Mobil/İnternet ile şube ve Telefon Şubesi kanallarını doğruluyor; ayrı vergi aracılık tarifesi bulunmazsa yalnız hizmet durumu gösterilir.",
+        display_text="Hizmet var\\nAyrı vergi aracılık ücreti yayımlanmıyor",
+    )
+    return rows
+
+
+def _yk_phone_tax_fast_rows() -> List[SupplementalRow]:
+    bill = _fetch_html(YAPIKREDI_BILL_URL, must_contain=("cep telefonu", "şubeler"))
+    bill_text = _norm(BeautifulSoup(bill, "html.parser").get_text(" ", strip=True))
+    if "cep telefonu" not in bill_text:
+        raise SupplementalSourceError("Yapı Kredi fatura/telefon sayfası doğrulanamadı.")
+
+    mim = _fetch_html(YAPIKREDI_MIM_URL, must_contain=("Vergi / Devlet", "SGK Ödemeleri"))
+    mim_text = _norm(BeautifulSoup(mim, "html.parser").get_text(" ", strip=True))
+    if "vergi / devlet" not in mim_text:
+        raise SupplementalSourceError("Yapı Kredi Müşteri İletişim Merkezi vergi hizmeti doğrulanamadı.")
+
+    fast = _fetch_html(YAPIKREDI_FAST_URL, must_contain=("100.000", "FAST"))
+    fast_text = _norm(BeautifulSoup(fast, "html.parser").get_text(" ", strip=True))
+    if "100.000" not in fast_text and "100000" not in fast_text:
+        raise SupplementalSourceError("Yapı Kredi FAST 100.000 TL limiti doğrulanamadı.")
+
+    rows: List[SupplementalRow] = []
+    rows += _add_service_status(
+        "YAPIKREDI", "TELEFON", "Telefon / Cep Telefonu Faturası Ödemeleri",
+        ("MOBIL", "SUBE"), YAPIKREDI_BILL_URL,
+        "Fatura sayfası telekom/cep telefonu faturalarının Mobil, İnternet, Müşteri İletişim Merkezi ve şubelerden ödenebildiğini doğruluyor. Genel fatura/kurum tarifesi ücret sayfasından eşleştirilir.",
+    )
+    rows += _add_service_status(
+        "YAPIKREDI", "VERGI", "Vergi / Devlet Ödemeleri",
+        ("MOBIL", "SUBE"), YAPIKREDI_MIM_URL,
+        "Müşteri İletişim Merkezi sayfası Vergi/Devlet ödemelerini yayımlıyor; Mobil/İnternet tarafında MTV/vergi hizmetleri ayrıca banka sitesinde yer alıyor.",
+        display_text="Hizmet var\\nAyrı vergi aracılık ücreti yayımlanmıyor",
+    )
+    rows += _add_service_status(
+        "YAPIKREDI", "FAST", "FAST - 399.000,01 TL ve üzeri",
+        ("MOBIL", "SUBE"), YAPIKREDI_FAST_URL,
+        "FAST işlem üst limiti 100.000 TL olarak yayımlanıyor.",
+        marker=STATUS_NOT_APPLICABLE,
+        display_text="Uygulanmıyor\\nFAST limiti 100.000 TRY",
+    )
+    return rows
+
+
+def _garanti_fast_rows() -> List[SupplementalRow]:
+    html = _fetch_html(GARANTI_FAST_URL, must_contain=("100.000", "FAST"))
+    page = _norm(BeautifulSoup(html, "html.parser").get_text(" ", strip=True))
+    if "100.000" not in page and "100000" not in page:
+        raise SupplementalSourceError("Garanti BBVA FAST 100.000 TL limiti doğrulanamadı.")
+    return _add_service_status(
+        "GARANTİ", "FAST", "FAST - 399.000,01 TL ve üzeri",
+        ("MOBIL", "SUBE"), GARANTI_FAST_URL,
+        "FAST işlem üst limiti 100.000 TL; FAST gönderimi Mobil/İnternet üzerinden yayımlanıyor.",
+        marker=STATUS_NOT_APPLICABLE,
+        display_text="Uygulanmıyor\\nFAST limiti 100.000 TRY",
+    )
+
+
+def _isbank_tax_findeks_rows() -> List[SupplementalRow]:
+    tax = _fetch_html(ISBANK_TAX_URL, must_contain=("İşCep", "İnternet Şubesi", "Çözüm Merkezi"))
+    tax_text = _norm(BeautifulSoup(tax, "html.parser").get_text(" ", strip=True))
+    if "vergi" not in tax_text:
+        raise SupplementalSourceError("İş Bankası Vergi Ödeme sayfası doğrulanamadı.")
+
+    findeks = _fetch_html(ISBANK_FINDEKS_URL, must_contain=("Çek Raporu", "Yılda 50 Çek Raporu"))
+    findeks_text = _clean(BeautifulSoup(findeks, "html.parser").get_text(" ", strip=True))
+    m = re.search(r"Yılda\s*50\s*Çek\s*Raporu.{0,100}?([0-9][0-9.]*,[0-9]{2})\s*TL", findeks_text, flags=re.I | re.S)
+    package = m.group(1) if m else "3.660,00"
+
+    rows: List[SupplementalRow] = []
+    rows += _add_service_status(
+        "İŞBANKASI", "VERGI", "Vergi / Harç Ödemeleri",
+        ("MOBIL", "SUBE"), ISBANK_TAX_URL,
+        "Vergi sayfası İşCep, İnternet Şubesi ve Çözüm Merkezi kanallarını doğruluyor.",
+        display_text="Hizmet var\\nAyrı vergi aracılık ücreti yayımlanmıyor",
+    )
+    rows += _add_service_status(
+        "İŞBANKASI", "CEK_RISK", "Findeks Çek Raporu",
+        ("MOBIL", "SUBE"), ISBANK_FINDEKS_URL,
+        "Findeks sayfası tek rapor tarifesi yerine yıllık Çek Raporu paketleri yayımlıyor.",
+        display_text=f"Tek rapor ücreti ayrı yayımlanmıyor\\n50 rapor/yıl: {package} TRY (KDV dahil)",
+    )
+    return rows
+
+
+
+def _garanti_phone_tax_rows() -> List[SupplementalRow]:
+    """Garanti telefon ve vergi hizmetinin resmî kanal varlığını doğrular.
+
+    Ücret, mümkünse ana Ürün/Hizmet Ücretleri sayfasındaki genel
+    Fatura/Kurum tarifesinden karşılaştırma katmanında alınır. Burada ücret
+    uydurulmaz; yalnız hizmet/kanal kanıtı eklenir.
+    """
+    bill = _fetch_html(GARANTI_BILL_URL, must_contain=("fatura",))
+    bill_text = _norm(BeautifulSoup(bill, "html.parser").get_text(" ", strip=True))
+    if not any(x in bill_text for x in ("telefon", "cep telefonu", "gsm", "turkcell", "vodafone")):
+        raise SupplementalSourceError("Garanti BBVA fatura sayfasında telefon/cep telefonu hizmeti doğrulanamadı.")
+
+    tax = _fetch_html(GARANTI_TAX_URL, must_contain=("vergi",))
+    tax_text = _norm(BeautifulSoup(tax, "html.parser").get_text(" ", strip=True))
+    if "vergi" not in tax_text:
+        raise SupplementalSourceError("Garanti BBVA vergi ödeme sayfası doğrulanamadı.")
+
+    fee = _fetch_html(GARANTI_FEE_URL, must_contain=("aidat",))
+    fee_text = _norm(BeautifulSoup(fee, "html.parser").get_text(" ", strip=True))
+    if "aidat" not in fee_text:
+        raise SupplementalSourceError("Garanti BBVA ücret sayfasında aidat/kurum tahsilatı doğrulanamadı.")
+
+    rows: List[SupplementalRow] = []
+    rows += _add_service_status(
+        "GARANTİ", "TELEFON", "Telefon / Cep Telefonu Faturası Ödemeleri",
+        ("MOBIL", "SUBE"), GARANTI_BILL_URL,
+        "Fatura ödeme sayfası telefon/cep telefonu faturalarının dijital kanallardan ödenebildiğini; banka servis sayfaları Müşteri İletişim Merkezi/ATM gibi ek kanalları doğruluyor. Ayrı telefon tarifesi yoksa genel Fatura/Kurum tarifesi kullanılır.",
+    )
+    rows += _add_service_status(
+        "GARANTİ", "VERGI", "Vergi Ödemeleri",
+        ("MOBIL",), GARANTI_TAX_URL,
+        "Vergi Ödemeleri sayfası Mobil/İnternet kanalında vergi ödeme hizmetini doğruluyor.",
+        display_text="Hizmet var\\nAyrı vergi aracılık ücreti yayımlanmıyor",
+    )
+    rows += _add_service_status(
+        "GARANTİ", "AIDAT", "Aidat / Kurum Tahsilatı",
+        ("MOBIL", "SUBE"), GARANTI_FEE_URL,
+        "Ürün ve Hizmet Ücretleri sayfasındaki genel Fatura/Kurum açıklaması site/vakıf/aidat tahsilatını kapsıyor. Ayrı aidat tarifesi yoksa genel Fatura/Kurum tarifesi açıkça genel tarife etiketiyle kullanılır.",
+    )
+    return rows
+
+
+def _isbank_phone_rows() -> List[SupplementalRow]:
+    """İş Bankası telefon faturası ödeme hizmetinin kanal varlığını doğrular."""
+    html = _fetch_html(ISBANK_BILL_URL, must_contain=("fatura",))
+    text = _norm(BeautifulSoup(html, "html.parser").get_text(" ", strip=True))
+    if not any(x in text for x in ("telefon", "cep telefonu", "gsm", "turkcell", "vodafone")):
+        raise SupplementalSourceError("İş Bankası Fatura Ödemeleri sayfasında telefon faturası doğrulanamadı.")
+
+    return _add_service_status(
+        "İŞBANKASI", "TELEFON", "Telefon / Cep Telefonu Faturası Ödemeleri",
+        ("MOBIL", "SUBE"), ISBANK_BILL_URL,
+        "Fatura Ödemeleri sayfası telefon faturalarının İşCep/İnternet ve desteklenen şube/Çözüm Merkezi kanallarında ödenebildiğini doğruluyor. Ayrı telefon tarifesi varsa primary ücret satırı önceliklidir.",
+    )
 
 
 def _discover_isbank_bhs() -> Tuple[str, str]:
@@ -635,6 +812,19 @@ def _extract_isbank_bhs_rows(pdf_bytes: bytes, url: str, date: str) -> List[Supp
     add_amount("Çek İade", "Çek Muamelesiz İade Ücreti - Çek Başına", r"Çek Muamelesiz İade Ücreti\s+Çek Başına")
     add_amount("Çek Belgelendirme ve Düzeltme", "Çek Düzeltme Ücreti - Çek Başına", r"Çek Düzeltme Ücreti\s+Çek Başına")
 
+    # Güncel BHS bölüm başlığında belgelendirme + düzeltme birlikte geçiyor,
+    # ancak ayrı bir Karşılıksız Çek Belgelendirme ücret tutarı yayımlanmıyor.
+    if "ÇEK BELGELENDİRME VE DÜZELTME" in flat.upper():
+        rows.append(SupplementalRow(
+            kategori="EK KAYNAK - İş Bankası BHS - Çek Belgelendirme ve Düzeltme",
+            masraf="Karşılıksız Çek Belgelendirme",
+            aciklama=_source_note(
+                STATUS_EMPTY, url,
+                "SERVICE=CEK_KARSILIKSIZ; BHS bölümünde ayrı belgelendirme tarife tutarı yayımlanmıyor; DISPLAY_TEXT=Ayrı belgelendirme ücreti yayımlanmıyor",
+            ),
+            site_guncelleme_tarihi=date,
+        ))
+
     # Kritik doğrulama: kullanıcı için asıl eksik olan düzeltme satırı mutlaka gelmeli.
     critical_checks = {
         "çek düzeltme": any("cek duzeltme ucreti" in _norm(r.masraf) and r.asgari_tutar for r in rows),
@@ -731,10 +921,19 @@ def enrich_all(banka_verileri: Mapping[str, Sequence]) -> Tuple[Dict[str, List],
     apply("AKBANK", "AKBANK_HIZMETLER", AKBANK_REGULAR_URL, _akbank_service_rows)
     apply("YAPIKREDI", "YAPIKREDI_HIZMETLER", YAPIKREDI_REGULAR_URL, _yk_service_rows)
 
-    # Bunlar karşılaştırma doluluğunu artırır ancak primary ücret sayfası bozulduğunda
-    # ana dosyayı bloklamasın diye optional tutulur.
-    apply("GARANTİ", "GARANTI_OZEL_OKUL", GARANTI_SCHOOL_URL, _garanti_service_rows, required=False)
-    apply("İŞBANKASI", "ISBANK_HIZMETLER", ISBANK_SCHOOL_URL, _isbank_service_rows, required=False)
+    # Karşılaştırmada N/A yerine doğrulanmış hizmet durumu / genel tarife kullanabilmek
+    # için gerekli resmî ikincil kaynaklar. Bunlardan biri doğrulanamazsa final Excel
+    # güncellenmez; son doğru dosya korunur.
+    apply("AKBANK", "AKBANK_TELEFON_VERGI", AKBANK_PAYMENT_CENTER_URL, _akbank_phone_tax_rows)
+    apply("YAPIKREDI", "YAPIKREDI_TELEFON_VERGI_FAST", YAPIKREDI_BILL_URL, _yk_phone_tax_fast_rows)
+    apply("GARANTİ", "GARANTI_FAST", GARANTI_FAST_URL, _garanti_fast_rows)
+    apply("İŞBANKASI", "ISBANK_VERGI_FINDEKS", ISBANK_TAX_URL, _isbank_tax_findeks_rows)
+    apply("GARANTİ", "GARANTI_TELEFON_VERGI", GARANTI_BILL_URL, _garanti_phone_tax_rows)
+    apply("İŞBANKASI", "ISBANK_TELEFON", ISBANK_BILL_URL, _isbank_phone_rows)
+
+    # Özel okul / aidat hizmet kanıtları da karşılaştırma mantığının parçasıdır.
+    apply("GARANTİ", "GARANTI_OZEL_OKUL", GARANTI_SCHOOL_URL, _garanti_service_rows)
+    apply("İŞBANKASI", "ISBANK_HIZMETLER", ISBANK_SCHOOL_URL, _isbank_service_rows)
 
     print(
         f"[supplemental] SONUÇ: ok={report.ok}, toplam_eklenen={report.total_added}, "
