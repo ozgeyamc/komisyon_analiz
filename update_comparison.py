@@ -34,16 +34,18 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
 from openpyxl import load_workbook
+from openpyxl.comments import Comment
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
 
-COMPARISON_VERSION = "2026-08-20-v13-screenshot-order-complete"
+COMPARISON_VERSION = "2026-08-20-v14-source-audited-logical-cells"
 COMPARISON_SHEET = "KARŞILAŞTIRMA"
-PREVIEW_LAYOUT_SIGNATURE = "4BANKS|A:I|J:L_EMPTY|M_NOTES|SCREENSHOT_ORDER|CANONICAL"
+PREVIEW_LAYOUT_SIGNATURE = "4BANKS|A:I|J:L_EMPTY|M_NOTES|SCREENSHOT_ORDER|CANONICAL|LOGICAL_GENERAL_CELLS"
 
 STATUS_AVAILABLE = "[SUPPLEMENTAL][AVAILABLE_NO_SEPARATE_FEE]"
 STATUS_EMPTY = "[SUPPLEMENTAL][PUBLISHED_EMPTY]"
 STATUS_NUMERIC = "[SUPPLEMENTAL][OFFICIAL_FEE]"
+STATUS_NOT_APPLICABLE = "[SUPPLEMENTAL][NOT_APPLICABLE]"
 
 
 # Eski denemelerde oluşmuş karşılaştırma sayfaları kullanıcıyı yanıltmasın.
@@ -70,6 +72,14 @@ BANK_COLORS = {
     "İŞBANKASI": "2E75B6",
     "AKBANK": "E31E24",
     "YAPIKREDI": "17365D",
+}
+
+
+PRIMARY_SOURCE_URLS = {
+    "GARANTİ": "https://www.garantibbva.com.tr/urun-ve-hizmet-ucretleri",
+    "İŞBANKASI": "https://www.isbank.com.tr/urun-ve-hizmet-ucretleri",
+    "AKBANK": "https://www.akbank.com/urun-ve-hizmet-ucretleri",
+    "YAPIKREDI": "https://www.yapikredi.com.tr/bireysel-bankacilik/hesaplama-araclari/bireysel-urun-ve-hizmet-ucretleri",
 }
 
 HEADER_ALIASES = {
@@ -165,7 +175,7 @@ LAYOUT = [
     ("ROW", RowSpec("8.300,01 TRY - 399.000 TRY", "FAST", "TRANSFER_2")),
     ("ROW", RowSpec("399.000,01 TRY -", "FAST", "TRANSFER_3")),
 
-    ("ROW", RowSpec("SWIFT - Gelen", "SWIFT_GELEN")),
+    ("ROW", RowSpec("SWIFT - Gelen", "SWIFT_GELEN", split_channel=False)),
     ("ROW", RowSpec("SWIFT - Giden", "SWIFT_GIDEN")),
     ("ROW", RowSpec("Yurt Dışı FAST / Global FAST", "YURT_DISI_FAST")),
     ("ROW", RowSpec("Visa YP Direct Transfer", "VISA_YP_DIRECT")),
@@ -212,7 +222,7 @@ LAYOUT = [
 
     ("ROW", RowSpec("Ortak ATM / Başka Kuruluş Para Yatırma", "PARA_YATIRMA", split_channel=False)),
     ("ROW", RowSpec("KKB Çek Bilgileri / Çek Risk Raporu", "CEK_RISK", split_channel=False)),
-    ("ROW", RowSpec("Elektronik Altın / Altın Transferi", "ALTIN_TRANSFER")),
+    ("ROW", RowSpec("Elektronik Altın / Altın Transferi", "ALTIN_TRANSFER", split_channel=False)),
     ("ROW", RowSpec("Kıymetli Maden Fiziki Teslimi", "KIYMETLI_MADEN_TESLIM", split_channel=False)),
 
     ("SECTION", "Aidat Ödemeleri"),
@@ -505,7 +515,7 @@ def _service_tags(row: FeeRow) -> Set[str]:
         tags.add("DUZENLI_HAVALE")
 
     # ---------------- ATM / NAKİT ----------------
-    if any(x in full for x in ("gunluk limit uzeri para cekme", "limit uzeri para cekme")):
+    if any(x in full for x in ("gunluk limit uzeri para cekme", "limit uzeri para cekme", "gunluk limit ustu para cekme", "limit ustu para cekme")):
         tags.add("LIMIT_UZERI_PARA_CEKME")
 
     if (
@@ -524,8 +534,14 @@ def _service_tags(row: FeeRow) -> Set[str]:
         tags.add("PARA_YATIRMA")
 
     if (
-        any(x in full for x in ("altin transfer", "altin transfer sistemi", "ats ile altin gonderimi"))
-        and not any(x in full for x in ("fiziki", "teslim"))
+        any(x in full for x in (
+            "altin transfer",
+            "altin transfer sistemi",
+            "ats ile altin gonderimi",
+            "kiymetli maden transfer",
+            "kiymetli maden transferi ucreti",
+        ))
+        and not any(x in full for x in ("fiziki", "teslim", "kulce altin cekme"))
     ):
         tags.add("ALTIN_TRANSFER")
 
@@ -535,20 +551,28 @@ def _service_tags(row: FeeRow) -> Set[str]:
 
     if any(x in full for x in (
         "kiymetli maden teslim", "fiziki altin teslim", "altin teslim",
-        "fiziki kiymetli maden",
+        "fiziki kiymetli maden", "kulce altin cekme", "kulce altin teslim",
+        "fiziki altin cekme",
     )):
         tags.add("KIYMETLI_MADEN_TESLIM")
 
-    # Çek riski, genel kredi risk raporundan ayrı tutulur.
-    if any(x in full for x in (
-        "cek risk raporu", "cek bilgileri raporu", "kkb cek", "findeks cek raporu",
-        "cek sorgu raporu",
-    )):
-        tags.add("CEK_RISK")
-    elif any(x in full for x in (
-        "risk raporu", "kkb risk", "kredi risk", "findeks risk", "risk merkezi raporu",
-    )):
-        tags.add("KREDI_RISK")
+    # Garanti gibi bazı bankalar "KKB Çek / Risk Raporu"nu tek satırda
+    # yayımlar. Böyle bir satır hem çek risk hem genel risk raporunu temsil eder.
+    combined_risk = any(x in full for x in (
+        "kkb cek / risk raporu", "kkb cek/risk raporu", "cek / risk raporu",
+    ))
+    if combined_risk:
+        tags.update({"CEK_RISK", "KREDI_RISK"})
+    else:
+        if any(x in full for x in (
+            "cek risk raporu", "cek bilgileri raporu", "kkb cek", "findeks cek raporu",
+            "cek sorgu raporu",
+        )):
+            tags.add("CEK_RISK")
+        if any(x in full for x in (
+            "risk raporu", "kkb risk", "kredi risk", "findeks risk", "risk merkezi raporu",
+        )):
+            tags.add("KREDI_RISK")
 
     # ---------------- TAHSİLAT / ÖDEME ----------------
     if (("fatura" in short or "fatura / kurum" in short or "fatura/kurum" in short
@@ -823,6 +847,8 @@ def _candidate_score(row: FeeRow, spec: RowSpec, wanted_channel: str) -> int:
         score -= 55
     if STATUS_EMPTY.lower() in row.aciklama.lower():
         score -= 45
+    if STATUS_NOT_APPLICABLE.lower() in row.aciklama.lower():
+        score -= 80
 
     # ---------------- BAND ----------------
     if spec.band_key:
@@ -940,7 +966,7 @@ def _candidate_score(row: FeeRow, spec: RowSpec, wanted_channel: str) -> int:
         score += 65
     if spec.service == "VISA_YP_DIRECT" and "visa" in full:
         score += 65
-    if spec.service == "LIMIT_UZERI_PARA_CEKME" and "limit uzeri" in full:
+    if spec.service == "LIMIT_UZERI_PARA_CEKME" and any(x in full for x in ("limit uzeri", "limit ustu")):
         score += 60
     if spec.service == "ORTAK_ATM_PARA_CEKME" and "para cekme" in full:
         score += 45
@@ -1406,10 +1432,24 @@ def _bsmv_label(row: Optional[FeeRow]) -> str:
     return ""
 
 
+def _status_meta(row: Optional[FeeRow]) -> Dict[str, str]:
+    if row is None:
+        return {}
+    desc = row.aciklama or ""
+    meta: Dict[str, str] = {}
+    for key in ("SERVICE", "CHANNEL", "BAND", "DISPLAY_TEXT"):
+        m = re.search(rf"(?:^|[;|]\s*){key}\s*=\s*([^;|]+)", desc, flags=re.I)
+        if m:
+            meta[key] = _clean(m.group(1)).replace("\\n", "\n")
+    return meta
+
+
 def _status_kind(row: Optional[FeeRow]) -> str:
     if row is None:
         return ""
     desc = row.aciklama or ""
+    if STATUS_NOT_APPLICABLE in desc:
+        return "NOT_APPLICABLE"
     if STATUS_EMPTY in desc:
         return "PUBLISHED_EMPTY"
     if STATUS_AVAILABLE in desc:
@@ -1431,6 +1471,13 @@ def _fee_text(row: Optional[FeeRow], spec: Optional[RowSpec] = None) -> str:
         return "N/A"
 
     status = _status_kind(row)
+    meta = _status_meta(row)
+    display_text = meta.get("DISPLAY_TEXT", "").strip()
+    if display_text and status in {"NOT_APPLICABLE", "PUBLISHED_EMPTY", "AVAILABLE"}:
+        return display_text
+
+    if status == "NOT_APPLICABLE" and not _has_numeric_fee(row):
+        return "Uygulanmıyor"
     if status == "PUBLISHED_EMPTY" and not _has_numeric_fee(row):
         return "Ücret ilan edilmemiş"
     if status == "AVAILABLE" and not _has_numeric_fee(row):
@@ -1479,24 +1526,52 @@ def _fee_text(row: Optional[FeeRow], spec: Optional[RowSpec] = None) -> str:
     return result or "Ücret bilgisi açıklamada"
 
 
+
 def _service_status_row(
-    rows: Sequence[FeeRow], bank: str, service: str, wanted_channel: str,
+    rows: Sequence[FeeRow],
+    bank: str,
+    spec: RowSpec,
+    wanted_channel: str,
+    *,
+    kinds: Optional[Set[str]] = None,
 ) -> Optional[FeeRow]:
     candidates = []
+    allowed = kinds or {"AVAILABLE", "PUBLISHED_EMPTY", "NOT_APPLICABLE"}
+
     for row in rows:
-        if row.banka != bank or service not in _service_tags(row):
+        if row.banka != bank or spec.service not in _service_tags(row):
             continue
-        if _status_kind(row) not in {"AVAILABLE", "PUBLISHED_EMPTY"}:
+
+        status = _status_kind(row)
+        if status not in allowed:
             continue
+
+        meta = _status_meta(row)
+        row_band = meta.get("BAND", "").upper()
+
+        # Status belirli bir banda özel ise yalnız o bandı çözsün.
+        if row_band and spec.band_key and row_band != spec.band_key:
+            continue
+        if row_band and not spec.band_key:
+            continue
+
         channels = _channels(row)
         if wanted_channel in channels:
-            score = 100
+            score = 120
         elif "GENEL" in channels:
-            score = 70
+            score = 75
         else:
             continue
+
+        if row_band and spec.band_key and row_band == spec.band_key:
+            score += 80
+        if status == "NOT_APPLICABLE":
+            score += 30
+
         candidates.append((score, row))
+
     return max(candidates, key=lambda x: x[0])[1] if candidates else None
+
 
 
 def _generic_institution_fee(
@@ -1577,7 +1652,7 @@ def _aggregate_service_fee(
     """SWIFT / uluslararası / altın gibi çok satırlı tarifeleri tek hücrede özetler."""
     aggregate_services = {
         "SWIFT_GELEN", "SWIFT_GIDEN", "YURT_DISI_FAST",
-        "VISA_YP_DIRECT", "ALTIN_TRANSFER",
+        "VISA_YP_DIRECT", "ALTIN_TRANSFER", "CEK_IADE",
     }
     if spec.service not in aggregate_services:
         return None
@@ -1620,23 +1695,116 @@ def _aggregate_service_fee(
         return None
     return "\n".join(blocks), first_row
 
+
+def _kasa24_special_fee(
+    rows: Sequence[FeeRow], bank: str, spec: RowSpec
+) -> Optional[Tuple[str, FeeRow]]:
+    """Yapı Kredi Özel/Süper satırında Kasa24 A-E tarifesini dürüstçe özetler."""
+    if bank != "YAPIKREDI" or spec.service != "KASA" or spec.detail != "OZEL":
+        return None
+
+    blocks: List[str] = []
+    first: Optional[FeeRow] = None
+
+    for kasa_type in ("A", "B", "C", "D", "E"):
+        token = _norm(f"{kasa_type} Tipi Kasa24")
+        annual = None
+        deposit = None
+        for row in rows:
+            if row.banka != bank:
+                continue
+            full = _norm(row.text)
+            if "kasa24" not in full or token not in full:
+                continue
+            if "depozito" in full:
+                deposit = row
+            elif "yillik" in full or "kasa24 ucreti" in full:
+                annual = row
+
+        if annual is None:
+            continue
+        first = first or annual
+        annual_fee = _fee_value_compact(annual)
+        dep_fee = _fee_value_compact(deposit) if deposit else ""
+        line = f"Kasa24 {kasa_type}: Yıllık {annual_fee}"
+        if dep_fee:
+            line += f" | Depozito {dep_fee}"
+        blocks.append(line)
+
+    if not blocks or first is None:
+        return None
+    return "\n".join(blocks), first
+
+
+def _source_url(row: Optional[FeeRow]) -> str:
+    if row is None:
+        return ""
+    m = re.search(r"Resmî ek kaynak:\s*(https?://[^\s|]+)", row.aciklama or "", flags=re.I)
+    if m:
+        return m.group(1).rstrip(".,;")
+    return PRIMARY_SOURCE_URLS.get(row.banka, "")
+
+
+def _cell_comment(row: Optional[FeeRow], resolution: str, value: str) -> Optional[Comment]:
+    if row is None:
+        return None
+    parts = [
+        f"Çözüm türü: {resolution}",
+        f"Banka: {row.banka}",
+        f"Kaynak masraf: {row.masraf}",
+    ]
+    if row.kategori:
+        parts.append(f"Kategori: {row.kategori}")
+    if row.guncelleme_tarihi:
+        parts.append(f"Kaynak güncelleme: {row.guncelleme_tarihi}")
+    url = _source_url(row)
+    if url:
+        parts.append(f"Kaynak: {url}")
+    return Comment("\n".join(parts), "Otomatik Eşleştirme")
+
+
+def _source_gap_text(spec: RowSpec, bank: str, wanted_channel: str) -> str:
+    # Bu ifade "hizmet yok" anlamına gelmez. Yalnız tarife kaynaklarında
+    # karşılaştırılabilir ücret bulunamadığını açıkça söyler.
+    return "Ayrı karşılaştırılabilir\ntarife doğrulanamadı"
+
+
 def _resolve_cell(
     rows: Sequence[FeeRow], bank: str, spec: RowSpec, wanted_channel: str,
 ) -> Tuple[str, Optional[FeeRow], str]:
     """Hücre metni, dayanak satır ve çözüm türünü döndürür."""
+
+    lookup_channel = wanted_channel if spec.split_channel else "GENEL"
+
+    # Resmî olarak uygulanmadığı/kanalda yayımlanmadığı doğrulanan durum,
+    # aynı isimli EFT tarife satırının FAST'e yanlış taşınmasını engellemek için
+    # sayısal eşleşmeden ÖNCE değerlendirilir.
+    pre_status = _service_status_row(
+        rows, bank, spec, lookup_channel, kinds={"NOT_APPLICABLE"}
+    )
+    if pre_status is not None:
+        return _fee_text(pre_status, spec), pre_status, "NOT_APPLICABLE"
+
+    # Yapı Kredi Kasa24, klasik Büyük/Orta/Küçük kasa ailesinden farklı
+    # yayımlandığı için Özel/Süper satırında A-E birlikte gösterilir.
+    kasa24 = _kasa24_special_fee(rows, bank, spec)
+    if kasa24 is not None:
+        value, source = kasa24
+        return value, source, "NUMERIC"
+
     aggregated = _aggregate_service_fee(rows, bank, spec, wanted_channel)
     if aggregated is not None:
         value, agg_row = aggregated
         return value, agg_row, "NUMERIC"
 
-    lookup_channel = wanted_channel if spec.split_channel else "GENEL"
     row = _best_match(rows, bank, spec, lookup_channel)
 
     if row is None and not spec.split_channel:
-        found = [_best_match(rows, bank, spec, possible) for possible in ("MOBIL", "SUBE", "GENEL")]
+        found = [_best_match(rows, bank, spec, possible) for possible in ("GENEL", "MOBIL", "SUBE")]
         row = next((x for x in found if x is not None), None)
 
-    # Status satırı sayısal ücretin önüne geçmesin.
+    # Status satırı sayısal ücretin önüne geçmesin; NOT_APPLICABLE yukarıda
+    # zaten özel olarak ele alındı.
     if row is not None and _has_numeric_fee(row):
         value = _fee_text(row, spec)
         if spec.service == "KASA":
@@ -1653,30 +1821,33 @@ def _resolve_cell(
                     value += f" ({dep_tax})"
         return value, row, "NUMERIC"
 
-    # Aidat/okul: önce hizmetin resmî olarak varlığını doğrula, sonra aynı bankanın
-    # genel kurum/fatura tarifesini açıkça 'genel tarife' etiketiyle kullan.
+    # Aidat/okul: hizmetin resmî varlık kanıtı varsa, bankanın genel
+    # Fatura/Kurum tarifesi açıkça "genel tarife" etiketiyle kullanılabilir.
     if spec.service in {"AIDAT", "OZEL_OKUL"}:
-        status_row = _service_status_row(rows, bank, spec.service, wanted_channel)
+        status_row = _service_status_row(rows, bank, spec, lookup_channel)
         if status_row is not None:
-            generic = _generic_institution_fee(rows, bank, wanted_channel)
+            generic = _generic_institution_fee(rows, bank, lookup_channel)
             if generic is not None:
                 fee = _fee_text(generic, None)
                 return f"Genel kurum tarifesi:\n{fee}", generic, "GENERIC_TARIFF"
             return _fee_text(status_row, spec), status_row, "STATUS"
 
-    # Akbank'ın çek alt kalemleri gibi resmî tabloda başlık olup ücret hücresi boşsa.
     if row is not None and _status_kind(row):
         return _fee_text(row, spec), row, "STATUS"
 
-    status_row = _service_status_row(rows, bank, spec.service, wanted_channel)
+    status_row = _service_status_row(rows, bank, spec, lookup_channel)
     if status_row is not None:
-        return _fee_text(status_row, spec), status_row, "STATUS"
+        kind = "NOT_APPLICABLE" if _status_kind(status_row) == "NOT_APPLICABLE" else "STATUS"
+        return _fee_text(status_row, spec), status_row, kind
 
     fast_status = _fast_branch_publication_status(rows, bank, spec, wanted_channel)
     if fast_status:
         return fast_status, None, "PUBLICATION_STATUS"
 
-    return "N/A", None, "N/A"
+    # Son çare olarak veri uydurmak yerine açıkça kaynak boşluğu belirtilir.
+    # Böylece N/A'nın "0 TL" veya "hizmet yok" sanılması engellenir.
+    return _source_gap_text(spec, bank, wanted_channel), None, "SOURCE_GAP"
+
 
 
 def _preserve_notes(old_ws) -> Dict[Tuple[str, str], str]:
@@ -1740,7 +1911,6 @@ def _write_comparison(ws, rows: Sequence[FeeRow], notes: Mapping[Tuple[str, str]
 
     current_row = 3
     section = ""
-    stats = {"NUMERIC": 0, "GENERIC_TARIFF": 0, "STATUS": 0, "PUBLICATION_STATUS": 0, "N/A": 0}
 
     for kind, payload in LAYOUT:
         if kind == "SECTION":
@@ -1759,25 +1929,57 @@ def _write_comparison(ws, rows: Sequence[FeeRow], notes: Mapping[Tuple[str, str]
         spec: RowSpec = payload
         ws.cell(row=current_row, column=1).value = spec.label
         ws.cell(row=current_row, column=1).font = Font(color="595959")
-        ws.cell(row=current_row, column=1).alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+        ws.cell(row=current_row, column=1).alignment = Alignment(
+            horizontal="left", vertical="center", wrap_text=True
+        )
 
-        col = 2
-        for bank in BANKS:
-            for wanted_channel in ("MOBIL", "SUBE"):
-                value, row, kind_resolved = _resolve_cell(rows, bank, spec, wanted_channel)
-                stats[kind_resolved] = stats.get(kind_resolved, 0) + 1
-                c = ws.cell(row=current_row, column=col)
+        for bank_index, bank in enumerate(BANKS):
+            start_col = 2 + bank_index * 2
+
+            if spec.split_channel:
+                for offset, wanted_channel in enumerate(("MOBIL", "SUBE")):
+                    value, row, resolution = _resolve_cell(rows, bank, spec, wanted_channel)
+                    c = ws.cell(row=current_row, column=start_col + offset)
+                    c.value = value
+                    c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                    c.font = Font(
+                        bold=resolution not in {"SOURCE_GAP"},
+                        color=BANK_COLORS[bank] if resolution != "SOURCE_GAP" else "A6A6A6",
+                        size=9,
+                    )
+                    comment = _cell_comment(row, resolution, value)
+                    if comment:
+                        c.comment = comment
+            else:
+                # Kanal ayrımı anlamsız olan kasa, çek, senet, rapor vb. satırlarda
+                # Mobil/Şube hücrelerini tek mantıksal banka hücresine birleştir.
+                ws.merge_cells(
+                    start_row=current_row, start_column=start_col,
+                    end_row=current_row, end_column=start_col + 1,
+                )
+                value, row, resolution = _resolve_cell(rows, bank, spec, "GENEL")
+                c = ws.cell(row=current_row, column=start_col)
                 c.value = value
                 c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-                is_na = value == "N/A"
-                c.font = Font(bold=not is_na, color=BANK_COLORS[bank] if not is_na else "A6A6A6", size=9)
-                col += 1
+                c.font = Font(
+                    bold=resolution not in {"SOURCE_GAP"},
+                    color=BANK_COLORS[bank] if resolution != "SOURCE_GAP" else "A6A6A6",
+                    size=9,
+                )
+                comment = _cell_comment(row, resolution, value)
+                if comment:
+                    c.comment = comment
 
         note = notes.get(_sheet_row_key(section, spec.label))
         if note:
             ws.cell(row=current_row, column=13).value = note
 
-        ws.row_dimensions[current_row].height = 78 if spec.service == "KASA" else 52
+        if spec.service == "KASA" and spec.detail == "OZEL":
+            ws.row_dimensions[current_row].height = 105
+        elif spec.service == "KASA":
+            ws.row_dimensions[current_row].height = 72
+        else:
+            ws.row_dimensions[current_row].height = 52
         current_row += 1
 
     for row_cells in ws.iter_rows(min_row=1, max_row=current_row - 1, min_col=1, max_col=13):
@@ -1802,42 +2004,40 @@ def _write_comparison(ws, rows: Sequence[FeeRow], notes: Mapping[Tuple[str, str]
     ws.page_setup.fitToWidth = 1
     ws.sheet_properties.pageSetUpPr.fitToPage = True
 
-    resolved = sum(v for k, v in stats.items() if k != "N/A")
-    possible = sum(stats.values())
-    ws.cell(row=current_row + 1, column=1).value = (
-        f"Otomatik eşleştirme | {COMPARISON_VERSION} | {datetime.now().strftime('%d.%m.%Y %H:%M')} | "
-        f"çözülen={resolved}/{possible} | sayısal={stats['NUMERIC']} | genel tarife={stats['GENERIC_TARIFF']} | "
-        f"durum={stats['STATUS'] + stats['PUBLICATION_STATUS']} | N/A={stats['N/A']}"
-    )
-    ws.cell(row=current_row + 1, column=1).font = Font(italic=True, color="808080", size=8)
+    # Teknik eşleşme özeti artık görünür Excel alanına yazılmaz.
+    # Ayrıntılı kalite kontrolü yalnız GitHub Actions logunda basılır.
     return current_row - 1
 
 
+
 def _print_transfer_audit(rows: Sequence[FeeRow]) -> None:
-    """Özellikle EFT/Havale/FAST eşleştirmesini GitHub logunda görünür yapar."""
+    """Kritik transfer eşleşmelerini GitHub logunda görünür yapar."""
     print("[comparison] ===== ORTAK MASRAF EŞLEŞME KONTROLÜ =====")
 
     audit_specs = [
         spec
         for kind, spec in LAYOUT
-        if kind == "ROW" and spec.service in {"EFT", "HAVALE", "FAST", "SWIFT_GELEN", "SWIFT_GIDEN", "YURT_DISI_FAST", "VISA_YP_DIRECT", "DUZENLI_EFT", "DUZENLI_HAVALE"}
+        if kind == "ROW" and spec.service in {
+            "EFT", "HAVALE", "FAST", "SWIFT_GELEN", "SWIFT_GIDEN",
+            "YURT_DISI_FAST", "VISA_YP_DIRECT", "DUZENLI_EFT",
+            "DUZENLI_HAVALE", "ALTIN_TRANSFER",
+        }
     ]
 
     for spec in audit_specs:
         for bank in BANKS:
-            for channel in ("MOBIL", "SUBE"):
+            channels = ("MOBIL", "SUBE") if spec.split_channel else ("GENEL",)
+            for channel in channels:
                 value, row, resolution = _resolve_cell(rows, bank, spec, channel)
                 if row is None:
-                    raw = value
+                    raw = value.replace("\n", " / ")
                 else:
                     raw = row.masraf
                     if len(raw) > 120:
                         raw = raw[:117] + "..."
-                raw = f"{raw} [{resolution}]"
-
                 print(
                     f"[comparison][match] {spec.service} | {spec.label} | "
-                    f"{bank} | {channel} <- {raw}"
+                    f"{bank} | {channel} <- {raw} [{resolution}]"
                 )
 
     print("[comparison] ==========================================")
@@ -1975,26 +2175,45 @@ def update_comparison_sheet(excel_path: str = "komisyonlar_guncel.xlsx") -> Dict
         "A=ortak masraf, B:I=4 banka Mobil/Şube, J:L=boş, M=NOTLAR."
     )
 
-    possible_cells = sum(8 for kind, payload in LAYOUT if kind == "ROW")
-    resolution_counts = {"NUMERIC": 0, "GENERIC_TARIFF": 0, "STATUS": 0, "PUBLICATION_STATUS": 0, "N/A": 0}
+    resolution_counts = {
+        "NUMERIC": 0,
+        "GENERIC_TARIFF": 0,
+        "STATUS": 0,
+        "PUBLICATION_STATUS": 0,
+        "NOT_APPLICABLE": 0,
+        "SOURCE_GAP": 0,
+        "N/A": 0,
+    }
+    possible_cells = 0
+
     for kind, payload in LAYOUT:
         if kind != "ROW":
             continue
         spec = payload
         for bank in BANKS:
-            for channel in ("MOBIL", "SUBE"):
+            channels = ("MOBIL", "SUBE") if spec.split_channel else ("GENEL",)
+            for channel in channels:
+                possible_cells += 1
                 _, _, resolution = _resolve_cell(rows, bank, spec, channel)
                 resolution_counts[resolution] = resolution_counts.get(resolution, 0) + 1
 
-    resolved_cells = possible_cells - resolution_counts.get("N/A", 0)
+    source_gaps = resolution_counts.get("SOURCE_GAP", 0)
+    true_na = resolution_counts.get("N/A", 0)
+    verified_cells = possible_cells - source_gaps - true_na
     numeric_like = resolution_counts.get("NUMERIC", 0) + resolution_counts.get("GENERIC_TARIFF", 0)
+    status_like = (
+        resolution_counts.get("STATUS", 0)
+        + resolution_counts.get("PUBLICATION_STATUS", 0)
+        + resolution_counts.get("NOT_APPLICABLE", 0)
+    )
+
     print(
-        f"[comparison] EŞLEŞME/ÇÖZÜM: {resolved_cells}/{possible_cells} hücre "
-        f"(%{(resolved_cells / possible_cells * 100):.1f}) | "
+        f"[comparison] KALİTE: doğrulanmış={verified_cells}/{possible_cells} "
+        f"(%{(verified_cells / possible_cells * 100):.1f}) | "
         f"sayısal={resolution_counts.get('NUMERIC', 0)} | "
         f"genel_tarife={resolution_counts.get('GENERIC_TARIFF', 0)} | "
-        f"durum={resolution_counts.get('STATUS', 0) + resolution_counts.get('PUBLICATION_STATUS', 0)} | "
-        f"N/A={resolution_counts.get('N/A', 0)}"
+        f"resmî_durum={status_like} | "
+        f"kaynak_boşluğu={source_gaps} | N/A={true_na}"
     )
 
 
@@ -2002,10 +2221,11 @@ def update_comparison_sheet(excel_path: str = "komisyonlar_guncel.xlsx") -> Dict
         "source_rows": len(rows),
         "comparison_rows": comparison_rows,
         "notes_preserved": len(notes),
-        "matched_cells": resolved_cells,
+        "matched_cells": verified_cells,
         "numeric_cells": numeric_like,
-        "status_cells": resolution_counts.get("STATUS", 0) + resolution_counts.get("PUBLICATION_STATUS", 0),
-        "missing_cells": resolution_counts.get("N/A", 0),
+        "status_cells": status_like,
+        "source_gap_cells": source_gaps,
+        "missing_cells": true_na,
         "possible_cells": possible_cells,
     }
 
