@@ -36,9 +36,9 @@ from update_comparison import (
 from update_excel import EXCEL_DOSYA_ADI, excel_guncelle_coklu
 
 
-MAIN_VERSION = "2026-08-20-v6-comparison-guaranteed-screenshot-order"
-EXPECTED_SUPPLEMENTAL_VERSION = "2026-08-20-v5-complete-official-secondary"
-EXPECTED_COMPARISON_VERSION = "2026-08-20-v13-screenshot-order-complete"
+MAIN_VERSION = "2026-08-20-v7-source-audited-final"
+EXPECTED_SUPPLEMENTAL_VERSION = "2026-08-20-v6-official-channel-and-limit-audit"
+EXPECTED_COMPARISON_VERSION = "2026-08-20-v14-source-audited-logical-cells"
 
 BANKA_SIRASI = [
     ("GARANTİ",   "scraper",            "scrape_garanti_bbva"),
@@ -160,15 +160,26 @@ def _verify_comparison_file(path: Path, comparison: dict) -> None:
 
     rows = int(comparison.get("comparison_rows", 0) or 0)
     possible = int(comparison.get("possible_cells", 0) or 0)
-    if rows < 40 or possible < 250:
+    missing = int(comparison.get("missing_cells", 0) or 0)
+    source_gaps = int(comparison.get("source_gap_cells", 0) or 0)
+
+    if rows < 40 or possible < 200:
         raise RuntimeError(
             "Karşılaştırma sayfası beklenenden küçük görünüyor: "
-            f"satır={rows}, hücre={possible}"
+            f"satır={rows}, mantıksal_hücre={possible}"
+        )
+
+    # N/A artık eşleştirme mantığı hatası kabul edilir. Veri gerçekten bankada
+    # ayrı tarife olarak yayımlanmıyorsa SOURCE_GAP / resmî durum metni kullanılır.
+    if missing != 0:
+        raise RuntimeError(
+            f"Karşılaştırmada açıklamasız N/A kaldı: {missing}. Final Excel yayınlanmadı."
         )
 
     print(
         f"[main] KARŞILAŞTIRMA doğrulandı: sheet var | "
-        f"satır={rows} | hücre={possible}"
+        f"satır={rows} | mantıksal_hücre={possible} | "
+        f"kaynak_boşluğu={source_gaps} | N/A={missing}"
     )
 
 
@@ -279,8 +290,9 @@ def main() -> int:
     print(
         "Karşılaştırma: "
         f"{comparison['comparison_rows']} satır | "
-        f"çözülen {comparison.get('matched_cells', '?')}/"
+        f"doğrulanmış {comparison.get('matched_cells', '?')}/"
         f"{comparison.get('possible_cells', '?')} | "
+        f"kaynak boşluğu {comparison.get('source_gap_cells', '?')} | "
         f"N/A {comparison.get('missing_cells', '?')} | "
         f"not korundu {comparison['notes_preserved']}"
     )
