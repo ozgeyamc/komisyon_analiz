@@ -40,7 +40,7 @@ import requests
 from bs4 import BeautifulSoup
 
 
-SUPPLEMENTAL_VERSION = "2026-08-20-v5-complete-official-secondary"
+SUPPLEMENTAL_VERSION = "2026-08-20-v6-official-channel-and-limit-audit"
 
 HEADERS = {
     "User-Agent": (
@@ -59,10 +59,18 @@ ISBANK_TAX_URL = "https://www.isbank.com.tr/vergi-odeme"
 ISBANK_FINDEKS_URL = "https://www.isbank.com.tr/is-ticari/findeks-hizmetleri"
 ISBANK_BILL_URL = "https://www.isbank.com.tr/fatura-odemeleri"
 
+ISBANK_FAST_URL = "https://www.isbank.com.tr/fast-anlik-para-transferi"
+ISBANK_SGK_URL = "https://www.isbank.com.tr/sgk-odemeleri"
+ISBANK_CARD_CURRENT_URL = "https://www.isbank.com.tr/Documents/KKR%20S%C3%B6zle%C5%9Fmesi%20isbank.com.tr%28%20KREDI-KARTI-SOZ%20%2912.08.2026.pdf"
+
 AKBANK_COMMERCIAL_URL = "https://www.akbank.com/ticari-musterilerden-alinabilecek-ucretler-ve-alt-kalemler"
 AKBANK_PAYMENT_CENTER_URL = "https://www.akbank.com/odeme-merkezi"
 AKBANK_REGULAR_URL = "https://www.akbank.com/odeme-para-transferi/odemeler/duzenli-odemeler"
 AKBANK_TAX_URL = "https://www.akbank.com/odeme-para-transferi/yasal-odemeler/vergi-odemeleri"
+
+AKBANK_FAST_URL = "https://www.akbank.com/odeme-para-transferi/para-transferleri/fast-ve-kolay-adres-tanimlama"
+AKBANK_GAME_URL = "https://www.akbank.com/odeme-para-transferi/odemeler/sans-oyunu-odemeler"
+AKBANK_FEE_URL = "https://www.akbank.com/urun-ve-hizmet-ucretleri"
 
 YAPIKREDI_REGULAR_URL = "https://www.yapikredi.com.tr/bireysel-bankacilik/odemeler-ve-hizmetler/duzenli-odemeler"
 YAPIKREDI_BILL_URL = "https://www.yapikredi.com.tr/odemeler-ve-hizmetler/otomatik-fatura-odeme-talimati"
@@ -362,6 +370,7 @@ def _add_service_status(
     *,
     marker: str = STATUS_AVAILABLE,
     display_text: str = "",
+    band: str = "",
 ) -> List[SupplementalRow]:
     result = []
     for channel in channels:
@@ -372,6 +381,8 @@ def _add_service_status(
             "GENEL": "Genel",
         }.get(channel, channel)
         extra = f"SERVICE={service}; CHANNEL={channel}; {evidence}"
+        if band:
+            extra += f"; BAND={band}"
         if display_text:
             # Pipe source-note ayıracı olduğu için DISPLAY_TEXT pipe içermez.
             extra += f"; DISPLAY_TEXT={display_text.replace('|', '/')}"
@@ -518,6 +529,7 @@ def _yk_phone_tax_fast_rows() -> List[SupplementalRow]:
         "FAST işlem üst limiti 100.000 TL olarak yayımlanıyor.",
         marker=STATUS_NOT_APPLICABLE,
         display_text="Uygulanmıyor\\nFAST limiti 100.000 TRY",
+        band="TRANSFER_3",
     )
     return rows
 
@@ -533,6 +545,7 @@ def _garanti_fast_rows() -> List[SupplementalRow]:
         "FAST işlem üst limiti 100.000 TL; FAST gönderimi Mobil/İnternet üzerinden yayımlanıyor.",
         marker=STATUS_NOT_APPLICABLE,
         display_text="Uygulanmıyor\\nFAST limiti 100.000 TRY",
+        band="TRANSFER_3",
     )
 
 
@@ -618,6 +631,192 @@ def _isbank_phone_rows() -> List[SupplementalRow]:
         ("MOBIL", "SUBE"), ISBANK_BILL_URL,
         "Fatura Ödemeleri sayfası telefon faturalarının İşCep/İnternet ve desteklenen şube/Çözüm Merkezi kanallarında ödenebildiğini doğruluyor. Ayrı telefon tarifesi varsa primary ücret satırı önceliklidir.",
     )
+
+
+
+def _garanti_comparison_policy_rows() -> List[SupplementalRow]:
+    fee_html = _fetch_html(GARANTI_FEE_URL, must_contain=("Şans Oyunları Ödemesi", "Kiralık Kasa"))
+    fee_text = _norm(BeautifulSoup(fee_html, "html.parser").get_text(" ", strip=True))
+    if "sans oyunlari odemesi" not in fee_text:
+        raise SupplementalSourceError("Garanti şans oyunu kanal yapısı doğrulanamadı.")
+
+    rows: List[SupplementalRow] = []
+    rows += _add_service_status(
+        "GARANTİ", "SANS_OYUNU", "Şans Oyunu Ödemeleri",
+        ("SUBE",), GARANTI_FEE_URL,
+        "Resmî ücret tablosu bu hizmet için Mobil/İnternet/ATM tarifesi yayımlıyor; ayrı şube tarifesi yok.",
+        display_text="Şube için ayrı tarife\\nyayımlanmıyor",
+    )
+    rows += _add_service_status(
+        "GARANTİ", "YURT_DISI_FAST", "Yurt Dışı FAST",
+        ("SUBE",), GARANTI_FEE_URL,
+        "Yurt Dışı FAST tarifesi Mobil kanal için yayımlanıyor.",
+        display_text="Yalnız Mobil tarifesi\\nyayımlanıyor",
+    )
+    rows += _add_service_status(
+        "GARANTİ", "VISA_YP_DIRECT", "Visa ile Yurt Dışı Para Transferi",
+        ("SUBE",), GARANTI_FEE_URL,
+        "Visa ile Yurt Dışı Para Transferi tarifesi Mobil kanal için yayımlanıyor.",
+        display_text="Yalnız Mobil tarifesi\\nyayımlanıyor",
+    )
+    rows += _add_service_status(
+        "GARANTİ", "KASA", "Özel / Süper Kiralık Kasa",
+        ("GENEL",), GARANTI_FEE_URL,
+        "Resmî ücret tablosunda Büyük/Orta/Küçük kasa tarifeleri var; ayrı Özel/Süper kasa tarifesi yayımlanmıyor.",
+        display_text="Ayrı Özel/Süper kasa\\ntarifesi yayımlanmıyor",
+    )
+    return rows
+
+
+def _akbank_comparison_policy_rows() -> List[SupplementalRow]:
+    fast_html = _fetch_html(AKBANK_FAST_URL, must_contain=("100.000", "FAST"))
+    game_html = _fetch_html(AKBANK_GAME_URL, must_contain=("Akbank Mobil", "ATM"))
+    fee_html = _fetch_html(AKBANK_FEE_URL, must_contain=("Kiralık Kasa", "Şans Oyunu"))
+    fast_text = _norm(BeautifulSoup(fast_html, "html.parser").get_text(" ", strip=True))
+    game_text = _norm(BeautifulSoup(game_html, "html.parser").get_text(" ", strip=True))
+    if "100.000" not in fast_text and "100000" not in fast_text:
+        raise SupplementalSourceError("Akbank FAST 100.000 TL limiti doğrulanamadı.")
+    if "atm" not in game_text or "mobil" not in game_text:
+        raise SupplementalSourceError("Akbank şans oyunu kanalları doğrulanamadı.")
+
+    rows: List[SupplementalRow] = []
+    rows += _add_service_status(
+        "AKBANK", "FAST", "FAST - 399.000,01 TL ve üzeri",
+        ("MOBIL", "SUBE"), AKBANK_FAST_URL,
+        "FAST işlem üst limiti 100.000 TL olarak yayımlanıyor.",
+        marker=STATUS_NOT_APPLICABLE,
+        display_text="Uygulanmıyor\\nFAST limiti 100.000 TRY",
+        band="TRANSFER_3",
+    )
+    rows += _add_service_status(
+        "AKBANK", "SANS_OYUNU", "Şans Oyunu Ödemeleri",
+        ("SUBE",), AKBANK_GAME_URL,
+        "Resmî hizmet sayfası Akbank Mobil, İnternet ve ATM kanallarını yayımlıyor; ayrı şube kanalı yok.",
+        display_text="Şube için ayrı tarife\\nyayımlanmıyor",
+    )
+    rows += _add_service_status(
+        "AKBANK", "KASA", "Özel / Süper Kiralık Kasa",
+        ("GENEL",), AKBANK_FEE_URL,
+        "Resmî ücret tablosunda Büyük/Orta/Küçük kasa tarifeleri var; ayrı Özel/Süper kasa tarifesi yayımlanmıyor.",
+        display_text="Ayrı Özel/Süper kasa\\ntarifesi yayımlanmıyor",
+    )
+    return rows
+
+
+def _isbank_fast_sgk_policy_rows() -> List[SupplementalRow]:
+    fast_html = _fetch_html(ISBANK_FAST_URL, must_contain=("100.000", "İşCep", "İnternet Şubesi"))
+    sgk_html = _fetch_html(ISBANK_SGK_URL, must_contain=("İşCep", "İnternet Şubesi"))
+    fast_text = _norm(BeautifulSoup(fast_html, "html.parser").get_text(" ", strip=True))
+    if "100.000" not in fast_text and "100000" not in fast_text:
+        raise SupplementalSourceError("İş Bankası FAST 100.000 TL limiti doğrulanamadı.")
+
+    rows: List[SupplementalRow] = []
+    # İş Bankası FAST yalnız İşCep/İnternet Şubesi üzerinden yayımlanıyor.
+    rows += _add_service_status(
+        "İŞBANKASI", "FAST", "FAST Şube Kanalı",
+        ("SUBE",), ISBANK_FAST_URL,
+        "FAST hizmet sayfası kanalları İşCep ve İnternet Şubesi olarak yayımlıyor.",
+        marker=STATUS_NOT_APPLICABLE,
+        display_text="Şube FAST kanalı\\nyayımlanmıyor",
+    )
+    rows += _add_service_status(
+        "İŞBANKASI", "FAST", "FAST - 399.000,01 TL ve üzeri",
+        ("MOBIL", "SUBE"), ISBANK_FAST_URL,
+        "FAST işlem üst limiti 100.000 TL.",
+        marker=STATUS_NOT_APPLICABLE,
+        display_text="Uygulanmıyor\\nFAST limiti 100.000 TRY",
+        band="TRANSFER_3",
+    )
+    rows += _add_service_status(
+        "İŞBANKASI", "SGK", "SGK Prim Ödemesi",
+        ("SUBE",), ISBANK_SGK_URL,
+        "SGK prim ödemesi/talimatı resmî sayfada İşCep ve İnternet Şubesi kanallarıyla yayımlanıyor.",
+        display_text="Şube için ayrı SGK kart\\nödeme tarifesi yayımlanmıyor",
+    )
+    rows += _add_service_status(
+        "İŞBANKASI", "YURT_DISI_FAST", "Yurt Dışı FAST / Global FAST",
+        ("MOBIL", "SUBE"), ISBANK_FAST_URL,
+        "FAST sayfası yurtiçi bankalararası TL FAST hizmetini yayımlıyor; ayrı Yurt Dışı FAST/Global FAST tarifesi yayımlanmıyor.",
+        display_text="Ayrı Yurt Dışı FAST /\\nGlobal FAST tarifesi yayımlanmıyor",
+    )
+    return rows
+
+
+def _isbank_card_contract_rows() -> List[SupplementalRow]:
+    """Güncel resmî kart sözleşmesinden Ortak ATM para yatırma + Visa Direct durumunu alır."""
+    import pdfplumber
+
+    pdf_bytes = _request(ISBANK_CARD_CURRENT_URL, binary=True, timeout=60)
+    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+        text = "\n".join(page.extract_text() or "" for page in pdf.pages)
+
+    flat = " ".join(text.split())
+    norm = _norm(flat)
+    if "visa direct hizmeti henuz uygulamada olmayip" not in norm:
+        raise SupplementalSourceError("İş Bankası kart sözleşmesinde Visa Direct durum cümlesi bulunamadı.")
+
+    # Ortak ATM tablosunun Standart ATM sütunu:
+    # Cari Hesaba Para Yatırma = %1,15 + 1,05 TL (vergi dahil).
+    m = re.search(
+        r"Cari Hesaba Para Yatırma.{0,180}?%?\s*1[,\.]15\s*\+?\s*1[,\.]05\s*TL",
+        flat, flags=re.I | re.S,
+    )
+    if not m:
+        raise SupplementalSourceError("İş Bankası Ortak ATM para yatırma ücreti PDF'den parse edilemedi.")
+
+    rows = [
+        SupplementalRow(
+            kategori="EK KAYNAK - İş Bankası Kart Sözleşmesi - Ortak ATM",
+            masraf="Ortak ATM - Cari Hesaba Para Yatırma (Standart ATM)",
+            asgari_tutar="1,05 TL",
+            asgari_oran="1,15%",
+            azami_oran="1,15%",
+            aciklama=_source_note(
+                STATUS_NUMERIC, ISBANK_CARD_CURRENT_URL,
+                "SERVICE=PARA_YATIRMA; CHANNEL=GENEL; Vergi dahildir; Standart ATM tarifesidir. TEK ATM tarifesi ayrıca %1,15 + 1,58 TL'dir.",
+            ),
+            site_guncelleme_tarihi="12.08.2026",
+        )
+    ]
+    rows += _add_service_status(
+        "İŞBANKASI", "VISA_YP_DIRECT", "Visa Direct",
+        ("MOBIL", "SUBE"), ISBANK_CARD_CURRENT_URL,
+        "Kart sözleşmesi Visa Direct hizmetinin henüz uygulamada olmadığını açıkça belirtiyor.",
+        marker=STATUS_NOT_APPLICABLE,
+        display_text="Henüz uygulamada değil",
+    )
+    return rows
+
+
+def _yk_comparison_policy_rows() -> List[SupplementalRow]:
+    fast_html = _fetch_html(YAPIKREDI_FAST_URL, must_contain=("100.000", "Yapı Kredi Mobil", "İnternet Şubesi"))
+    text = _norm(BeautifulSoup(fast_html, "html.parser").get_text(" ", strip=True))
+    if "100.000" not in text and "100000" not in text:
+        raise SupplementalSourceError("Yapı Kredi FAST limit/kanal doğrulaması başarısız.")
+
+    rows: List[SupplementalRow] = []
+    rows += _add_service_status(
+        "YAPIKREDI", "FAST", "FAST Şube Kanalı",
+        ("SUBE",), YAPIKREDI_FAST_URL,
+        "FAST hizmet sayfası Yapı Kredi Mobil ve Bireysel İnternet Şubesi kanallarını yayımlıyor.",
+        marker=STATUS_NOT_APPLICABLE,
+        display_text="Şube FAST kanalı\\nyayımlanmıyor",
+    )
+    # Düzenli transfer açıklamaları dijital tarife altında yayımlanıyor;
+    # standart şube EFT/Havale ücretini düzenli talimata otomatik taşımıyoruz.
+    rows += _add_service_status(
+        "YAPIKREDI", "DUZENLI_EFT", "Düzenli EFT - Şube",
+        ("SUBE",), YAPIKREDI_REGULAR_URL,
+        "Düzenli ödeme/talimat hizmeti mevcut; ücret tablosunda düzenli EFT için şubeye özel ayrı tarife yayımlanmıyor.",
+        display_text="Düzenli EFT için Şube\\ntarifesi ayrı yayımlanmıyor",
+    )
+    rows += _add_service_status(
+        "YAPIKREDI", "DUZENLI_HAVALE", "Düzenli Havale - Şube",
+        ("SUBE",), YAPIKREDI_REGULAR_URL,
+        "Düzenli ödeme/talimat hizmeti mevcut; ücret tablosunda düzenli Havale için şubeye özel ayrı tarife yayımlanmıyor.",
+        display_text="Düzenli Havale için Şube\\ntarifesi ayrı yayımlanmıyor",
+    )
+    return rows
 
 
 def _discover_isbank_bhs() -> Tuple[str, str]:
@@ -934,6 +1133,19 @@ def enrich_all(banka_verileri: Mapping[str, Sequence]) -> Tuple[Dict[str, List],
     # Özel okul / aidat hizmet kanıtları da karşılaştırma mantığının parçasıdır.
     apply("GARANTİ", "GARANTI_OZEL_OKUL", GARANTI_SCHOOL_URL, _garanti_service_rows)
     apply("İŞBANKASI", "ISBANK_HIZMETLER", ISBANK_SCHOOL_URL, _isbank_service_rows)
+
+    # Karşılaştırma doğruluğu için kanal/limit/publikasyon statüleri.
+    apply("GARANTİ", "GARANTI_COMPARISON_POLICY", GARANTI_FEE_URL, _garanti_comparison_policy_rows)
+    apply("AKBANK", "AKBANK_COMPARISON_POLICY", AKBANK_FAST_URL, _akbank_comparison_policy_rows)
+    apply("İŞBANKASI", "ISBANK_FAST_SGK_POLICY", ISBANK_FAST_URL, _isbank_fast_sgk_policy_rows)
+    apply("YAPIKREDI", "YAPIKREDI_COMPARISON_POLICY", YAPIKREDI_FAST_URL, _yk_comparison_policy_rows)
+
+    # Kart sözleşmesi PDF'i kritik primary veri için değil yalnız Ortak ATM/Visa
+    # karşılaştırmasını zenginleştirir. PDF yapısı değişirse ana Excel bloke edilmez.
+    apply(
+        "İŞBANKASI", "ISBANK_CARD_CONTRACT", ISBANK_CARD_CURRENT_URL,
+        _isbank_card_contract_rows, required=False,
+    )
 
     print(
         f"[supplemental] SONUÇ: ok={report.ok}, toplam_eklenen={report.total_added}, "
