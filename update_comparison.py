@@ -36,7 +36,7 @@ from openpyxl import load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
 
-COMPARISON_VERSION = "2026-08-20-v5-preview-locked-canonical"
+COMPARISON_VERSION = "2026-08-20-v6-expanded-canonical-matching"
 COMPARISON_SHEET = "KARŞILAŞTIRMA"
 PREVIEW_LAYOUT_SIGNATURE = "4BANKS|A:I|J:L_EMPTY|M_NOTES|CANONICAL_BANDS"
 
@@ -305,6 +305,78 @@ def _parse_band(text: str) -> Optional[Band]:
     return None
 
 
+
+def _all_band_keys(text: str) -> Set[str]:
+    """
+    MASRAF + AÇIKLAMA içinde geçen bütün standart tutar bantlarını bulur.
+
+    Böylece:
+      - "149,99 TL'ye kadar ... 150 TL ve üzeri ..."
+      - "0-150 TL ... 150,01 TL ve üzeri"
+      - "100 TL altı ... 100 TL ve üzeri"
+    gibi tek satır içinde iki farklı kademe yayınlayan bankalar da
+    iki karşılaştırma satırına bağlanabilir.
+    """
+    t = _norm(text)
+    bands: List[Band] = []
+
+    # "8.300 TL ve altı", "100 TL altında"
+    for m in re.finditer(
+        r"(\d[\d.,]*)\s*(?:tl|try)?\s*(?:ve\s*)?(?:alti|altinda)",
+        t,
+    ):
+        high = _parse_number(m.group(1))
+        if high is not None:
+            bands.append(Band(0.0, high))
+
+    # "149,99 TL'ye kadar"
+    for m in re.finditer(
+        r"(\d[\d.,]*)\s*(?:tl|try)?(?:'?[yea]*)?\s*kadar",
+        t,
+    ):
+        high = _parse_number(m.group(1))
+        if high is not None:
+            bands.append(Band(0.0, high))
+
+    # "399.000,01 TL ve üzeri / üstü"
+    for m in re.finditer(
+        r"(\d[\d.,]*)\s*(?:tl|try)?\s*(?:ve\s*)?(?:uzeri|ustu)",
+        t,
+    ):
+        low = _parse_number(m.group(1))
+        if low is not None:
+            bands.append(Band(low, None))
+
+    # Normal aralıklar: 0-8.300 / 8.300,01-399.000
+    for m in re.finditer(
+        r"(\d[\d.,]*)\s*(?:tl|try)?\s*[-–—]\s*"
+        r"(\d[\d.,]*)\s*(?:tl|try)?(?:\s*arasi)?",
+        t,
+    ):
+        local = t[max(0, m.start() - 6): min(len(t), m.end() + 6)]
+
+        if ":" in local:
+            continue
+
+        low = _parse_number(m.group(1))
+        high = _parse_number(m.group(2))
+
+        if low is None or high is None or high < low:
+            continue
+
+        bands.append(Band(low, high))
+
+    keys: Set[str] = set()
+
+    for band in bands:
+        key = _band_key(band)
+
+        if key and not key.startswith("RAW:"):
+            keys.add(key)
+
+    return keys
+
+
 def _close(a: Optional[float], b: Optional[float], tolerance: float = 1.01) -> bool:
     if a is None or b is None:
         return a is b
@@ -345,168 +417,469 @@ def _band_key(band: Optional[Band]) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 def _service_tags(row: FeeRow) -> Set[str]:
+    """
+    Bankaların farklı MASRAF isimlerini ortak hizmetlere bağlar.
+
+    v6'da yalnız MASRAF değil KATEGORİ + MASRAF + gerektiğinde AÇIKLAMA
+    birlikte değerlendirilir. Ancak "vergi hariç", "faiz oranı" gibi
+    açıklama cümlelerinin yanlış hizmet üretmesine karşı kontrollüdür.
+    """
     cat = _norm(row.kategori)
     mas = _norm(row.masraf)
-    text = f"{cat} | {mas}"
+    short = f"{cat} | {mas}"
+    full = _norm(row.text)
+
     tags: Set[str] = set()
 
-    international = any(x in text for x in (
-        "swift",
-        "uluslararasi fon transfer",
-        "yurt disi fast",
-        "global fast",
-        "western union",
-        "visa ile yurt disi",
-    ))
-
-    package = any(x in text for x in ("paket", "kota"))
-    card_cash = any(x in text for x in (
-        "kredi kartindan",
-        "nakit avans",
-        "faiz orani",
-    ))
-
-    if (
-        "eft" in text
-        and not international
-        and not package
-        and not card_cash
-        and "altin eft" not in text
-    ):
-        tags.add("EFT")
-
-    if (
-        "fast" in text
-        and not package
-        and not any(x in text for x in (
+    # ---------------- PARA TRANSFERİ ----------------
+    international = any(
+        x in full
+        for x in (
+            "swift",
+            "uluslararasi fon transfer",
             "yurt disi fast",
             "global fast",
+            "western union",
             "fast uluslararasi",
-        ))
+        )
+    )
+
+    package = any(
+        x in short
+        for x in (
+            "paket",
+            "kota",
+        )
+    )
+
+    card_cash = any(
+        x in short
+        for x in (
+            "nakit avans",
+            "faiz orani",
+        )
+    )
+
+    if (
+        any(x in full for x in ("eft", "elektronik fon transfer"))
+        and not international
+        and not package
+        and "altin eft" not in full
+    ):
+        if (
+            not card_cash
+            or any(
+                x in short
+                for x in (
+                    "eft ucreti",
+                    "eft gonder",
+                    "elektronik fon transfer",
+                )
+            )
+        ):
+            tags.add("EFT")
+
+    if (
+        any(
+            x in full
+            for x in (
+                "fast",
+                "fonlarin anlik ve surekli transferi",
+            )
+        )
+        and not international
+        and not package
     ):
         tags.add("FAST")
 
     if (
-        "havale" in text
+        any(
+            x in full
+            for x in (
+                "havale",
+                "hesaptan hesaba",
+            )
+        )
         and not international
         and not package
-        and not card_cash
     ):
-        tags.add("HAVALE")
+        if (
+            not card_cash
+            or any(
+                x in short
+                for x in (
+                    "havale ucreti",
+                    "havale gonder",
+                    "hesaptan hesaba",
+                )
+            )
+        ):
+            tags.add("HAVALE")
 
-    if "kiralik kasa" in text:
+    # ---------------- KASA / RAPOR ----------------
+    if any(
+        x in full
+        for x in (
+            "kiralik kasa",
+            "kasa kiralama",
+            "kasa ucreti",
+        )
+    ):
         tags.add("KASA")
 
-    if any(x in text for x in (
-        "kiymetli maden teslim",
-        "fiziki altin teslim",
-        "altin teslim",
-    )):
+    if any(
+        x in full
+        for x in (
+            "kiymetli maden teslim",
+            "fiziki altin teslim",
+            "altin teslim",
+            "fiziki kiymetli maden",
+        )
+    ):
         tags.add("KIYMETLI_MADEN_TESLIM")
 
-    if "risk raporu" in text or "kkb risk" in text:
+    if any(
+        x in full
+        for x in (
+            "risk raporu",
+            "kkb risk",
+            "kredi risk",
+            "findeks risk",
+            "risk merkezi raporu",
+        )
+    ):
         tags.add("KREDI_RISK")
 
-    if "fatura" in text and "e-fatura" not in text:
+    # ---------------- TAHSİLAT / ÖDEME ----------------
+    if (
+        (
+            "fatura" in short
+            or "fatura / kurum" in short
+            or "fatura/kurum" in short
+            or "fatura tahsil" in short
+        )
+        and "e-fatura" not in short
+    ):
         tags.add("FATURA")
 
-    if "sgk" in text:
+    if (
+        "sgk" in short
+        or "sosyal guvenlik" in full
+    ):
         tags.add("SGK")
 
-    if "hgs" in text:
+    if "hgs" in full:
         tags.add("HGS")
 
-    if "sans oyun" in text:
+    if (
+        "sans oyun" in full
+        or any(
+            x in full
+            for x in (
+                "bilyoner",
+                "nesine",
+                "tuttur",
+                "oley",
+                "misli",
+                "sisal sans",
+                "tjk",
+            )
+        )
+    ):
         tags.add("SANS_OYUNU")
 
-    if "aidat" in text:
+    if (
+        "aidat" in short
+        or (
+            "aidat" in full
+            and any(
+                x in full
+                for x in (
+                    "fatura",
+                    "tahsilat",
+                    "odeme",
+                )
+            )
+        )
+    ):
         tags.add("AIDAT")
 
-    if "ozel okul" in text or "okul odeme" in text:
+    if any(
+        x in full
+        for x in (
+            "ozel okul",
+            "okul odeme",
+            "egitim kurumu odeme",
+        )
+    ):
         tags.add("OZEL_OKUL")
 
-    if "telefon" in text and "bankacilik" not in text:
+    if any(
+        x in short
+        for x in (
+            "telefon odeme",
+            "gsm odeme",
+            "telekom odeme",
+            "turkcell",
+            "vodafone",
+        )
+    ):
         tags.add("TELEFON")
 
-    if "vergi" in text and "fon transfer" not in text:
+    # "Vergi hariç" açıklaması hizmet değildir.
+    if (
+        "vergi" in short
+        and any(
+            x in short
+            for x in (
+                "vergi tahsil",
+                "vergi odeme",
+                "fatura/vergi/sgk",
+                "fatura / vergi / sgk",
+                "mtv",
+            )
+        )
+        and not any(
+            x in short
+            for x in (
+                "vergi numarasi",
+                "vergi yazisi",
+                "kredi",
+            )
+        )
+    ):
         tags.add("VERGI")
 
-    if "arsiv arastirma" in text:
+    # ---------------- BELGE / HESAP ----------------
+    if any(
+        x in full
+        for x in (
+            "arsiv arastirma",
+            "gecmis donem ekstre arsiv",
+            "arsivden belge",
+            "dokuman arastirma",
+        )
+    ):
         tags.add("ARSIV")
 
-    if "mevduat arastirma" in text:
+    if any(
+        x in full
+        for x in (
+            "mevduat arastirma",
+            "mevduat hesap arastirma",
+        )
+    ):
         tags.add("MEVDUAT_ARASTIRMA")
 
-    if "referans mektubu" in text:
+    if any(
+        x in full
+        for x in (
+            "referans mektubu",
+            "referans yazisi",
+            "banka referans",
+            "itibar /niyet/referans",
+            "itibar/niyet/referans",
+        )
+    ):
         tags.add("REFERANS_MEKTUBU")
 
-    if any(x in text for x in (
-        "vize icin",
-        "konsolosluk icin mektup",
-        "ozel okul icin duzenlenen mektup",
-    )):
+    if any(
+        x in full
+        for x in (
+            "vize icin",
+            "konsolosluk icin mektup",
+            "konsolosluk icin",
+            "ozel okullar icin duzenlenen mektup",
+            "ozel okul icin duzenlenen mektup",
+        )
+    ):
         tags.add("VIZE_MEKTUBU")
 
-    if "hesap ozeti" in text:
+    if (
+        "hesap ozeti" in short
+        or "ekstre masraf" in short
+        or "ekstre ucret" in short
+        or "ekstre veril" in short
+        or "ekstre - " in short
+    ):
         tags.add("HESAP_OZETI")
-        if "posta" in text:
-            tags.add("HESAP_OZETI_POSTA")
 
-    if "hesap arastirma" in text:
+    if any(
+        x in full
+        for x in (
+            "posta ile aylik hesap ozeti",
+            "basili ekstre gonder",
+            "hesap ozeti posta",
+            "ekstre posta",
+        )
+    ):
+        tags.add("HESAP_OZETI")
+        tags.add("HESAP_OZETI_POSTA")
+
+    if any(
+        x in full
+        for x in (
+            "hesap arastirma",
+            "hesap tespit",
+            "hesap bulma",
+        )
+    ):
         tags.add("HESAP_ARASTIRMA")
 
-    if "borcu yoktur" in text:
+    if any(
+        x in full
+        for x in (
+            "borcu yoktur",
+            "borc yoktur",
+            "borcsuzluk",
+        )
+    ):
         tags.add("BORCU_YOKTUR")
 
-    if "bakiye" in text and any(x in text for x in ("atm", "bankamatik")):
-        if any(x in text for x in ("yurt disi", "yurtdisi")):
+    # ---------------- ATM BAKİYE ----------------
+    if (
+        any(
+            x in full
+            for x in (
+                "bakiye sorma",
+                "bakiye sorgu",
+                "bakiye goruntule",
+            )
+        )
+        and any(
+            x in full
+            for x in (
+                "atm",
+                "bankamatik",
+            )
+        )
+    ):
+        if any(
+            x in full
+            for x in (
+                "yurt disi",
+                "yurtdisi",
+            )
+        ):
             tags.add("BAKIYE_ATM_YURTDISI")
         else:
             tags.add("BAKIYE_ATM_YURTICI")
 
-    if "cek defteri" in text:
+    # ---------------- ÇEK ----------------
+    if any(
+        x in full
+        for x in (
+            "cek defteri",
+            "cek karnesi",
+            "cek yaprak",
+            "cek kitabi",
+        )
+    ):
         tags.add("CEK_DEFTERI")
 
-    if "cek duzenleme" in text and "ozel" not in text:
+    if (
+        any(
+            x in full
+            for x in (
+                "cek duzenleme",
+                "cek duzenlenmesi",
+                "bloke cek duzenleme",
+                "dovizi natik cek duzenleme",
+            )
+        )
+        and "ozel nitelikli" not in full
+    ):
         tags.add("CEK_DUZENLEME")
 
-    if "cek duzenleme" in text and "ozel" in text:
+    if any(
+        x in full
+        for x in (
+            "ozel nitelikli cek",
+            "ozel cek duzenleme",
+        )
+    ):
         tags.add("CEK_OZEL")
 
-    if "cek iade" in text or "cek iadesi" in text:
+    if (
+        "cek iade" in full
+        or "cek iadesi" in full
+        or "cekin islemsiz iades" in full
+        or "ceklerin islemsiz iades" in full
+    ):
         tags.add("CEK_IADE")
 
-    if "cek tahsil" in text:
+    if any(
+        x in full
+        for x in (
+            "cek tahsil",
+            "tahsile alinan cek",
+            "cek takas",
+            "cek odeme",
+        )
+    ):
         tags.add("CEK_TAHSIL")
 
-    if "karsiliksiz cek" in text and any(x in text for x in ("belgelendirme", "islem")):
+    if "karsiliksiz cek" in full:
         tags.add("CEK_KARSILIKSIZ")
 
-    if "cek duzeltme" in text:
+    if (
+        "cek duzeltme" in full
+        or "duzeltme hakki" in full
+    ):
         tags.add("CEK_DUZELTME_HAKKI")
 
-    if "senet" in text and "iade" in text:
+    # ---------------- SENET ----------------
+    if (
+        "senet" in full
+        and "iade" in full
+    ):
         tags.add("SENET_IADE")
 
-    if "senet" in text and "protesto" in text and "kaldir" not in text:
+    if (
+        "senet" in full
+        and "protesto" in full
+        and "kaldir" not in full
+    ):
         tags.add("SENET_PROTESTO")
 
-    if "senet" in text and "protesto" in text and "kaldir" in text:
+    if (
+        "senet" in full
+        and "protesto" in full
+        and "kaldir" in full
+    ):
         tags.add("SENET_PROTESTO_KALDIRMA")
 
-    if "senet" in text and any(x in text for x in ("tahsil", "tahsile alma")):
+    if (
+        "senet" in short
+        and any(
+            x in short
+            for x in (
+                "tahsil",
+                "tahsile alma",
+            )
+        )
+    ):
         tags.add("SENET_TAHSIL")
 
     return tags
 
 
-def _channel(row: FeeRow) -> str:
-    """Kanalı MASRAF adına öncelik vererek çıkarır."""
-    mas = _norm(row.masraf)
-    cat = _norm(row.kategori)
+def _channels(row: FeeRow) -> Set[str]:
+    """
+    Tek kanal yerine bir kanal kümesi döndürür.
 
-    if any(x in mas for x in ("atm", "btm", "kiosk", "bankamatik")):
-        return "ATM"
+    Örn:
+      "(Mobil / İnternet / ATM)" -> {"MOBIL", "ATM"}
+      "(Şube / ATM)"             -> {"SUBE", "ATM"}
+      "Tüm Kanallar"             -> {"MOBIL", "SUBE", "ATM"}
+    """
+    mas = _norm(row.masraf)
+    full = _norm(row.text)
+
+    if "tum kanal" in full:
+        return {"MOBIL", "SUBE", "ATM"}
+
+    channels: Set[str] = set()
 
     # "İnternet Şubesi" fiziksel şube değildir.
     mas2 = (
@@ -514,29 +887,87 @@ def _channel(row: FeeRow) -> str:
         .replace("internet sube", "internet")
     )
 
-    if any(x in mas2 for x in (
-        "mobil", "internet", "dijital", "cepteteb", "asistan"
-    )):
-        return "MOBIL"
+    if any(
+        x in mas2
+        for x in (
+            "mobil",
+            "internet",
+            "dijital",
+            "cepteteb",
+            "iscep",
+            "asistan",
+            "sgk.gov.tr",
+            "web",
+        )
+    ):
+        channels.add("MOBIL")
 
-    if any(x in mas2 for x in (
-        "sube", "subeden", "musteri iletisim merkezi",
-        "cozum merkezi", "gise", "kasadan"
-    )):
-        return "SUBE"
+    if any(
+        x in mas2
+        for x in (
+            "sube",
+            "subeden",
+            "musteri iletisim merkezi",
+            "cozum merkezi",
+            "gise",
+            "kasadan",
+        )
+    ):
+        channels.add("SUBE")
 
-    cat2 = (
-        cat.replace("internet subesi", "internet")
-        .replace("internet sube", "internet")
-    )
+    if any(
+        x in mas2
+        for x in (
+            "atm",
+            "btm",
+            "kiosk",
+            "bankamatik",
+        )
+    ):
+        channels.add("ATM")
 
-    if any(x in cat2 for x in ("mobil", "internet", "dijital")):
-        return "MOBIL"
+    # MASRAF kanal söylemiyorsa açıklama/kategoriye bak.
+    if not channels:
+        full2 = (
+            full.replace("internet subesi", "internet")
+            .replace("internet sube", "internet")
+        )
 
-    if any(x in cat2 for x in ("sube", "cozum merkezi")):
-        return "SUBE"
+        if any(
+            x in full2
+            for x in (
+                "mobil",
+                "internet",
+                "dijital",
+                "iscep",
+                "sgk.gov.tr",
+            )
+        ):
+            channels.add("MOBIL")
 
-    return "GENEL"
+        if any(
+            x in full2
+            for x in (
+                "sube",
+                "musteri iletisim merkezi",
+                "cozum merkezi",
+                "gise",
+                "kasadan",
+            )
+        ):
+            channels.add("SUBE")
+
+        if any(
+            x in full2
+            for x in (
+                "atm",
+                "bankamatik",
+            )
+        ):
+            channels.add("ATM")
+
+    return channels or {"GENEL"}
+
 
 
 def _detail_match(row: FeeRow, detail: Optional[str]) -> bool:
@@ -546,17 +977,59 @@ def _detail_match(row: FeeRow, detail: Optional[str]) -> bool:
     text = _norm(row.text)
 
     tests = {
-        "BUYUK": lambda: "buyuk" in text,
-        "ORTA": lambda: "orta" in text,
-        "KUCUK": lambda: "kucuk" in text,
-        "OZEL": lambda: any(x in text for x in ("ozel", "super")),
-        "AYNI": lambda: any(x in text for x in ("ayni banka", "bankamiza ait", "bankamiz cek")),
-        "DIGER": lambda: any(x in text for x in ("diger banka", "muhabir banka", "baska banka")),
-        "DOVIZ": lambda: any(x in text for x in ("doviz cek", "yp cek")),
+        "BUYUK": lambda: any(x in text for x in ("buyuk", "large")),
+        "ORTA": lambda: any(x in text for x in ("orta", "medium")),
+        "KUCUK": lambda: any(x in text for x in ("kucuk", "small")),
+        "OZEL": lambda: any(
+            x in text
+            for x in (
+                "ozel",
+                "super",
+                "extra buyuk",
+                "xl",
+            )
+        ),
+        "AYNI": lambda: any(
+            x in text
+            for x in (
+                "ayni banka",
+                "ayni sube",
+                "bankamiza ait",
+                "bankamiz cek",
+                "bankamiz ceki",
+                "ykb ceki",
+                "gb subesinden",
+                "kendi bankasi",
+            )
+        ),
+        "DIGER": lambda: any(
+            x in text
+            for x in (
+                "diger banka",
+                "diger sube",
+                "farkli sube",
+                "muhabir banka",
+                "muhabirden",
+                "baska banka",
+                "yurtici banka ceki",
+            )
+        ),
+        "DOVIZ": lambda: any(
+            x in text
+            for x in (
+                "doviz cek",
+                "dovizli cek",
+                "dovizi natik",
+                "yp cek",
+                "yabanci banka",
+                "yurt disi",
+            )
+        ),
     }
 
     fn = tests.get(detail)
     return fn() if fn else True
+
 
 
 # ---------------------------------------------------------------------------
@@ -565,70 +1038,156 @@ def _detail_match(row: FeeRow, detail: Optional[str]) -> bool:
 
 def _candidate_score(row: FeeRow, spec: RowSpec, wanted_channel: str) -> int:
     tags = _service_tags(row)
+
     if spec.service not in tags:
         return -10_000
 
     score = 100
     mas = _norm(row.masraf)
     cat = _norm(row.kategori)
+    full = _norm(row.text)
 
+    # ---------------- BAND ----------------
     if spec.band_key:
-        key = _band_key(_parse_band(row.masraf))
-        if key != spec.band_key:
-            return -10_000
-        score += 40
+        masraf_keys = _all_band_keys(row.masraf)
+        all_keys = _all_band_keys(
+            f"{row.masraf} | {row.aciklama}"
+        )
 
+        if spec.band_key in all_keys:
+            score += 40
+
+            # Band doğrudan MASRAF adındaysa en güvenilir eşleşme.
+            if spec.band_key in masraf_keys:
+                score += 22
+
+        else:
+            # Bazı bankalar Fatura / SGK gibi hizmetleri tutar bandı
+            # belirtmeden "tüm tutarlara %X" olarak yayınlıyor.
+            # Bu durumda iki ortak banda da aynı tarife uygulanabilir.
+            if spec.service in {
+                "FATURA",
+                "SGK",
+                "AIDAT",
+                "OZEL_OKUL",
+            }:
+                score -= 12
+            else:
+                return -10_000
+
+    # ---------------- DETAY ----------------
     if not _detail_match(row, spec.detail):
         return -10_000
 
+    # ---------------- KANAL ----------------
     if spec.split_channel:
-        ch = _channel(row)
-        if ch == wanted_channel:
+        channels = _channels(row)
+
+        if wanted_channel in channels:
             score += 60
-        elif ch == "GENEL":
-            score += 10
+        elif "GENEL" in channels:
+            score += 15
         else:
             return -10_000
 
-    # Standart işlem ücretini; geç/düzenli/paket gibi özel varyantların önüne al.
-    if any(x in mas for x in ("gonderimi", "gonderilmesi", "gonderme")):
+    # Hizmet MASRAF adında açıkça geçiyorsa açıklama fallback'ından üstündür.
+    if spec.service == "EFT" and "eft" in mas:
+        score += 30
+    elif spec.service == "FAST" and "fast" in mas:
+        score += 35
+    elif spec.service == "HAVALE" and "havale" in mas:
+        score += 30
+    elif spec.service in _service_tags(
+        FeeRow(
+            banka=row.banka,
+            kategori=row.kategori,
+            masraf=row.masraf,
+        )
+    ):
+        score += 20
+
+    # Standart işlem ücretini özel varyantlardan öne al.
+    if any(
+        x in mas
+        for x in (
+            "gonderimi",
+            "gonderilmesi",
+            "gonderme",
+        )
+    ):
         score += 18
 
-    if spec.service == "EFT" and "eft" in mas:
-        score += 15
-
-    if spec.service == "FAST" and "fast" in mas:
-        score += 25
-
-    if spec.service == "HAVALE" and "havale" in mas:
-        score += 15
-
-    if "gec eft" in mas or " - gec - " in mas:
+    if any(
+        x in mas
+        for x in (
+            "gec eft",
+            "gec havale",
+            "gec fast",
+        )
+    ):
         score -= 35
 
-    if any(x in mas for x in ("duzenli", "talimat", "supurme")):
-        score -= 14
+    if (
+        spec.service in {"EFT", "HAVALE", "FAST"}
+        and any(
+            x in mas
+            for x in (
+                "duzenli",
+                "talimat",
+                "supurme",
+            )
+        )
+    ):
+        score -= 12
 
-    if any(x in mas for x in ("cebe", "kartsiz", "kartli para yatirma")):
+    if any(
+        x in mas
+        for x in (
+            "cebe",
+            "kartsiz",
+            "kartli para yatirma",
+        )
+    ):
         score -= 24
 
-    if any(x in cat for x in ("kredi kart", "kampanyali", "urun ve hizmet paket")):
+    if any(
+        x in cat
+        for x in (
+            "kampanyali",
+            "urun ve hizmet paket",
+        )
+    ):
         score -= 45
 
+    # Template'teki Fatura satırları kart ödemesi odaklı.
+    if spec.service == "FATURA":
+        if (
+            "kredi kart" in full
+            or "kartindan" in full
+        ):
+            score += 25
+
+        if "nakit" in mas:
+            score -= 20
+
+    if (
+        spec.service == "SGK"
+        and "kredi kart" in full
+    ):
+        score += 20
+
     if spec.service == "KASA":
-        # Karşılaştırmada kira bedeli göster; depozito ve aylık ücret kira satırını
-        # ele geçirmesin. İş Bankası gibi hem aylık hem yıllık yayınlayan bankalarda
-        # yıllık satır önceliklidir.
-        if "depozito" in mas or "depozito" in cat:
+        if "depozito" in full:
             score -= 80
-        if "aylik" in mas or "aylik" in cat:
+
+        if "aylik" in full:
             score -= 35
-        if "yillik" in mas or "yillik" in cat:
+
+        if "yillik" in full:
             score += 45
-        if "yillik kira" in mas or "yillik kasa" in mas:
-            score += 20
 
     return score
+
 
 
 def _best_match(
@@ -779,7 +1338,10 @@ def _display_amount(value: str) -> str:
     return f"{formatted} {currency}".strip()
 
 
-def _fee_text(row: Optional[FeeRow]) -> str:
+def _fee_text(
+    row: Optional[FeeRow],
+    spec: Optional[RowSpec] = None,
+) -> str:
     if row is None:
         return "N/A"
 
@@ -788,38 +1350,110 @@ def _fee_text(row: Optional[FeeRow]) -> str:
     min_rate = _percent(row.asgari_oran)
     max_rate = _percent(row.azami_oran)
 
-    parts: List[str] = []
+    amount = ""
 
-    if min_amount and min_amount != "-" and max_amount and max_amount != "-":
+    if min_amount and max_amount:
         if _norm(min_amount) == _norm(max_amount):
-            parts.append(min_amount)
+            amount = min_amount
         else:
-            parts.append(
-                f"min {min_amount}\n"
-                f"max {max_amount}"
-            )
-    elif max_amount and max_amount != "-":
-        parts.append(max_amount)
-    elif min_amount and min_amount != "-":
-        parts.append(min_amount)
+            amount = f"min {min_amount}\nmax {max_amount}"
+    elif max_amount:
+        amount = max_amount
+    elif min_amount:
+        amount = min_amount
+
+    rate = ""
 
     if min_rate and max_rate:
         if _norm(min_rate) == _norm(max_rate):
-            parts.append(min_rate)
+            rate = min_rate
         else:
-            parts.append(f"min {min_rate}\nmax {max_rate}")
+            rate = f"min {min_rate}\nmax {max_rate}"
     elif max_rate:
-        parts.append(max_rate)
+        rate = max_rate
     elif min_rate:
-        parts.append(min_rate)
+        rate = min_rate
+
+    # Fatura / SGK vb. bazı bankalarda tek satır:
+    # "150 TL altı = sabit tutar, 150 TL üzeri = oran"
+    # şeklinde iki kademeyi birlikte tarif ediyor.
+    if spec and spec.band_key in {
+        "FATURA_1",
+        "SGK_1",
+    }:
+        keys = _all_band_keys(
+            f"{row.masraf} | {row.aciklama}"
+        )
+
+        upper_key = (
+            "FATURA_2"
+            if spec.band_key == "FATURA_1"
+            else "SGK_2"
+        )
+
+        if (
+            spec.band_key in keys
+            and upper_key in keys
+            and amount
+        ):
+            result = amount
+        elif amount and rate:
+            # Min tutar + yüzde tabanlı genel tarife.
+            result = f"{amount}\n{rate}"
+        else:
+            result = amount or rate
+
+    elif spec and spec.band_key in {
+        "FATURA_2",
+        "SGK_2",
+    }:
+        keys = _all_band_keys(
+            f"{row.masraf} | {row.aciklama}"
+        )
+
+        lower_key = (
+            "FATURA_1"
+            if spec.band_key == "FATURA_2"
+            else "SGK_1"
+        )
+
+        if (
+            spec.band_key in keys
+            and lower_key in keys
+            and rate
+        ):
+            result = rate
+        else:
+            result = rate or amount
+
+    else:
+        parts: List[str] = []
+
+        if amount:
+            parts.append(amount)
+
+        if rate:
+            parts.append(rate)
+
+        result = "\n".join(parts)
 
     aciklama = _norm(row.aciklama)
-    if "bsmv dahil" in aciklama:
-        parts.append("BSMV dahil")
-    elif "bsmv haric" in aciklama:
-        parts.append("BSMV hariç")
 
-    return "\n".join(parts) if parts else "Ücret bilgisi açıklamada"
+    if "bsmv dahil" in aciklama:
+        result = (
+            f"{result}\nBSMV dahil"
+            if result
+            else "BSMV dahil"
+        )
+    elif "bsmv haric" in aciklama:
+        result = (
+            f"{result}\nBSMV hariç"
+            if result
+            else "BSMV hariç"
+        )
+
+    return result or "Ücret bilgisi açıklamada"
+
 
 
 def _preserve_notes(old_ws) -> Dict[Tuple[str, str], str]:
@@ -925,7 +1559,7 @@ def _write_comparison(ws, rows: Sequence[FeeRow], notes: Mapping[Tuple[str, str]
                             candidates.append(found)
                     row = candidates[0] if candidates else None
 
-                value = _fee_text(row)
+                value = _fee_text(row, spec)
                 c = ws.cell(row=current_row, column=col)
                 c.value = value
                 c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
@@ -1141,10 +1775,49 @@ def update_comparison_sheet(excel_path: str = "komisyonlar_guncel.xlsx") -> Dict
         "A=ortak masraf, B:I=4 banka Mobil/Şube, J:L=boş, M=NOTLAR."
     )
 
+    # v6 ayrıca toplam doluluk oranını loglar.
+    possible_cells = sum(
+        8
+        for kind, payload in LAYOUT
+        if kind == "ROW"
+    )
+
+    matched_cells = 0
+
+    for kind, payload in LAYOUT:
+        if kind != "ROW":
+            continue
+
+        spec = payload
+
+        for bank in BANKS:
+            for channel in ("MOBIL", "SUBE"):
+                lookup = (
+                    channel
+                    if spec.split_channel
+                    else "GENEL"
+                )
+
+                if _best_match(
+                    rows,
+                    bank,
+                    spec,
+                    lookup,
+                ) is not None:
+                    matched_cells += 1
+
+    print(
+        f"[comparison] EŞLEŞME: "
+        f"{matched_cells}/{possible_cells} hücre "
+        f"(%{(matched_cells / possible_cells * 100):.1f})"
+    )
+
     return {
         "source_rows": len(rows),
         "comparison_rows": comparison_rows,
         "notes_preserved": len(notes),
+        "matched_cells": matched_cells,
+        "possible_cells": possible_cells,
     }
 
 
