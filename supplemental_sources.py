@@ -40,7 +40,7 @@ import requests
 from bs4 import BeautifulSoup
 
 
-SUPPLEMENTAL_VERSION = "2026-08-20-v6-official-channel-and-limit-audit"
+SUPPLEMENTAL_VERSION = "2026-08-20-v7-precision-source-audit"
 
 HEADERS = {
     "User-Agent": (
@@ -61,7 +61,7 @@ ISBANK_BILL_URL = "https://www.isbank.com.tr/fatura-odemeleri"
 
 ISBANK_FAST_URL = "https://www.isbank.com.tr/fast-anlik-para-transferi"
 ISBANK_SGK_URL = "https://www.isbank.com.tr/sgk-odemeleri"
-ISBANK_CARD_CURRENT_URL = "https://www.isbank.com.tr/Documents/KKR%20S%C3%B6zle%C5%9Fmesi%20isbank.com.tr%28%20KREDI-KARTI-SOZ%20%2912.08.2026.pdf"
+ISBANK_CARD_CURRENT_URL = "https://www.isbank.com.tr/Documents/KKR%20S%C3%B6zle%C5%9Fmesi%20Dijital%20Kanallar%28%20KREDI-KARTI-SOZ%20%2903.02.2026.pdf"
 
 AKBANK_COMMERCIAL_URL = "https://www.akbank.com/ticari-musterilerden-alinabilecek-ucretler-ve-alt-kalemler"
 AKBANK_PAYMENT_CENTER_URL = "https://www.akbank.com/odeme-merkezi"
@@ -409,12 +409,12 @@ def _akbank_service_rows() -> List[SupplementalRow]:
 
     rows = []
     rows += _add_service_status(
-        "AKBANK", "AIDAT", "Aidat Ödemeleri", ("MOBIL", "SUBE"), AKBANK_REGULAR_URL,
-        "Düzenli Ödemeler sayfasında apartman aidatı açıkça sayılıyor; Mobil/İnternet, Şube ve Müşteri İletişim Merkezi kanalları belirtiliyor.",
+        "AKBANK", "AIDAT", "Aidat Ödemeleri", ("MOBIL",), AKBANK_PAYMENT_CENTER_URL,
+        "Ödeme Merkezi sayfasında Site Aidat Ödemeleri ve Üyelik Aidat Ödemeleri Akbank Mobil hizmetleri olarak yayımlanıyor.",
     )
     rows += _add_service_status(
-        "AKBANK", "OZEL_OKUL", "Özel Okul / Eğitim Ödemeleri", ("MOBIL", "SUBE"), AKBANK_REGULAR_URL,
-        "Düzenli Ödemeler sayfasında okul taksiti açıkça sayılıyor; Ödeme Merkezi'nde Eğitim Ödemeleri ayrıca listeleniyor.",
+        "AKBANK", "OZEL_OKUL", "Özel Okul / Eğitim Ödemeleri", ("MOBIL",), AKBANK_PAYMENT_CENTER_URL,
+        "Ödeme Merkezi sayfasında Eğitim Ödemeleri Akbank Mobil üzerinden sunulan ödeme hizmetleri arasında yayımlanıyor.",
     )
     return rows
 
@@ -427,12 +427,12 @@ def _yk_service_rows() -> List[SupplementalRow]:
 
     rows = []
     rows += _add_service_status(
-        "YAPIKREDI", "AIDAT", "Aidat Ödemeleri", ("MOBIL", "SUBE"), YAPIKREDI_REGULAR_URL,
-        "Düzenli Ödemeler sayfasında aidat açıkça listeleniyor; Mobil/İnternet üzerinden oluşturma, ayrıca Müşteri İletişim Merkezi ve şubeden talimat kanalı belirtiliyor.",
+        "YAPIKREDI", "AIDAT", "Aidat Ödemeleri", ("MOBIL",), YAPIKREDI_REGULAR_URL,
+        "Düzenli Ödemeler sayfasında aidat açıkça listeleniyor ve talimatın Yapı Kredi Mobil / İnternet Şubesi üzerinden verilebildiği belirtiliyor.",
     )
     rows += _add_service_status(
-        "YAPIKREDI", "OZEL_OKUL", "Özel Okul / Okul Taksiti", ("MOBIL", "SUBE"), YAPIKREDI_REGULAR_URL,
-        "Düzenli Ödemeler sayfasında okul taksiti açıkça listeleniyor; Mobil/İnternet üzerinden oluşturma, ayrıca Müşteri İletişim Merkezi ve şubeden talimat kanalı belirtiliyor.",
+        "YAPIKREDI", "OZEL_OKUL", "Özel Okul / Okul Taksiti", ("MOBIL",), YAPIKREDI_REGULAR_URL,
+        "Düzenli Ödemeler sayfasında okul taksiti açıkça listeleniyor ve talimatın Yapı Kredi Mobil / İnternet Şubesi üzerinden verilebildiği belirtiliyor.",
     )
     return rows
 
@@ -629,7 +629,7 @@ def _isbank_phone_rows() -> List[SupplementalRow]:
     return _add_service_status(
         "İŞBANKASI", "TELEFON", "Telefon / Cep Telefonu Faturası Ödemeleri",
         ("MOBIL", "SUBE"), ISBANK_BILL_URL,
-        "Fatura Ödemeleri sayfası telefon faturalarının İşCep/İnternet ve desteklenen şube/Çözüm Merkezi kanallarında ödenebildiğini doğruluyor. Ayrı telefon tarifesi varsa primary ücret satırı önceliklidir.",
+        "Fatura Ödemeleri sayfası telefon faturalarının İşCep/İnternet, Çözüm Merkezi ve şubelerden ödenebildiğini doğruluyor. Telefon yükleme ücreti telefon faturası ücreti olarak kullanılmaz; genel Fatura Ödemeleri tarifesi varsa karşılaştırma katmanında o tarife kullanılır.",
     )
 
 
@@ -743,7 +743,14 @@ def _isbank_fast_sgk_policy_rows() -> List[SupplementalRow]:
 
 
 def _isbank_card_contract_rows() -> List[SupplementalRow]:
-    """Güncel resmî kart sözleşmesinden Ortak ATM para yatırma + Visa Direct durumunu alır."""
+    """
+    İş Bankası'nın 03.02.2026 tarihli resmî kart sözleşmesinden:
+      - Ortak ATM cari hesaba para yatırma tarifesini,
+      - Visa Direct'in sözleşmedeki güncel yayın durumunu
+    alır.
+
+    Bir alan parse edilemezse diğer doğrulanmış alan yine kullanılabilir.
+    """
     import pdfplumber
 
     pdf_bytes = _request(ISBANK_CARD_CURRENT_URL, binary=True, timeout=60)
@@ -752,40 +759,62 @@ def _isbank_card_contract_rows() -> List[SupplementalRow]:
 
     flat = " ".join(text.split())
     norm = _norm(flat)
-    if "visa direct hizmeti henuz uygulamada olmayip" not in norm:
-        raise SupplementalSourceError("İş Bankası kart sözleşmesinde Visa Direct durum cümlesi bulunamadı.")
+    rows: List[SupplementalRow] = []
 
-    # Ortak ATM tablosunun Standart ATM sütunu:
-    # Cari Hesaba Para Yatırma = %1,15 + 1,05 TL (vergi dahil).
+    # ORTAK ATM - Cari Hesaba Para Yatırma
     m = re.search(
-        r"Cari Hesaba Para Yatırma.{0,180}?%?\s*1[,\.]15\s*\+?\s*1[,\.]05\s*TL",
-        flat, flags=re.I | re.S,
+        r"Cari\s+Hesaba\s+Para\s+Yat[ıi]rma.{0,300}?%?\s*1[,\.]15\s*"
+        r"\+?\s*1[,\.]05\s*TL",
+        flat,
+        flags=re.I | re.S,
     )
     if not m:
-        raise SupplementalSourceError("İş Bankası Ortak ATM para yatırma ücreti PDF'den parse edilemedi.")
-
-    rows = [
-        SupplementalRow(
-            kategori="EK KAYNAK - İş Bankası Kart Sözleşmesi - Ortak ATM",
-            masraf="Ortak ATM - Cari Hesaba Para Yatırma (Standart ATM)",
-            asgari_tutar="1,05 TL",
-            asgari_oran="1,15%",
-            azami_oran="1,15%",
-            aciklama=_source_note(
-                STATUS_NUMERIC, ISBANK_CARD_CURRENT_URL,
-                "SERVICE=PARA_YATIRMA; CHANNEL=GENEL; Vergi dahildir; Standart ATM tarifesidir. TEK ATM tarifesi ayrıca %1,15 + 1,58 TL'dir.",
-            ),
-            site_guncelleme_tarihi="12.08.2026",
+        m = re.search(
+            r"cari hesaba para yatirma.{0,300}?1[,\.]15.{0,100}?1[,\.]05\s*tl",
+            norm,
+            flags=re.I | re.S,
         )
-    ]
-    rows += _add_service_status(
-        "İŞBANKASI", "VISA_YP_DIRECT", "Visa Direct",
-        ("MOBIL", "SUBE"), ISBANK_CARD_CURRENT_URL,
-        "Kart sözleşmesi Visa Direct hizmetinin henüz uygulamada olmadığını açıkça belirtiyor.",
-        marker=STATUS_NOT_APPLICABLE,
-        display_text="Henüz uygulamada değil",
-    )
+
+    if m:
+        rows.append(
+            SupplementalRow(
+                kategori="EK KAYNAK - İş Bankası Kart Sözleşmesi 03.02.2026",
+                masraf="Ortak ATM - Cari Hesaba Para Yatırma - TEK ATM Değil",
+                asgari_tutar="1,05 TL",
+                asgari_oran="1,15%",
+                azami_oran="1,15%",
+                aciklama=_source_note(
+                    STATUS_NUMERIC,
+                    ISBANK_CARD_CURRENT_URL,
+                    "SERVICE=PARA_YATIRMA; CHANNEL=GENEL; Vergi dahildir; "
+                    "TEK ATM tarifesi ayrıca %1,15 + 1,58 TL'dir.",
+                ),
+                site_guncelleme_tarihi="03.02.2026",
+            )
+        )
+
+    # VISA Direct - sözleşmedeki açık yayın durumu
+    if "visa direct hizmeti henuz uygulamada olmayip" in norm:
+        rows += _add_service_status(
+            "İŞBANKASI",
+            "VISA_YP_DIRECT",
+            "Visa Direct",
+            ("MOBIL", "SUBE"),
+            ISBANK_CARD_CURRENT_URL,
+            "03.02.2026 tarihli resmî kart sözleşmesinde Visa Direct hizmetinin "
+            "henüz uygulamada olmadığı ve devreye alındığında internet sitesinden "
+            "duyurulacağı belirtiliyor.",
+            marker=STATUS_NOT_APPLICABLE,
+            display_text="03.02.2026 sözleşmesinde\\nhenüz uygulamada değil",
+        )
+
+    if not rows:
+        raise SupplementalSourceError(
+            "İş Bankası 03.02.2026 kart sözleşmesinden beklenen karşılaştırma verileri parse edilemedi."
+        )
+
     return rows
+
 
 
 def _yk_comparison_policy_rows() -> List[SupplementalRow]:
@@ -817,6 +846,22 @@ def _yk_comparison_policy_rows() -> List[SupplementalRow]:
         display_text="Düzenli Havale için Şube\\ntarifesi ayrı yayımlanmıyor",
     )
     return rows
+
+
+
+def _yk_altin_transfer_status_rows() -> List[SupplementalRow]:
+    html = _fetch_html(YAPIKREDI_FEE_URL, must_contain=("Külçe Altın Çekme",))
+    page = _norm(BeautifulSoup(html, "html.parser").get_text(" ", strip=True))
+    if "kulce altin cekme" not in page:
+        raise SupplementalSourceError("Yapı Kredi altın/fiziki teslim bölümü doğrulanamadı.")
+
+    return _add_service_status(
+        "YAPIKREDI", "ALTIN_TRANSFER", "Elektronik Altın / Altın Transferi",
+        ("GENEL",), YAPIKREDI_FEE_URL,
+        "Ürün ve Hizmet Ücretleri sayfasında Külçe Altın Çekme/fiziki altın ücreti yayımlanıyor; "
+        "ayrı elektronik bankalararası altın transfer tarifesi yayımlanmıyor.",
+        display_text="Ayrı elektronik altın transfer\\ntarifesi yayımlanmıyor",
+    )
 
 
 def _discover_isbank_bhs() -> Tuple[str, str]:
@@ -1139,6 +1184,7 @@ def enrich_all(banka_verileri: Mapping[str, Sequence]) -> Tuple[Dict[str, List],
     apply("AKBANK", "AKBANK_COMPARISON_POLICY", AKBANK_FAST_URL, _akbank_comparison_policy_rows)
     apply("İŞBANKASI", "ISBANK_FAST_SGK_POLICY", ISBANK_FAST_URL, _isbank_fast_sgk_policy_rows)
     apply("YAPIKREDI", "YAPIKREDI_COMPARISON_POLICY", YAPIKREDI_FAST_URL, _yk_comparison_policy_rows)
+    apply("YAPIKREDI", "YAPIKREDI_ALTIN_TRANSFER_STATUS", YAPIKREDI_FEE_URL, _yk_altin_transfer_status_rows)
 
     # Kart sözleşmesi PDF'i kritik primary veri için değil yalnız Ortak ATM/Visa
     # karşılaştırmasını zenginleştirir. PDF yapısı değişirse ana Excel bloke edilmez.
