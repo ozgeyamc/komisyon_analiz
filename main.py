@@ -55,9 +55,9 @@ from update_excel import (
 )
 
 
-MAIN_VERSION = "2026-08-21-v13-fail-closed-comparison"
+MAIN_VERSION = "2026-08-21-v14-canonical-international-transfer"
 EXPECTED_SUPPLEMENTAL_VERSION = "2026-08-21-v9-primary-fee-backfill"
-EXPECTED_COMPARISON_VERSION = "2026-08-21-v18-fail-closed-precision-audit"
+EXPECTED_COMPARISON_VERSION = "2026-08-21-v19-canonical-international-transfer"
 EXPECTED_EXCEL_WRITER_VERSION = "2026-08-21-v2-clean-supplemental-display"
 
 BANKA_SIRASI = [
