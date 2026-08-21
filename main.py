@@ -52,7 +52,7 @@ from update_excel import EXCEL_DOSYA_ADI, excel_guncelle_coklu
 
 MAIN_VERSION = "2026-08-21-v9-resilient-final"
 EXPECTED_SUPPLEMENTAL_VERSION = "2026-08-21-v8-resilient-official-sources"
-EXPECTED_COMPARISON_VERSION = "2026-08-21-v16-precision-first-stable"
+EXPECTED_COMPARISON_VERSION = "2026-08-21-v15-precision-first-stable"
 
 BANKA_SIRASI = [
     ("GARANTİ",   "scraper",            "scrape_garanti_bbva"),
