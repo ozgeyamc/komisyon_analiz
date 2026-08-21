@@ -50,9 +50,9 @@ update_comparison_sheet = getattr(
 from update_excel import EXCEL_DOSYA_ADI, excel_guncelle_coklu
 
 
-MAIN_VERSION = "2026-08-21-v10-supplemental-fee-backfill"
+MAIN_VERSION = "2026-08-21-v11-transfer-semantic-channel-fix"
 EXPECTED_SUPPLEMENTAL_VERSION = "2026-08-21-v9-primary-fee-backfill"
-EXPECTED_COMPARISON_VERSION = "2026-08-20-v15-precision-first-matching"
+EXPECTED_COMPARISON_VERSION = "2026-08-21-v16-transfer-semantic-channel-fix"
 
 BANKA_SIRASI = [
     ("GARANTİ",   "scraper",            "scrape_garanti_bbva"),
