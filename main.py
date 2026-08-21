@@ -47,12 +47,18 @@ update_comparison_sheet = getattr(
     "update_comparison_sheet",
     None,
 )
-from update_excel import EXCEL_DOSYA_ADI, excel_guncelle_coklu
+from update_excel import (
+    EXCEL_DOSYA_ADI,
+    EXCEL_WRITER_VERSION,
+    excel_guncelle_coklu,
+    final_excel_gorunumunu_temizle,
+)
 
 
-MAIN_VERSION = "2026-08-21-v11-transfer-semantic-channel-fix"
+MAIN_VERSION = "2026-08-21-v12-clean-supplemental-display"
 EXPECTED_SUPPLEMENTAL_VERSION = "2026-08-21-v9-primary-fee-backfill"
 EXPECTED_COMPARISON_VERSION = "2026-08-21-v16-transfer-semantic-channel-fix"
+EXPECTED_EXCEL_WRITER_VERSION = "2026-08-21-v2-clean-supplemental-display"
 
 BANKA_SIRASI = [
     ("GARANTİ",   "scraper",            "scrape_garanti_bbva"),
@@ -86,6 +92,7 @@ def _component_versions_ok() -> bool:
     print(f"[main] SÜRÜM: {MAIN_VERSION}")
     print(f"[main] supplemental: {SUPPLEMENTAL_VERSION}")
     print(f"[main] comparison: {COMPARISON_VERSION}")
+    print(f"[main] excel writer: {EXCEL_WRITER_VERSION}")
 
     if SUPPLEMENTAL_VERSION != EXPECTED_SUPPLEMENTAL_VERSION:
         print(
@@ -107,6 +114,14 @@ def _component_versions_ok() -> bool:
         print(
             "[FATAL] update_comparison.py içinde update_comparison_sheet() "
             "fonksiyonu bulunamadı.",
+            file=sys.stderr,
+        )
+        ok = False
+
+    if EXCEL_WRITER_VERSION != EXPECTED_EXCEL_WRITER_VERSION:
+        print(
+            "[FATAL] update_excel.py yanlış/eski sürüm. "
+            f"Beklenen={EXPECTED_EXCEL_WRITER_VERSION} | Gelen={EXCEL_WRITER_VERSION}",
             file=sys.stderr,
         )
         ok = False
@@ -281,7 +296,21 @@ def main() -> int:
 
     try:
         ozet = excel_guncelle_coklu(enriched_data, str(temp_path))
+
+        # Teknik supplemental marker'ları KARŞILAŞTIRMA eşleştirmesi için burada
+        # hâlâ korunur. Önce karşılaştırma üretilir.
         comparison = update_comparison_sheet(str(temp_path))
+
+        # Karşılaştırma tamamlandıktan sonra yalnız final KOMİSYONLAR görünümü
+        # temizlenir. Böylece eşleştirme mantığı bozulmaz, kullanıcı teknik
+        # SERVICE/CHANNEL/SUPPLEMENTAL metinlerini görmez.
+        display_cleanup = final_excel_gorunumunu_temizle(str(temp_path))
+        print(
+            "[main] Final görünüm temizlendi: "
+            f"açıklama={display_cleanup.get('temizlenen_aciklama', 0)} | "
+            f"kaynak_linki={display_cleanup.get('kaynak_linki', 0)}"
+        )
+
         _verify_comparison_file(temp_path, comparison)
 
         # Yalnız yukarıdaki tüm kontroller başarılıysa final dosya değiştirilir.
