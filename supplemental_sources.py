@@ -40,7 +40,7 @@ import requests
 from bs4 import BeautifulSoup
 
 
-SUPPLEMENTAL_VERSION = "2026-08-20-v7-precision-source-audit"
+SUPPLEMENTAL_VERSION = "2026-08-21-v8-resilient-official-sources"
 
 HEADERS = {
     "User-Agent": (
@@ -1106,6 +1106,10 @@ def enrich_all(banka_verileri: Mapping[str, Sequence]) -> Tuple[Dict[str, List],
     result: Dict[str, List] = {bank: list(rows) for bank, rows in banka_verileri.items()}
 
     def apply(bank: str, source_name: str, url: str, producer, *, required: bool = True):
+        print(
+            f"[supplemental] başlıyor: {source_name} | "
+            f"{'KRİTİK' if required else 'opsiyonel'}"
+        )
         if bank not in result:
             if required:
                 report.fail(f"{source_name}: {bank} primary verisi yok.")
@@ -1184,7 +1188,58 @@ def enrich_all(banka_verileri: Mapping[str, Sequence]) -> Tuple[Dict[str, List],
     apply("AKBANK", "AKBANK_COMPARISON_POLICY", AKBANK_FAST_URL, _akbank_comparison_policy_rows)
     apply("İŞBANKASI", "ISBANK_FAST_SGK_POLICY", ISBANK_FAST_URL, _isbank_fast_sgk_policy_rows)
     apply("YAPIKREDI", "YAPIKREDI_COMPARISON_POLICY", YAPIKREDI_FAST_URL, _yk_comparison_policy_rows)
-    apply("YAPIKREDI", "YAPIKREDI_ALTIN_TRANSFER_STATUS", YAPIKREDI_FEE_URL, _yk_altin_transfer_status_rows)
+    def yk_altin_status_from_primary():
+        primary_rows = result.get("YAPIKREDI", [])
+        primary_text = " | ".join(
+            _norm(
+                f"{getattr(row, 'kategori', '')} "
+                f"{getattr(row, 'masraf', '')} "
+                f"{getattr(row, 'aciklama', '')}"
+            )
+            for row in primary_rows
+        )
+
+        # Resmî ana ücret sayfasından gelen primary veride fiziksel külçe altın
+        # satırı yoksa bu status'u üretmeyiz; böylece tahmin yapılmaz.
+        if "kulce altin cekme" not in primary_text:
+            raise SupplementalSourceError(
+                "Primary Yapı Kredi verisinde 'Külçe Altın Çekme' satırı bulunamadı."
+            )
+
+        # Primary veride gerçekten elektronik/bankalararası altın transfer
+        # tarifesi varsa status eklemeye gerek yok; numeric satır kullanılacaktır.
+        electronic_tokens = (
+            "altin transfer",
+            "kiymetli maden transferi ucreti - altin",
+            "ats ile altin gonderimi",
+        )
+        if any(token in primary_text for token in electronic_tokens):
+            return []
+
+        return _add_service_status(
+            "YAPIKREDI",
+            "ALTIN_TRANSFER",
+            "Elektronik Altın / Altın Transferi",
+            ("GENEL",),
+            YAPIKREDI_FEE_URL,
+            "Primary resmî ücret verisinde Külçe Altın Çekme/fiziki altın tarifesi "
+            "bulunuyor; ayrı elektronik bankalararası altın transfer tarifesi "
+            "tespit edilmedi.",
+            display_text=(
+                "Ayrı elektronik altın transfer\n"
+                "tarifesi yayımlanmıyor"
+            ),
+        )
+
+    # Bu satır karşılaştırmayı zenginleştirir fakat ana finansal veri değildir.
+    # Site HTML'i/başlığı değişirse bütün pipeline'ı bloke etmemeli.
+    apply(
+        "YAPIKREDI",
+        "YAPIKREDI_ALTIN_TRANSFER_STATUS",
+        YAPIKREDI_FEE_URL,
+        yk_altin_status_from_primary,
+        required=False,
+    )
 
     # Kart sözleşmesi PDF'i kritik primary veri için değil yalnız Ortak ATM/Visa
     # karşılaştırmasını zenginleştirir. PDF yapısı değişirse ana Excel bloke edilmez.
