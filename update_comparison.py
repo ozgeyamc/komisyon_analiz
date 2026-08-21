@@ -38,9 +38,9 @@ from openpyxl.comments import Comment
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
 
-COMPARISON_VERSION = "2026-08-21-v16-transfer-semantic-channel-fix"
+COMPARISON_VERSION = "2026-08-21-v18-fail-closed-precision-audit"
 COMPARISON_SHEET = "KARŞILAŞTIRMA"
-PREVIEW_LAYOUT_SIGNATURE = "4BANKS|A:I|J:L_EMPTY|M_NOTES|SCREENSHOT_ORDER|PRECISION_FIRST|LOGICAL_GENERAL_CELLS"
+PREVIEW_LAYOUT_SIGNATURE = "4BANKS|A:I|J:L_EMPTY|M_NOTES|FAIL_CLOSED_V18|HGS_SPLIT|CHEQUE_UNIT_SAFE"
 
 STATUS_AVAILABLE = "[SUPPLEMENTAL][AVAILABLE_NO_SEPARATE_FEE]"
 STATUS_EMPTY = "[SUPPLEMENTAL][PUBLISHED_EMPTY]"
@@ -145,15 +145,16 @@ class RowSpec:
 # ---------------------------------------------------------------------------
 
 LAYOUT = [
-    # Referans görseldeki iş akışına yakın sıra:
-    # EFT -> Şans Oyunu -> Para Çekme/ATM -> Fatura -> Havale -> FAST/SWIFT
-    # -> SGK -> Kasa -> Çek -> KKB -> HGS -> Vergi -> Senet -> diğer transferler.
+    # Güvenlik öncelikli ortak karşılaştırma sözlüğü.
+    # Birbirinden farklı ürünler aynı satırda birleştirilmez.
+    # Özellikle ÇEK ve HGS tarafında birim/ürün ayrımı korunur.
 
     ("SECTION", "EFT"),
     ("ROW", RowSpec("0 TRY - 8.300 TRY", "EFT", "TRANSFER_1")),
     ("ROW", RowSpec("8.300,01 TRY - 399.000 TRY", "EFT", "TRANSFER_2")),
     ("ROW", RowSpec("399.000,01 TRY -", "EFT", "TRANSFER_3")),
 
+    ("SECTION", "ŞANS OYUNU"),
     ("ROW", RowSpec("Şans Oyunu Ödemeleri", "SANS_OYUNU")),
 
     ("SECTION", "PARA ÇEKME / ATM"),
@@ -175,6 +176,7 @@ LAYOUT = [
     ("ROW", RowSpec("8.300,01 TRY - 399.000 TRY", "FAST", "TRANSFER_2")),
     ("ROW", RowSpec("399.000,01 TRY -", "FAST", "TRANSFER_3")),
 
+    ("SECTION", "YURT DIŞI TRANSFERLER"),
     ("ROW", RowSpec("SWIFT - Gelen", "SWIFT_GELEN", split_channel=False)),
     ("ROW", RowSpec("SWIFT - Giden", "SWIFT_GIDEN")),
     ("ROW", RowSpec("Yurt Dışı Hızlı Hesaba Transfer", "YURT_DISI_FAST", split_channel=False)),
@@ -191,18 +193,27 @@ LAYOUT = [
     ("ROW", RowSpec("Özel / Süper Kasa", "KASA", detail="OZEL", split_channel=False)),
 
     ("SECTION", "ÇEK"),
-    ("ROW", RowSpec("Çek Defteri / Karekodlu Çek Karnesi", "CEK_DEFTERI", split_channel=False)),
-    ("ROW", RowSpec("Çek Düzenleme", "CEK_DUZENLEME", split_channel=False)),
-    ("ROW", RowSpec("Özel Nitelikli / Dövizli Çek Düzenleme", "CEK_OZEL", split_channel=False)),
-    ("ROW", RowSpec("Çek İade", "CEK_IADE", split_channel=False)),
-    ("ROW", RowSpec("Çek Tahsil - Aynı Banka", "CEK_TAHSIL", detail="AYNI", split_channel=False)),
-    ("ROW", RowSpec("Çek Tahsil - Diğer Banka", "CEK_TAHSIL", detail="DIGER", split_channel=False)),
-    ("ROW", RowSpec("Çek Tahsil - Döviz Çeki", "CEK_TAHSIL", detail="DOVIZ", split_channel=False)),
-    ("ROW", RowSpec("Karşılıksız Çek Belgelendirme", "CEK_KARSILIKSIZ", split_channel=False)),
+    # Birim farkı yüzünden "çek defteri" tek satırda birleştirilmez.
+    ("ROW", RowSpec("Çek Defteri - Yaprak Başı", "CEK_DEFTERI_YAPRAK", split_channel=False)),
+    ("ROW", RowSpec("Çek Karnesi - 10 Yapraklı", "CEK_KARNESI_10", split_channel=False)),
+    ("ROW", RowSpec("Bloke / Keşide Çeki Düzenleme", "CEK_DUZENLEME_STANDART", split_channel=False)),
+    ("ROW", RowSpec("Dövizli / DTH Çek Düzenleme", "CEK_DUZENLEME_DOVIZ", split_channel=False)),
+    ("ROW", RowSpec("Çek İade - İşlemsiz / Muamelesiz", "CEK_IADE", split_channel=False)),
+    ("ROW", RowSpec("Çek Tahsil - Bankanın Kendi Çeki", "CEK_TAHSIL", detail="AYNI", split_channel=False)),
+    ("ROW", RowSpec("Çek Tahsil - Diğer Banka Çeki", "CEK_TAHSIL", detail="DIGER", split_channel=False)),
+    ("ROW", RowSpec("Çek Tahsil - Dövizli / YP Çek", "CEK_TAHSIL", detail="DOVIZ", split_channel=False)),
+    ("ROW", RowSpec("Karşılıksız Çek Belgelendirme / Elden Ödeme", "CEK_KARSILIKSIZ", split_channel=False)),
     ("ROW", RowSpec("Çek Düzeltme Hakkı", "CEK_DUZELTME_HAKKI", split_channel=False)),
 
+    ("SECTION", "KKB / RİSK RAPORLARI"),
     ("ROW", RowSpec("KKB Risk Raporu", "KREDI_RISK", split_channel=False)),
-    ("ROW", RowSpec("HGS Etiket / Kart Bedeli", "HGS", split_channel=False)),
+    ("ROW", RowSpec("KKB Çek Bilgileri / Çek Risk Raporu", "CEK_RISK", split_channel=False)),
+
+    ("SECTION", "HGS"),
+    ("ROW", RowSpec("HGS Etiket Bedeli", "HGS_ETIKET", split_channel=False)),
+    ("ROW", RowSpec("HGS Kart Bedeli", "HGS_KART", split_channel=False)),
+
+    ("SECTION", "VERGİ / DEVLET ÖDEMELERİ"),
     ("ROW", RowSpec("Vergi Tahsilat Komisyonu", "VERGI")),
 
     ("SECTION", "SENET"),
@@ -220,15 +231,16 @@ LAYOUT = [
     ("ROW", RowSpec("Düzenli Havale - 8.300,01 TRY - 399.000 TRY", "DUZENLI_HAVALE", "TRANSFER_2")),
     ("ROW", RowSpec("Düzenli Havale - 399.000,01 TRY -", "DUZENLI_HAVALE", "TRANSFER_3")),
 
+    ("SECTION", "DİĞER BANKACILIK İŞLEMLERİ"),
     ("ROW", RowSpec("Ortak ATM / Başka Kuruluş Para Yatırma", "PARA_YATIRMA", split_channel=False)),
-    ("ROW", RowSpec("KKB Çek Bilgileri / Çek Risk Raporu", "CEK_RISK", split_channel=False)),
     ("ROW", RowSpec("Elektronik Altın / Altın Transferi", "ALTIN_TRANSFER", split_channel=False)),
     ("ROW", RowSpec("Kıymetli Maden Fiziki Teslimi", "KIYMETLI_MADEN_TESLIM", split_channel=False)),
 
-    ("SECTION", "Aidat Ödemeleri"),
+    ("SECTION", "AİDAT ÖDEMELERİ"),
     ("ROW", RowSpec("0 TRY - 149,99 TRY", "AIDAT", "FATURA_1")),
     ("ROW", RowSpec("150 TRY -", "AIDAT", "FATURA_2")),
-    ("SECTION", "Özel Okul Ödeme"),
+
+    ("SECTION", "ÖZEL OKUL ÖDEME"),
     ("ROW", RowSpec("0 TRY - 149,99 TRY", "OZEL_OKUL", "FATURA_1")),
     ("ROW", RowSpec("150 TRY -", "OZEL_OKUL", "FATURA_2")),
     ("ROW", RowSpec("Telefon Ödemeleri", "TELEFON")),
@@ -244,7 +256,6 @@ LAYOUT = [
     ("ROW", RowSpec("Hesap Özeti Posta Yoluyla", "HESAP_OZETI_POSTA", split_channel=False)),
     ("ROW", RowSpec("Bakiye Sorma - Yurtdışı ATM", "BAKIYE_ATM_YURTDISI", split_channel=False)),
 ]
-
 
 
 # ---------------------------------------------------------------------------
@@ -264,6 +275,14 @@ def _norm(value) -> str:
         "ö": "o", "Ö": "o", "ç": "c", "Ç": "c",
     }))
     return text.lower().strip()
+
+
+@lru_cache(maxsize=65536)
+def _has_word(text: str, word: str) -> bool:
+    """Kısa hizmet kodlarını başka kelimelerin içinden yanlış yakalamaz."""
+    t = _norm(text)
+    w = _norm(word)
+    return re.search(rf"(?<![a-z0-9]){re.escape(w)}(?![a-z0-9])", t) is not None
 
 
 def _clean(value) -> str:
@@ -472,14 +491,14 @@ def _service_tags(row: FeeRow) -> Set[str]:
     package = any(x in short for x in ("paket", "kota"))
     card_cash = any(x in short for x in ("nakit avans", "faiz orani"))
 
-    if (any(x in full for x in ("eft", "elektronik fon transfer"))
+    if ((_has_word(full, "eft") or "elektronik fon transfer" in full)
             and not international and not package and "altin eft" not in full):
         if not card_cash or any(x in short for x in (
             "eft ucreti", "eft gonder", "elektronik fon transfer",
         )):
             tags.add("EFT")
 
-    if (any(x in full for x in ("fast", "fonlarin anlik ve surekli transferi"))
+    if ((_has_word(full, "fast") or "fonlarin anlik ve surekli transferi" in full)
             and not international and not package):
         tags.add("FAST")
 
@@ -547,7 +566,7 @@ def _service_tags(row: FeeRow) -> Set[str]:
     if is_card_transfer:
         tags.add("KART_YURTDISI_TRANSFER")
 
-    if "duzenli" in full and any(x in full for x in ("eft", "elektronik fon transfer")):
+    if "duzenli" in full and (_has_word(full, "eft") or "elektronik fon transfer" in full):
         tags.add("DUZENLI_EFT")
     if "duzenli" in full and "havale" in full:
         tags.add("DUZENLI_HAVALE")
@@ -589,11 +608,17 @@ def _service_tags(row: FeeRow) -> Set[str]:
     if any(x in full for x in ("kiralik kasa", "kasa kiralama", "kasa ucreti")):
         tags.add("KASA")
 
-    if any(x in full for x in (
-        "kiymetli maden teslim", "fiziki altin teslim", "altin teslim",
-        "fiziki kiymetli maden", "kulce altin cekme", "kulce altin teslim",
-        "fiziki altin cekme",
-    )):
+    if (
+        any(x in full for x in (
+            "kiymetli maden teslim", "fiziki altin teslim", "altin teslim",
+            "kulce altin cekme", "kulce altin teslim", "fiziki altin cekme",
+            "musteriye fiziki altin teslim",
+        ))
+        and not any(x in full for x in (
+            "musteriden fiziki altin kabul",
+            "fiziki altin kabul",
+        ))
+    ):
         tags.add("KIYMETLI_MADEN_TESLIM")
 
     # Garanti gibi bazı bankalar "KKB Çek / Risk Raporu"nu tek satırda
@@ -622,8 +647,19 @@ def _service_tags(row: FeeRow) -> Set[str]:
 
     if "sgk" in short or "sosyal guvenlik" in full:
         tags.add("SGK")
-    if "hgs" in full:
-        tags.add("HGS")
+
+    # HGS Etiket ve HGS Kart farklı ürünlerdir.
+    # "HGS" kelimesi tek başına yeterli değildir; ürün tipi MASRAF/KATEGORİ
+    # alanında açıkça görünmelidir.
+    hgs_structural = short
+    if "hgs" in hgs_structural:
+        has_etiket = "etiket" in hgs_structural
+        has_kart = bool(re.search(r"\bkart(?:i|ı|lari|ları|ucreti|ücreti)?\b", hgs_structural))
+        if has_etiket and not has_kart:
+            tags.add("HGS_ETIKET")
+        if has_kart and not has_etiket:
+            tags.add("HGS_KART")
+
     if "sans oyun" in full or any(x in full for x in (
         "bilyoner", "nesine", "tuttur", "oley", "misli", "sisal sans", "tjk",
     )):
@@ -686,9 +722,9 @@ def _service_tags(row: FeeRow) -> Set[str]:
             or ("arsiv" in cat and "arastirma" in cat and mas.startswith("merkezden"))):
         tags.add("MEVDUAT_ARASTIRMA")
 
-    if any(x in full for x in (
-        "referans mektubu", "referans yazisi", "banka referans", "itibar /niyet/referans",
-        "itibar/niyet/referans",
+    if any(x in short for x in (
+        "referans mektubu", "referans yazisi", "banka referans",
+        "itibar mektubu", "itibar /niyet/referans", "itibar/niyet/referans",
     )):
         tags.add("REFERANS_MEKTUBU")
 
@@ -698,16 +734,22 @@ def _service_tags(row: FeeRow) -> Set[str]:
     )):
         tags.add("VIZE_MEKTUBU")
 
-    if ("hesap ozeti" in short or "ekstre masraf" in short or "ekstre ucret" in short
-            or "ekstre veril" in short or "ekstre - " in short):
-        tags.add("HESAP_OZETI")
-
-    if any(x in full for x in (
+    postal_statement = any(x in full for x in (
         "posta ile aylik hesap ozeti", "basili ekstre", "basili hesap ozeti",
         "ekstre gonderim", "hesap ozeti gonderimi", "hesap ozeti posta", "ekstre posta",
         "gecmis donem kredi karti hesap ozeti gonderimi",
-    )):
-        tags.update({"HESAP_OZETI", "HESAP_OZETI_POSTA"})
+    ))
+
+    if postal_statement:
+        tags.add("HESAP_OZETI_POSTA")
+    elif (
+        "hesap ozeti" in short
+        or "ekstre masraf" in short
+        or "ekstre ucret" in short
+        or "ekstre veril" in short
+        or "ekstre - " in short
+    ):
+        tags.add("HESAP_OZETI")
 
     if any(x in full for x in ("hesap arastirma", "hesap tespit", "hesap bulma")):
         tags.add("HESAP_ARASTIRMA")
@@ -724,49 +766,139 @@ def _service_tags(row: FeeRow) -> Set[str]:
             tags.add("BAKIYE_ATM_YURTICI")
 
     # ---------------- ÇEK ----------------
-    if any(x in full for x in ("cek defteri", "cek karnesi", "cek yaprak", "cek kitabi")):
-        tags.add("CEK_DEFTERI")
+    # Çek tarafında yanlış eşleştirme riski yüksek olduğu için mümkün olduğunca
+    # MASRAF + KATEGORİ gibi yapısal alanlar kullanılır; açıklama tek başına
+    # ürün kimliği belirlemez.
+    cek_struct = short
 
-    if (any(x in full for x in (
-        "cek duzenleme", "cek duzenlenmesi", "bloke cek duzenleme", "dovizi natik cek duzenleme",
-    )) and "ozel nitelikli" not in full):
-        tags.add("CEK_DUZENLEME")
+    # Çek defteri: yaprak başı ve 10 yapraklı karne ayrı karşılaştırılır.
+    if (
+        any(x in cek_struct for x in ("cek defteri", "cek karnesi", "cek yaprak", "cek kitabi"))
+        and any(x in cek_struct for x in ("yaprak basi", "yaprak başi", "yaprak başı", "50-350 yaprakli", "351 yaprak"))
+    ):
+        tags.add("CEK_DEFTERI_YAPRAK")
 
-    if any(x in full for x in (
-        "ozel nitelikli cek", "ozel cek duzenleme", "dovizli cek duzenleme",
-        "dovizi natik cek duzenleme", "dth'dan cek duzenlenmesi", "dth dan cek duzenlenmesi",
-        "seyahat ceki duzenleme",
-    )):
-        tags.add("CEK_OZEL")
+    if (
+        any(x in cek_struct for x in ("cek defteri", "cek karnesi"))
+        and any(x in cek_struct for x in ("10 yaprakli", "10'luk", "10luk"))
+    ):
+        tags.add("CEK_KARNESI_10")
 
-    if any(x in full for x in (
-        "cek iade", "cek iadesi", "cek muamelesiz iade", "cekin islemsiz iades",
-        "ceklerin islemsiz iades",
-    )):
+    # Standart bloke/keşide çeki düzenleme. Hediye/armağan, seyahat,
+    # dövizli/DTH ve karşılıklı çekler bu aileye giremez.
+    if (
+        "cek" in cek_struct
+        and any(x in cek_struct for x in (
+            "bloke cek duzenleme",
+            "bloke/ keside ceki duzenleme",
+            "bloke/keside ceki duzenleme",
+            "keside ceki / bloke cek duzenleme",
+            "keside cek duzenleme",
+            "duzenleme - tp/yp",
+        ))
+        and not any(x in cek_struct for x in (
+            "hediye", "armagan", "seyahat", "doviz", "dovizi natik",
+            "dth", "karsilikli", "odeme", "durdurma",
+        ))
+    ):
+        tags.add("CEK_DUZENLEME_STANDART")
+
+    # Dövizli / DTH çek düzenleme.
+    if (
+        "cek" in cek_struct
+        and any(x in cek_struct for x in (
+            "dovizli cek duzenleme",
+            "dovizi natik cek duzenleme",
+            "dth'dan cek duzenlenmesi",
+            "dth dan cek duzenlenmesi",
+        ))
+        and not any(x in cek_struct for x in ("odeme", "durdurma", "tahsil"))
+    ):
+        tags.add("CEK_DUZENLEME_DOVIZ")
+
+    # İşlemsiz/muamelesiz çek iadesi. Senet iadesi veya başka iade türleri alınmaz.
+    if (
+        "cek" in cek_struct
+        and any(x in cek_struct for x in (
+            "cek muamelesiz iade",
+            "cekin islemsiz iades",
+            "ceklerin islemsiz iades",
+            "tahsile verilen cekin islemsiz iades",
+            "cek iade ucreti",
+        ))
+        and "senet" not in cek_struct
+    ):
         tags.add("CEK_IADE")
 
-    if (any(x in full for x in ("cek tahsil", "tahsile alinan cek", "cek takas", "cek odeme"))
-            or ("tahsile alinan" in full and "cek" in full)):
+    # Çek tahsilatı yalnız açık tahsil/tahsile alma ifadelerinden üretilir.
+    # Gişeden çek ödeme / bloke çek ödeme ayrı işlemdir ve tahsilata girmez.
+    if (
+        "cek" in cek_struct
+        and any(x in cek_struct for x in (
+            "cek tahsil",
+            "tahsile alinan cek",
+            "tahsile alinan bankamiz ceki",
+            "tahsile alinan diger banka ceki",
+            "bankamiz ceki (tl-yp) tahsile alma",
+            "baska banka ceki (tl-yp) tahsile alma",
+            "yurtici banka ceki",
+            "ykb ceki",
+            "yp cek tahsilati",
+            "dovizli cek - tahsile alinan",
+            "tahsile alinan dovizli cek",
+        ))
+        and not any(x in cek_struct for x in (
+            "gişeden cek odeme", "giseden cek odeme", "bloke cek odeme",
+            "seyahat ceki odeme", "karsiliksiz cek elden odeme",
+            "cek odeme -", "odemeyi durdurma",
+        ))
+    ):
         tags.add("CEK_TAHSIL")
 
-    # Karşılıksız çek BELGELENDİRME satırını düzeltme hakkından ayır.
-    # Sırf "karşılıksız çek" geçmesi belgelendirme için yeterli değildir.
-    if ("karsiliksiz cek" in full and any(x in full for x in (
-        "belgelendirme", "elden odeme",
-    ))):
+    if (
+        "karsiliksiz cek" in cek_struct
+        and any(x in cek_struct for x in ("belgelendirme", "elden odeme"))
+    ):
         tags.add("CEK_KARSILIKSIZ")
 
-    if any(x in full for x in ("cek duzeltme", "duzeltme hakki", "duzeltme ucreti")):
+    if (
+        "cek" in cek_struct
+        and any(x in cek_struct for x in (
+            "duzeltme hakki",
+            "duzeltme ucreti",
+        ))
+    ):
         tags.add("CEK_DUZELTME_HAKKI")
 
     # ---------------- SENET ----------------
-    if "senet" in full and "iade" in full:
+    # "Çekler ve Senetler" kategori başlığı yüzünden çek satırlarının senet
+    # olarak etiketlenmesini engelle. Öncelik MASRAF adıdır; MASRAF kısa ise
+    # yalnız açık "Senet Tahsil" kategorisi fallback olarak kullanılabilir.
+    if "senet" in mas and "iade" in mas:
         tags.add("SENET_IADE")
-    if "senet" in full and "protesto" in full and "kaldir" not in full:
+
+    protesto_name = (
+        "senet" in mas
+        and "protesto" in mas
+        and "protestosuz" not in mas
+        and "iskonto" not in mas
+        and "istira" not in mas
+    )
+    if protesto_name and "kaldir" not in mas:
         tags.add("SENET_PROTESTO")
-    if "senet" in full and "protesto" in full and "kaldir" in full:
+
+    if protesto_name and "kaldir" in mas:
         tags.add("SENET_PROTESTO_KALDIRMA")
-    if "senet" in short and any(x in short for x in ("tahsil", "tahsile alma")):
+
+    senet_tahsil_context = (
+        ("senet" in mas and any(x in mas for x in ("tahsil", "tahsile alma")))
+        or (
+            "senet tahsil" in cat
+            and "cek" not in mas
+            and any(x in mas for x in ("ayni sube", "diger sube", "tp/yp"))
+        )
+    )
+    if senet_tahsil_context:
         tags.add("SENET_TAHSIL")
 
     return tags
@@ -858,9 +990,18 @@ def _detail_match(row: FeeRow, detail: Optional[str]) -> bool:
     text = _norm(row.text)
 
     tests = {
-        "BUYUK": lambda: any(x in text for x in ("buyuk", "large")),
-        "ORTA": lambda: any(x in text for x in ("orta", "medium")),
-        "KUCUK": lambda: any(x in text for x in ("kucuk", "small")),
+        "BUYUK": lambda: (
+            any(x in text for x in ("buyuk", "large"))
+            and not any(x in text for x in ("ozel", "super", "extra buyuk", "xl"))
+        ),
+        "ORTA": lambda: (
+            any(x in text for x in ("orta", "medium"))
+            and not any(x in text for x in ("ozel", "super", "extra buyuk", "xl"))
+        ),
+        "KUCUK": lambda: (
+            any(x in text for x in ("kucuk", "small"))
+            and not any(x in text for x in ("ozel", "super", "extra buyuk", "xl"))
+        ),
         "OZEL": lambda: any(
             x in text
             for x in (
@@ -992,13 +1133,58 @@ def _candidate_score(row: FeeRow, spec: RowSpec, wanted_channel: str) -> int:
                 return -10_000
 
     # ---------------- DETAY ----------------
-    if not _detail_match(row, spec.detail):
+    # Çek tahsilatında "aynı şube çek ödeme" ile "bankanın kendi çekini
+    # tahsile alma" aynı işlem değildir. Yanlış rakam riskini azaltmak için
+    # çek tahsil detayları fail-closed / açık ürün adı ile eşleşir.
+    if spec.service == "CEK_TAHSIL":
+        structural = f"{cat} | {mas}"
+
+        if spec.detail == "AYNI":
+            same_bank = any(x in structural for x in (
+                "bankamiz ceki",
+                "bankamiza ait",
+                "tahsile alinan bankamiz ceki",
+                "ykb ceki",
+                "garanti bankasi ceki",
+                "kendi bankasi ceki",
+            ))
+            if not same_bank:
+                return -10_000
+
+        elif spec.detail == "DIGER":
+            other_bank = any(x in structural for x in (
+                "diger banka ceki",
+                "baska banka ceki",
+                "tahsile alinan diger banka ceki",
+                "yurtici banka ceki",
+            ))
+            if not other_bank:
+                return -10_000
+
+        elif spec.detail == "DOVIZ":
+            fx_cheque = any(x in structural for x in (
+                "yp cek tahsil",
+                "dovizli cek - tahsile alinan",
+                "tahsile alinan dovizli cek",
+                "tahsile alinan yp cekler",
+                "diger banka yp - tahsile alinan",
+                "yurt disi yabanci banka doviz ceki tahsile alinmasi",
+            ))
+            if not fx_cheque:
+                return -10_000
+
+        # Açık aynı/diğer/döviz tahsil ifadesi bulundu: yüksek güven.
+        score += 80
+        if "tahsile alinan" in structural or "tahsile alma" in structural:
+            score += 25
+        if "teminata alinan" in structural:
+            score -= 30
+
+    elif not _detail_match(row, spec.detail):
         generic_detail_fallback = False
 
-        # Bazı bankalar aynı/diğer banka ayrımı yapmadan tek bir genel
-        # çek veya senet tahsil tarifesi yayımlıyor. Böyle bir durumda
-        # boş bırakmak yerine aynı genel tarifeyi ilgili ortak satırda
-        # düşük öncelikli fallback olarak kullan.
+        # Senette bazı bankalar aynı/diğer ayrımı yapmadan tek genel tarife
+        # yayımlar. Yalnız senet tarafında düşük öncelikli fallback korunur.
         if spec.service == "SENET_TAHSIL":
             generic_detail_fallback = (
                 "senet tahsil" in full
@@ -1009,28 +1195,6 @@ def _candidate_score(row: FeeRow, spec: RowSpec, wanted_channel: str) -> int:
                         "diger sube",
                         "muhabir",
                         "baska banka",
-                    )
-                )
-            )
-
-        elif spec.service == "CEK_TAHSIL":
-            generic_detail_fallback = (
-                (
-                    "cek tahsil" in full
-                    or ("tahsile alinan" in full and "cek" in full)
-                )
-                and not any(
-                    x in full
-                    for x in (
-                        "ayni banka",
-                        "bankamiz ceki",
-                        "ykb ceki",
-                        "garanti bankasi",
-                        "diger banka",
-                        "baska banka",
-                        "yabanci banka",
-                        "dovizli cek",
-                        "dovizi natik",
                     )
                 )
             )
@@ -1052,9 +1216,9 @@ def _candidate_score(row: FeeRow, spec: RowSpec, wanted_channel: str) -> int:
             return -10_000
 
     # Hizmet MASRAF adında açıkça geçiyorsa açıklama fallback'ından üstündür.
-    if spec.service == "EFT" and "eft" in mas:
+    if spec.service == "EFT" and _has_word(mas, "eft"):
         score += 30
-    elif spec.service == "FAST" and "fast" in mas:
+    elif spec.service == "FAST" and _has_word(mas, "fast"):
         score += 35
     elif spec.service == "HAVALE" and "havale" in mas:
         score += 30
@@ -1095,7 +1259,7 @@ def _candidate_score(row: FeeRow, spec: RowSpec, wanted_channel: str) -> int:
         score += 45
     if spec.service == "PARA_YATIRMA" and "para yatirma" in full:
         score += 45
-    if spec.service == "DUZENLI_EFT" and "duzenli" in full and "eft" in full:
+    if spec.service == "DUZENLI_EFT" and "duzenli" in full and _has_word(full, "eft"):
         score += 55
     if spec.service == "DUZENLI_HAVALE" and "duzenli" in full and "havale" in full:
         score += 55
@@ -1131,9 +1295,24 @@ def _candidate_score(row: FeeRow, spec: RowSpec, wanted_channel: str) -> int:
         ):
             score += 65
 
+    if spec.service == "HESAP_OZETI":
+        if any(x in full for x in (
+            "posta ile", "basili ekstre", "basili hesap ozeti",
+            "ekstre gonderim", "hesap ozeti gonderimi",
+        )):
+            return -10_000
+        if any(x in mas for x in ("ekstre", "hesap ozeti")):
+            score += 25
+
+    if spec.service == "SENET_TAHSIL":
+        if any(x in mas for x in ("iskonto", "istira", "teminat")):
+            return -10_000
+        if "cek" in mas:
+            return -10_000
+
     if spec.service == "HESAP_OZETI_POSTA":
         if "kktc" in full:
-            score -= 20
+            score -= 40
 
         if any(
             x in full
@@ -1144,7 +1323,13 @@ def _candidate_score(row: FeeRow, spec: RowSpec, wanted_channel: str) -> int:
                 "hesap ozeti gonderimi",
             )
         ):
-            score += 35
+            score += 55
+
+    if spec.service == "BAKIYE_ATM_YURTDISI":
+        if "kktc" in full:
+            score -= 90
+        if any(x in full for x in ("turkiye kart", "turkiye bireysel", "t.c. kart")):
+            score += 70
 
     # Standart işlem ücretini özel varyantlardan öne al.
     if any(
@@ -1244,6 +1429,38 @@ def _candidate_score(row: FeeRow, spec: RowSpec, wanted_channel: str) -> int:
         if any(x in mas for x in ("tl/paket", "paket yukleme", "otomatik fatura odeme faizi")):
             return -10_000
 
+    if spec.service == "SENET_IADE":
+        if (
+            "senet" not in mas
+            or "iade" not in mas
+            or any(x in mas for x in ("iskonto", "istira", "teminat"))
+        ):
+            return -10_000
+        score += 70
+
+    if spec.service == "SENET_PROTESTO":
+        if (
+            "senet" not in mas
+            or "protesto" not in mas
+            or "protestosuz" in mas
+            or "kaldir" in mas
+            or any(x in mas for x in ("iskonto", "istira", "teminat"))
+        ):
+            return -10_000
+        score += 80
+
+    if spec.service == "SENET_PROTESTO_KALDIRMA":
+        if (
+            not ("senet" in mas and "protesto" in mas and "kaldir" in mas)
+            or any(x in mas for x in ("iskonto", "istira", "teminat"))
+        ):
+            return -10_000
+        score += 80
+
+    if spec.service == "HESAP_OZETI_POSTA":
+        if any(x in full for x in ("kredi kart", "ticari kart", "business kart")):
+            return -10_000
+
     if spec.service == "KASA":
         if "depozito" in full:
             score -= 80
@@ -1254,8 +1471,110 @@ def _candidate_score(row: FeeRow, spec: RowSpec, wanted_channel: str) -> int:
         if "yillik" in full:
             score += 45
 
+    # ---------------- YÜKSEK RİSKLİ HİZMETLER ----------------
+    # Bu grupta "yakın isim" yeterli değildir. Ürünün yapısal adında açık
+    # eşleşme yoksa rakam göstermek yerine kaynak boşluğu bırakılır.
+    structural = f"{cat} | {mas}"
+
+    if spec.service == "HGS_ETIKET":
+        if not ("hgs" in structural and "etiket" in structural and "kart" not in mas):
+            return -10_000
+        score += 120
+
+    if spec.service == "HGS_KART":
+        if not ("hgs" in structural and "kart" in structural and "etiket" not in mas):
+            return -10_000
+        score += 120
+
+    if spec.service == "CEK_DEFTERI_YAPRAK":
+        if not (
+            any(x in structural for x in ("cek defteri", "cek karnesi"))
+            and any(x in structural for x in (
+                "yaprak basi", "50-350 yaprakli", "351 yaprak",
+            ))
+        ):
+            return -10_000
+        if any(x in mas for x in ("10 yaprakli", "10'luk", "25 yaprakli", "25'lik")):
+            return -10_000
+        score += 110
+
+    if spec.service == "CEK_KARNESI_10":
+        if not (
+            any(x in structural for x in ("cek defteri", "cek karnesi"))
+            and any(x in structural for x in ("10 yaprakli", "10'luk", "10luk"))
+        ):
+            return -10_000
+        score += 110
+
+    if spec.service == "CEK_DUZENLEME_STANDART":
+        if not any(x in structural for x in (
+            "bloke cek duzenleme",
+            "bloke/ keside ceki duzenleme",
+            "bloke/keside ceki duzenleme",
+            "keside ceki / bloke cek duzenleme",
+            "duzenleme - tp/yp",
+        )):
+            return -10_000
+        if any(x in structural for x in (
+            "hediye", "armagan", "seyahat", "doviz", "dovizi natik",
+            "dth", "karsilikli", "odeme", "durdurma",
+        )):
+            return -10_000
+        score += 120
+
+    if spec.service == "CEK_DUZENLEME_DOVIZ":
+        if not any(x in structural for x in (
+            "dovizli cek duzenleme",
+            "dovizi natik cek duzenleme",
+            "dth'dan cek duzenlenmesi",
+            "dth dan cek duzenlenmesi",
+        )):
+            return -10_000
+        if any(x in structural for x in ("odeme", "durdurma", "tahsil")):
+            return -10_000
+        score += 120
+
+    if spec.service == "CEK_IADE":
+        if not (
+            "cek" in structural
+            and any(x in structural for x in (
+                "muamelesiz iade",
+                "islemsiz iade",
+                "cek iade ucreti",
+            ))
+        ):
+            return -10_000
+        score += 110
+
+    if spec.service == "CEK_KARSILIKSIZ":
+        if not (
+            "karsiliksiz cek" in structural
+            and any(x in structural for x in ("belgelendirme", "elden odeme"))
+        ):
+            return -10_000
+        score += 100
+
+    if spec.service == "CEK_DUZELTME_HAKKI":
+        if not (
+            "cek" in structural
+            and any(x in structural for x in ("duzeltme hakki", "duzeltme ucreti"))
+        ):
+            return -10_000
+        score += 100
+
     return score
 
+
+
+_AMBIGUITY_LOGGED: Set[Tuple[str, str, str, str]] = set()
+
+
+def _row_fee_signature(row: FeeRow) -> Tuple[str, str, str, str]:
+    """Adayların gerçekten aynı tarifeyi taşıyıp taşımadığını karşılaştırır."""
+    return tuple(
+        _clean(getattr(row, attr, ""))
+        for attr in ("asgari_tutar", "asgari_oran", "azami_tutar", "azami_oran")
+    )
 
 
 def _best_match(
@@ -1264,7 +1583,15 @@ def _best_match(
     spec: RowSpec,
     wanted_channel: str,
 ) -> Optional[FeeRow]:
-    candidates = []
+    """
+    En iyi adayı seçer; belirsiz durumda FAIL-CLOSED davranır.
+
+    Önceki sürüm her zaman en yüksek puanlı ilk satırı seçiyordu. İki farklı
+    tarife birbirine çok yakın puan alırsa bu yaklaşım yanlış rakam
+    üretebiliyordu. Artık yakın puanlı ve farklı ücretli aday varsa hiçbirini
+    seçmiyoruz; hücre "Kontrol gerekli" / kaynak boşluğu olarak kalıyor.
+    """
+    candidates: List[Tuple[int, FeeRow]] = []
 
     for row in rows:
         if row.banka != bank:
@@ -1287,7 +1614,61 @@ def _best_match(
         reverse=True,
     )
 
-    return candidates[0][1]
+    best_score, best = candidates[0]
+
+    # Çok düşük güvenli eşleşmeyi yayımlama.
+    min_score = 150
+    exact_high_risk = {
+        "HGS_ETIKET", "HGS_KART",
+        "CEK_DEFTERI_YAPRAK", "CEK_KARNESI_10",
+        "CEK_DUZENLEME_STANDART", "CEK_DUZENLEME_DOVIZ",
+        "CEK_IADE", "CEK_TAHSIL", "CEK_KARSILIKSIZ",
+        "CEK_DUZELTME_HAKKI",
+    }
+    transfer_high_risk = {
+        "SWIFT_GELEN", "SWIFT_GIDEN",
+        "YURT_DISI_FAST", "KART_YURTDISI_TRANSFER",
+    }
+    high_risk = exact_high_risk | transfer_high_risk
+    if spec.service in exact_high_risk:
+        min_score = 170
+    elif spec.service in transfer_high_risk:
+        min_score = 185
+
+    if best_score < min_score:
+        return None
+
+    best_fee = _row_fee_signature(best)
+
+    # Aynı puanlı farklı ücret: kesin belirsizlik.
+    conflicting_same_score = [
+        row for score, row in candidates[1:]
+        if score == best_score and _row_fee_signature(row) != best_fee
+    ]
+
+    # Yüksek riskli hizmetlerde puanı çok yakın farklı ücret de belirsizliktir.
+    close_margin = 12 if spec.service in high_risk else 6
+    conflicting_close = [
+        row for score, row in candidates[1:]
+        if best_score - score <= close_margin
+        and _row_fee_signature(row) != best_fee
+    ]
+
+    if conflicting_same_score or conflicting_close:
+        key = (bank, spec.service, spec.label, wanted_channel)
+        if key not in _AMBIGUITY_LOGGED:
+            _AMBIGUITY_LOGGED.add(key)
+            conflict = (conflicting_same_score or conflicting_close)[0]
+            print(
+                "[comparison][AMBIGUOUS] "
+                f"{spec.service} | {spec.label} | {bank} | {wanted_channel}: "
+                f"'{best.masraf}' ({best_score}) ile "
+                f"'{conflict.masraf}' arasında güvenli seçim yapılamadı. "
+                "Yanlış tutar yazmak yerine hücre boşluğu bırakıldı."
+            )
+        return None
+
+    return best
 
 
 # ---------------------------------------------------------------------------
@@ -1885,7 +2266,7 @@ def _aggregate_service_fee(
     """SWIFT / uluslararası / altın gibi çok satırlı tarifeleri tek hücrede özetler."""
     aggregate_services = {
         "SWIFT_GELEN", "SWIFT_GIDEN", "YURT_DISI_FAST",
-        "KART_YURTDISI_TRANSFER", "ALTIN_TRANSFER", "CEK_IADE",
+        "KART_YURTDISI_TRANSFER", "ALTIN_TRANSFER",
     }
     if spec.service not in aggregate_services:
         return None
@@ -2077,9 +2458,134 @@ def _cell_comment(row: Optional[FeeRow], resolution: str, value: str) -> Optiona
 
 
 def _source_gap_text(spec: RowSpec, bank: str, wanted_channel: str) -> str:
-    # Bu ifade "hizmet yok" anlamına gelmez. Yalnız tarife kaynaklarında
-    # karşılaştırılabilir ücret bulunamadığını açıkça söyler.
-    return "Ayrı karşılaştırılabilir\ntarife doğrulanamadı"
+    # "Kontrol gerekli" = hizmet yok / ücretsiz demek değildir.
+    # Yalnız güvenli bir karşılaştırılabilir tarife seçilemediğini gösterir.
+    return "Kontrol gerekli"
+
+
+def _assert_safe_source(row: Optional[FeeRow], spec: RowSpec) -> None:
+    """
+    Son güvenlik ağı.
+
+    Eşleştirme kurallarında ileride yapılacak bir değişiklik yanlış ürünü
+    seçerse final Excel yayınlanmadan pipeline'ı durdurur.
+    """
+    if row is None:
+        return
+
+    structural = _norm(f"{row.kategori} | {row.masraf}")
+    mas = _norm(row.masraf)
+
+    if spec.service == "HGS_ETIKET":
+        if not ("hgs" in structural and "etiket" in structural and "kart" not in mas):
+            raise RuntimeError(
+                f"Güvenlik: HGS Etiket için yanlış kaynak seçildi: {row.masraf}"
+            )
+
+    elif spec.service == "HGS_KART":
+        if not ("hgs" in structural and "kart" in structural and "etiket" not in mas):
+            raise RuntimeError(
+                f"Güvenlik: HGS Kart için yanlış kaynak seçildi: {row.masraf}"
+            )
+
+    elif spec.service == "CEK_DEFTERI_YAPRAK":
+        if not (
+            any(x in structural for x in ("cek defteri", "cek karnesi"))
+            and any(x in structural for x in ("yaprak basi", "50-350 yaprakli", "351 yaprak"))
+        ):
+            raise RuntimeError(
+                f"Güvenlik: Çek defteri yaprak-başı için yanlış kaynak: {row.masraf}"
+            )
+
+    elif spec.service == "CEK_KARNESI_10":
+        if not (
+            any(x in structural for x in ("cek defteri", "cek karnesi"))
+            and any(x in structural for x in ("10 yaprakli", "10'luk", "10luk"))
+        ):
+            raise RuntimeError(
+                f"Güvenlik: 10 yapraklı çek karnesi için yanlış kaynak: {row.masraf}"
+            )
+
+    elif spec.service == "CEK_DUZENLEME_STANDART":
+        forbidden = (
+            "hediye", "armagan", "seyahat", "doviz", "dovizi natik",
+            "dth", "karsilikli", "odeme", "durdurma",
+        )
+        if (
+            not any(x in structural for x in (
+                "bloke cek duzenleme",
+                "bloke/ keside ceki duzenleme",
+                "bloke/keside ceki duzenleme",
+                "keside ceki / bloke cek duzenleme",
+                "duzenleme - tp/yp",
+            ))
+            or any(x in structural for x in forbidden)
+        ):
+            raise RuntimeError(
+                f"Güvenlik: Standart çek düzenleme için yanlış kaynak: {row.masraf}"
+            )
+
+    elif spec.service == "CEK_DUZENLEME_DOVIZ":
+        if not any(x in structural for x in (
+            "dovizli cek duzenleme",
+            "dovizi natik cek duzenleme",
+            "dth'dan cek duzenlenmesi",
+            "dth dan cek duzenlenmesi",
+        )):
+            raise RuntimeError(
+                f"Güvenlik: Dövizli çek düzenleme için yanlış kaynak: {row.masraf}"
+            )
+
+    elif spec.service == "CEK_TAHSIL":
+        if any(x in structural for x in (
+            "gişeden cek odeme", "giseden cek odeme", "bloke cek odeme",
+            "karsiliksiz cek elden odeme", "seyahat ceki odeme",
+        )):
+            raise RuntimeError(
+                f"Güvenlik: Çek tahsilatına çek ödeme satırı karıştı: {row.masraf}"
+            )
+
+    elif spec.service == "SENET_IADE":
+        if (
+            "senet" not in mas
+            or "iade" not in mas
+            or any(x in mas for x in ("iskonto", "istira", "teminat"))
+        ):
+            raise RuntimeError(
+                f"Güvenlik: Senet iade için yanlış kaynak seçildi: {row.masraf}"
+            )
+
+    elif spec.service == "SENET_PROTESTO":
+        if (
+            "senet" not in mas
+            or "protesto" not in mas
+            or "protestosuz" in mas
+            or "kaldir" in mas
+            or any(x in mas for x in ("iskonto", "istira", "teminat"))
+        ):
+            raise RuntimeError(
+                f"Güvenlik: Senet protesto için yanlış kaynak seçildi: {row.masraf}"
+            )
+
+    elif spec.service == "SENET_PROTESTO_KALDIRMA":
+        if not ("senet" in mas and "protesto" in mas and "kaldir" in mas):
+            raise RuntimeError(
+                f"Güvenlik: Senet protesto kaldırma için yanlış kaynak: {row.masraf}"
+            )
+
+    elif spec.service == "HESAP_OZETI_POSTA":
+        if any(x in structural for x in ("kredi kart", "ticari kart", "business kart")):
+            raise RuntimeError(
+                f"Güvenlik: Hesap özeti posta satırına kart ekstresi karıştı: {row.masraf}"
+            )
+
+    elif spec.service in {
+        "SWIFT_GELEN", "SWIFT_GIDEN", "YURT_DISI_FAST", "KART_YURTDISI_TRANSFER"
+    }:
+        if any(x in mas for x in ("paket", "kobi", "kota")):
+            raise RuntimeError(
+                f"Güvenlik: Tekil transfer tarifesine paket/kota karıştı: {row.masraf}"
+            )
 
 
 def _resolve_cell(
@@ -2108,6 +2614,7 @@ def _resolve_cell(
     aggregated = _aggregate_service_fee(rows, bank, spec, wanted_channel)
     if aggregated is not None:
         value, agg_row = aggregated
+        _assert_safe_source(agg_row, spec)
         return value, agg_row, "NUMERIC"
 
     row = _best_match(rows, bank, spec, lookup_channel)
@@ -2119,6 +2626,7 @@ def _resolve_cell(
     # Status satırı sayısal ücretin önüne geçmesin; NOT_APPLICABLE yukarıda
     # zaten özel olarak ele alındı.
     if row is not None and _has_numeric_fee(row):
+        _assert_safe_source(row, spec)
         value = _fee_text(row, spec)
         if spec.service == "KASA":
             annual_tax = _bsmv_label(row)
@@ -2334,6 +2842,11 @@ def _print_transfer_audit(rows: Sequence[FeeRow]) -> None:
             "EFT", "HAVALE", "FAST", "SWIFT_GELEN", "SWIFT_GIDEN",
             "YURT_DISI_FAST", "KART_YURTDISI_TRANSFER", "DUZENLI_EFT",
             "DUZENLI_HAVALE", "ALTIN_TRANSFER",
+            "HGS_ETIKET", "HGS_KART", "VERGI",
+            "CEK_DEFTERI_YAPRAK", "CEK_KARNESI_10",
+            "CEK_DUZENLEME_STANDART", "CEK_DUZENLEME_DOVIZ",
+            "CEK_IADE", "CEK_TAHSIL", "CEK_KARSILIKSIZ",
+            "CEK_DUZELTME_HAKKI",
         }
     ]
 
@@ -2526,7 +3039,8 @@ def update_comparison_sheet(excel_path: str = "komisyonlar_guncel.xlsx") -> Dict
         f"sayısal={resolution_counts.get('NUMERIC', 0)} | "
         f"genel_tarife={resolution_counts.get('GENERIC_TARIFF', 0)} | "
         f"resmî_durum={status_like} | "
-        f"kaynak_boşluğu={source_gaps} | N/A={true_na}"
+        f"kaynak_boşluğu={source_gaps} | "
+        f"belirsiz_eşleşme={len(_AMBIGUITY_LOGGED)} | N/A={true_na}"
     )
 
 
@@ -2538,6 +3052,7 @@ def update_comparison_sheet(excel_path: str = "komisyonlar_guncel.xlsx") -> Dict
         "numeric_cells": numeric_like,
         "status_cells": status_like,
         "source_gap_cells": source_gaps,
+        "ambiguous_cells": len(_AMBIGUITY_LOGGED),
         "missing_cells": true_na,
         "possible_cells": possible_cells,
     }
