@@ -55,9 +55,9 @@ from update_excel import (
 )
 
 
-MAIN_VERSION = "2026-08-21-v12-clean-supplemental-display"
+MAIN_VERSION = "2026-08-21-v13-fail-closed-comparison"
 EXPECTED_SUPPLEMENTAL_VERSION = "2026-08-21-v9-primary-fee-backfill"
-EXPECTED_COMPARISON_VERSION = "2026-08-21-v16-transfer-semantic-channel-fix"
+EXPECTED_COMPARISON_VERSION = "2026-08-21-v18-fail-closed-precision-audit"
 EXPECTED_EXCEL_WRITER_VERSION = "2026-08-21-v2-clean-supplemental-display"
 
 BANKA_SIRASI = [
@@ -199,6 +199,7 @@ def _verify_comparison_file(path: Path, comparison: dict) -> None:
     possible = int(comparison.get("possible_cells", 0) or 0)
     missing = int(comparison.get("missing_cells", 0) or 0)
     source_gaps = int(comparison.get("source_gap_cells", 0) or 0)
+    ambiguous = int(comparison.get("ambiguous_cells", 0) or 0)
 
     if rows < 40 or possible < 200:
         raise RuntimeError(
@@ -216,7 +217,7 @@ def _verify_comparison_file(path: Path, comparison: dict) -> None:
     print(
         f"[main] KARŞILAŞTIRMA doğrulandı: sheet var | "
         f"satır={rows} | mantıksal_hücre={possible} | "
-        f"kaynak_boşluğu={source_gaps} | N/A={missing}"
+        f"kaynak_boşluğu={source_gaps} | belirsiz={ambiguous} | N/A={missing}"
     )
 
 
@@ -344,6 +345,7 @@ def main() -> int:
         f"doğrulanmış {comparison.get('matched_cells', '?')}/"
         f"{comparison.get('possible_cells', '?')} | "
         f"kaynak boşluğu {comparison.get('source_gap_cells', '?')} | "
+        f"belirsiz {comparison.get('ambiguous_cells', '?')} | "
         f"N/A {comparison.get('missing_cells', '?')} | "
         f"not korundu {comparison['notes_preserved']}"
     )
