@@ -36,9 +36,9 @@ from update_comparison import (
 from update_excel import EXCEL_DOSYA_ADI, excel_guncelle_coklu
 
 
-MAIN_VERSION = "2026-08-20-v7-source-audited-final"
-EXPECTED_SUPPLEMENTAL_VERSION = "2026-08-20-v6-official-channel-and-limit-audit"
-EXPECTED_COMPARISON_VERSION = "2026-08-20-v14-source-audited-logical-cells"
+MAIN_VERSION = "2026-08-20-v8-precision-first-final"
+EXPECTED_SUPPLEMENTAL_VERSION = "2026-08-20-v7-precision-source-audit"
+EXPECTED_COMPARISON_VERSION = "2026-08-20-v15-precision-first-matching"
 
 BANKA_SIRASI = [
     ("GARANTİ",   "scraper",            "scrape_garanti_bbva"),
