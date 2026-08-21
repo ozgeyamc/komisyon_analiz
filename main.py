@@ -28,31 +28,31 @@ from supplemental_sources import (
     enrich_all,
     print_supplemental_report,
 )
-import update_comparison as comparison_mod
+import update_comparison as _comparison_module
 
-# Eski/yanlış bir update_comparison.py dosyası varsa import aşamasında
-# patlamak yerine aşağıdaki sürüm kontrolünde anlaşılır FATAL mesajı üret.
+# Eski/mixed update_comparison.py yanlışlıkla repoda kalırsa Python import
+# aşamasında patlamak yerine aşağıdaki sürüm kontrolü anlaşılır hata verir.
 COMPARISON_SHEET = getattr(
-    comparison_mod,
+    _comparison_module,
     "COMPARISON_SHEET",
     "KARŞILAŞTIRMA",
 )
 COMPARISON_VERSION = getattr(
-    comparison_mod,
+    _comparison_module,
     "COMPARISON_VERSION",
-    "__MISSING_COMPARISON_VERSION__",
+    "SÜRÜM_BİLGİSİ_YOK",
 )
 update_comparison_sheet = getattr(
-    comparison_mod,
+    _comparison_module,
     "update_comparison_sheet",
     None,
 )
 from update_excel import EXCEL_DOSYA_ADI, excel_guncelle_coklu
 
 
-MAIN_VERSION = "2026-08-21-v8.1-import-compat-final"
-EXPECTED_SUPPLEMENTAL_VERSION = "2026-08-20-v7-precision-source-audit"
-EXPECTED_COMPARISON_VERSION = "2026-08-20-v15-precision-first-matching"
+MAIN_VERSION = "2026-08-21-v9-resilient-final"
+EXPECTED_SUPPLEMENTAL_VERSION = "2026-08-21-v8-resilient-official-sources"
+EXPECTED_COMPARISON_VERSION = "2026-08-21-v16-precision-first-stable"
 
 BANKA_SIRASI = [
     ("GARANTİ",   "scraper",            "scrape_garanti_bbva"),
@@ -101,17 +101,12 @@ def _component_versions_ok() -> bool:
             f"Beklenen={EXPECTED_COMPARISON_VERSION} | Gelen={COMPARISON_VERSION}",
             file=sys.stderr,
         )
-        print(
-            f"[FATAL] Yüklenen comparison modülü: "
-            f"{getattr(comparison_mod, '__file__', 'bilinmiyor')}",
-            file=sys.stderr,
-        )
         ok = False
 
-    if update_comparison_sheet is None:
+    if not callable(update_comparison_sheet):
         print(
-            "[FATAL] update_comparison.py içinde "
-            "update_comparison_sheet() fonksiyonu yok.",
+            "[FATAL] update_comparison.py içinde update_comparison_sheet() "
+            "fonksiyonu bulunamadı.",
             file=sys.stderr,
         )
         ok = False
