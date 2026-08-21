@@ -38,9 +38,9 @@ from openpyxl.comments import Comment
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
 
-COMPARISON_VERSION = "2026-08-21-v18-fail-closed-precision-audit"
+COMPARISON_VERSION = "2026-08-21-v19-canonical-international-transfer"
 COMPARISON_SHEET = "KARŞILAŞTIRMA"
-PREVIEW_LAYOUT_SIGNATURE = "4BANKS|A:I|J:L_EMPTY|M_NOTES|FAIL_CLOSED_V18|HGS_SPLIT|CHEQUE_UNIT_SAFE"
+PREVIEW_LAYOUT_SIGNATURE = "4BANKS|A:I|J:L_EMPTY|M_NOTES|FAIL_CLOSED_V19|HGS_SPLIT|CHEQUE_UNIT_SAFE|CANONICAL_INTL_TRANSFER"
 
 STATUS_AVAILABLE = "[SUPPLEMENTAL][AVAILABLE_NO_SEPARATE_FEE]"
 STATUS_EMPTY = "[SUPPLEMENTAL][PUBLISHED_EMPTY]"
@@ -531,12 +531,10 @@ def _service_tags(row: FeeRow) -> Set[str]:
             "akbank fast uluslararasi",
         ))
         or ("global fast" in full and not is_global_fast_card)
-        # Garanti bu ürünü VISA altyapısıyla sunsa da resmî ürün sayfasında
-        # hesaptan hesaba yurt dışı transfer olarak tanımlıyor.
-        or any(x in full for x in (
-            "visa ile yurt disi para transferi",
-            "visa ile yurtdisi para transferi",
-        ))
+        # Visa ile Yurt Dışı Para Transferi ayrı bir ürün ailesidir.
+        # "Hızlı hesaba transfer" satırında yalnız bankaların FAST/Global FAST
+        # benzeri kanonik ürünleri karşılaştırılır; aksi halde aynı hücreye iki
+        # farklı ürün tarifesi yığılabiliyor.
     )
     if is_fast_account:
         tags.add("YURT_DISI_FAST")
@@ -546,13 +544,19 @@ def _service_tags(row: FeeRow) -> Set[str]:
         (
             "moneysend" in full
             and "alici" not in full
-            and any(x in full for x in (
-                "gonderici",
-                "yurtdisi banka kartina",
-                "yurt disi banka kartina",
-                "yurtdisi kart",
-                "yurt disi kart",
-            ))
+            and (
+                any(x in full for x in (
+                    "gonderici",
+                    "yurtdisi banka kartina",
+                    "yurt disi banka kartina",
+                    "yurtdisi kart",
+                    "yurt disi kart",
+                ))
+                # İş Bankası ücret tablosunda Bankamatik Kartından satırları
+                # kategori altında "Moneysend" diye yayınlanır; MASRAF adında
+                # "yurtdışı" kelimesi her zaman tekrar edilmez.
+                or "bankamatik kartindan" in full
+            )
         )
         # Yapı Kredi aynı işi Global Fast - Karta adıyla yayımlıyor.
         or is_global_fast_card
@@ -2260,133 +2264,545 @@ def _card_transfer_description_fee(row: FeeRow) -> str:
     return "\n".join(lines)
 
 
-def _aggregate_service_fee(
-    rows: Sequence[FeeRow], bank: str, spec: RowSpec, wanted_channel: str,
-) -> Optional[Tuple[str, FeeRow]]:
-    """SWIFT / uluslararası / altın gibi çok satırlı tarifeleri tek hücrede özetler."""
-    aggregate_services = {
-        "SWIFT_GELEN", "SWIFT_GIDEN", "YURT_DISI_FAST",
-        "KART_YURTDISI_TRANSFER", "ALTIN_TRANSFER",
-    }
-    if spec.service not in aggregate_services:
-        return None
+def _transfer_band(row: FeeRow) -> Optional[Band]:
+    """Uluslararası transfer satırının işlem tutarı bandını çıkarır."""
+    return _parse_band(f"{row.masraf} | {row.aciklama}")
 
+
+def _transfer_band_label(row: FeeRow) -> str:
+    """0–12.000 TRY / 12.000 TRY+ gibi kısa ve okunabilir bant etiketi."""
+    band = _transfer_band(row)
+    if band is None:
+        return ""
+
+    def fmt(value: Optional[float]) -> str:
+        if value is None:
+            return ""
+        return _display_amount(f"{value} TRY")
+
+    low = band.low
+    high = band.high
+
+    if low is not None and low <= 1.0 and high is not None:
+        return f"0–{fmt(high)}"
+    if low is not None and high is not None:
+        return f"{fmt(low)}–{fmt(high)}"
+    if low is not None and high is None:
+        return f"{fmt(low)}+"
+    if low is None and high is not None:
+        return f"≤{fmt(high)}"
+    return ""
+
+
+def _canonical_transfer_candidate(
+    row: FeeRow,
+    bank: str,
+    spec: RowSpec,
+    wanted_channel: str,
+) -> bool:
+    """
+    Yurt dışı transferlerde yalnız gerçekten aynı ürünü karşılaştır.
+
+    Bu kurallar bilinçli olarak banka bazında dar tutulur. Amaç hücreyi
+    doldurmak değil, İsme/Kasaya, araştırma/iade, farklı valör, kart/hesap,
+    paket/toplu ödeme gibi başka ürünleri yanlışlıkla aynı hücreye sokmamaktır.
+    """
+    mas = _norm(row.masraf)
+    cat = _norm(row.kategori)
+    full = _norm(row.text)
+
+    if any(x in mas for x in ("paket", "kobi", "kota")):
+        return False
+    if "ek kaynak - akbank ticari" in cat:
+        return False
+
+    if spec.service == "SWIFT_GELEN":
+        # Araştırma/iade ve özel banka/isme-kasaya varyantları standart
+        # "hesaba gelen" karşılaştırmasına dahil edilmez.
+        if any(x in mas for x in (
+            "arastirma", "iade", "isme", "kasaya",
+            "garanti bbva international", "gb international",
+            "isbank ag",
+        )):
+            return False
+
+        if bank == "GARANTİ":
+            return (
+                "diger bankadan gelen doviz havale" in mas
+                or "diger bankadan gelen doviz havalesi" in mas
+            )
+
+        if bank == "İŞBANKASI":
+            return (
+                "diger bankadan gelen doviz havalesi - odeme" in mas
+                or "diger bankadan gelen doviz havale - odeme" in mas
+            )
+
+        if bank == "AKBANK":
+            return (
+                "gelen doviz havalesi - hesaba" in mas
+                or "gelen doviz havale - hesaba" in mas
+            )
+
+        if bank == "YAPIKREDI":
+            return (
+                "gelen doviz havale" in mas
+                and "arastirma" not in mas
+                and "iade" not in mas
+            )
+
+        return False
+
+    if spec.service == "SWIFT_GIDEN":
+        if any(x in full for x in (
+            "gelen swift",
+            "gelen doviz",
+            "yurtdisindan",
+            "yurt disindan",
+            "arastirma/iade",
+            "arastirma / iade",
+            "nydo toplu",
+            "toplu odeme",
+        )):
+            return False
+
+        if bank == "GARANTİ":
+            if "diger bankaya giden doviz havale" not in mas:
+                return False
+            if wanted_channel == "MOBIL":
+                return "mobil/internet" in mas or "mobil / internet" in mas
+            if wanted_channel == "SUBE":
+                return "sube" in mas
+            return False
+
+        if bank == "İŞBANKASI":
+            if mas != "hesaptan giden swift":
+                return False
+            # Kanal İş Bankası'nda kategori başlığında taşınıyor.
+            if wanted_channel == "MOBIL":
+                return any(x in cat for x in ("internet/iscep", "internet / iscep"))
+            if wanted_channel == "SUBE":
+                return "sube kanali" in cat
+            return False
+
+        if bank == "AKBANK":
+            if wanted_channel == "MOBIL":
+                # Mobil ve İnternet aynı tarifeyi iki ayrı satırla yayınlıyor.
+                # Tek bir kanonik kaynak olarak Mobil satırını kullan.
+                return (
+                    "akbank mobil baska bankaya doviz transferi" in mas
+                    and "internet" not in mas
+                )
+            if wanted_channel == "SUBE":
+                # Kanal yazmayan "Giden - 30.000..." satırı bankanın standart
+                # şube/genel tarifesidir. Mobil/İnternet satırlarını alma.
+                return (
+                    "swift - giden -" in mas
+                    and "akbank mobil" not in mas
+                    and "akbank internet" not in mas
+                )
+            return False
+
+        if bank == "YAPIKREDI":
+            if "doviz havale gonderimi" not in mas:
+                return False
+            # Aynı Gün / İleri Gün valörleri ayrı ürün varyantıdır.
+            # Bankalar arası karşılaştırmada standart "1 Gün Valörlü" seçilir.
+            if "1 gun valorlu" not in mas:
+                return False
+            if "ayni gun" in mas or "ileri gun" in mas:
+                return False
+            if wanted_channel == "MOBIL":
+                return any(x in mas for x in (
+                    "internet / mobil / telefon",
+                    "internet/mobil/telefon",
+                ))
+            if wanted_channel == "SUBE":
+                return "subeden" in mas
+            return False
+
+        return False
+
+    if spec.service == "YURT_DISI_FAST":
+        # Aynı hücreye Visa transferi, Western Union vb. eklenmez.
+        if any(x in full for x in (
+            "moneysend",
+            "western union",
+            "karta para gonder",
+            "visa ile yurt disi para transferi",
+            "visa ile yurtdisi para transferi",
+        )):
+            return False
+
+        if bank == "GARANTİ":
+            return "yurt disi fast" in mas or "yurtdisi fast" in mas
+
+        if bank == "İŞBANKASI":
+            # Güncel ücret tablosunda diğer üç bankadaki FAST/Global FAST
+            # hesaba gönderimle birebir karşılaştırılabilir ayrı bir ürün yok.
+            return False
+
+        if bank == "AKBANK":
+            return (
+                "akbank fast uluslararasi" in full
+                and "turkiye disina para gonderim" in full
+            )
+
+        if bank == "YAPIKREDI":
+            return (
+                "global fast" in full
+                and "hesaba para gonderim" in full
+                and "karta" not in full
+            )
+
+        return False
+
+    if spec.service == "KART_YURTDISI_TRANSFER":
+        if "alici" in full or "kktc" in full:
+            return False
+
+        if bank == "GARANTİ":
+            return "moneysend" in full and "gonderici" in full
+
+        if bank == "İŞBANKASI":
+            # Aynı ücret kredi kartı/ön ödemeli/banka kartı varyantlarında
+            # tekrarlanabiliyor. Karşılaştırma için debit kart (Bankamatik)
+            # + Türkiye Kartları + TL tarifesi kanonik kaynak seçilir.
+            return (
+                "moneysend" in full
+                and "bankamatik kartindan" in mas
+                and "turkiye kartlari" in mas
+                and " tl" in mas
+            )
+
+        if bank == "AKBANK":
+            return False
+
+        if bank == "YAPIKREDI":
+            return (
+                "global fast" in full
+                and "karta para gonderim" in full
+            )
+
+        return False
+
+    return True
+
+
+def _canonical_transfer_rows(
+    rows: Sequence[FeeRow],
+    bank: str,
+    spec: RowSpec,
+    wanted_channel: str,
+) -> List[Tuple[int, FeeRow]]:
+    """Kanonik transfer adaylarını puanlayıp tekrarsız sırala."""
     lookup_channel = wanted_channel if spec.split_channel else "GENEL"
-    candidates = []
+    candidates: List[Tuple[int, FeeRow]] = []
+
     for row in rows:
         if row.banka != bank:
             continue
+
         score = _candidate_score(row, spec, lookup_channel)
         special_card_fee = (
             _card_transfer_description_fee(row)
             if spec.service == "KART_YURTDISI_TRANSFER"
             else ""
         )
-        if score <= -10_000 or (not _has_numeric_fee(row) and not special_card_fee):
+
+        if score <= -10_000:
+            continue
+        if not _has_numeric_fee(row) and not special_card_fee:
+            continue
+        if not _canonical_transfer_candidate(row, bank, spec, wanted_channel):
+            continue
+
+        candidates.append((score, row))
+
+    # Aynı bant + aynı ücret farklı bir satırda tekrar yayınlanmışsa tekilleştir.
+    unique: Dict[Tuple[str, Tuple[str, str, str, str]], Tuple[int, FeeRow]] = {}
+
+    for score, row in candidates:
+        band_label = _transfer_band_label(row)
+        fee_signature = _row_fee_signature(row)
+        key = (_norm(band_label), fee_signature)
+
+        existing = unique.get(key)
+        if existing is None or score > existing[0]:
+            unique[key] = (score, row)
+
+    result = list(unique.values())
+
+    def sort_key(item: Tuple[int, FeeRow]):
+        score, row = item
+        band = _transfer_band(row)
+        low = band.low if band and band.low is not None else -1.0
+        high = band.high if band and band.high is not None else float("inf")
+        return (low, high, -score, _norm(row.masraf))
+
+    result.sort(key=sort_key)
+    return result
+
+
+def _common_tax_label(rows: Sequence[FeeRow]) -> str:
+    labels = [_bsmv_label(row) for row in rows]
+    nonempty = [x for x in labels if x]
+    if not nonempty:
+        return ""
+    normalized = {_norm(x) for x in nonempty}
+    if len(normalized) == 1 and len(nonempty) == len(rows):
+        return nonempty[0]
+    return ""
+
+
+def _fixed_transfer_surcharge(row: FeeRow) -> str:
+    """
+    Bazı hızlı yurt dışı transfer tarifelerinde yüzde/min-max ücretine ek
+    sabit komisyon açıklama alanında yayınlanır (Akbank/Yapı Kredi örneği).
+    Bu ek tutarı kaybetmeden hücre özetine taşır.
+    """
+    text = _norm(row.aciklama)
+
+    patterns = (
+        r"sabit komisyon\s*([0-9][0-9.,]*)\s*tl",
+        r"islem ucreti\s*([0-9][0-9.,]*)\s*tl\s*ek",
+        r"([0-9][0-9.,]*)\s*tl\s*ek olarak tahsil",
+    )
+
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.I)
+        if match:
+            return _display_amount(f"{match.group(1)} TRY")
+
+    return ""
+
+
+def _compact_transfer_blocks(
+    rows: Sequence[FeeRow],
+    spec: RowSpec,
+) -> str:
+    """
+    Aynı kanonik ürünün gerçek tutar bantlarını kompakt göster.
+
+    1-3 bant: bantlar ayrı satır.
+    4+ bant: alt kapalı bantlar tek aralık özeti + açık uçlu son bant.
+    Böylece veri türleri karışmaz ve hücre gereksiz yere 5-6 satır olmaz.
+    """
+    if not rows:
+        return ""
+
+    # Garanti MoneySend ücretleri numeric kolonlarda değil açıklamada üç banttır.
+    if spec.service == "KART_YURTDISI_TRANSFER" and len(rows) == 1:
+        special = _card_transfer_description_fee(rows[0])
+        if special:
+            return special
+
+    common_tax = _common_tax_label(rows)
+
+    # 4+ gerçek tutar bandını daha kompakt özetle.
+    bands = [(_transfer_band(row), row) for row in rows]
+    if len(rows) >= 4 and all(band is not None for band, _ in bands):
+        open_ended = [
+            (band, row)
+            for band, row in bands
+            if band is not None and band.high is None
+        ]
+        closed = [
+            (band, row)
+            for band, row in bands
+            if band is not None and band.high is not None
+        ]
+
+        if len(open_ended) == 1 and len(closed) >= 2:
+            closed.sort(key=lambda item: item[0].low or 0.0)
+            last_band, last_row = open_ended[0]
+
+            amount_values: List[float] = []
+            for _, row in closed:
+                for raw in (row.asgari_tutar, row.azami_tutar):
+                    value = _parse_number(raw)
+                    if value is not None:
+                        amount_values.append(value)
+
+            lines: List[str] = []
+
+            if amount_values:
+                min_fee = _display_amount(f"{min(amount_values)} TRY")
+                max_fee = _display_amount(f"{max(amount_values)} TRY")
+                upper = max(
+                    band.high for band, _ in closed
+                    if band.high is not None
+                )
+                upper_text = _display_amount(f"{upper} TRY")
+                fee_span = (
+                    min_fee
+                    if _norm(min_fee) == _norm(max_fee)
+                    else f"{min_fee}–{max_fee}"
+                )
+                lines.append(
+                    f"0–{upper_text}: {fee_span} "
+                    f"({len(closed)} kademe)"
+                )
+
+            last_label = _transfer_band_label(last_row)
+            last_fee = _fee_value_compact(last_row)
+            if last_fee:
+                lines.append(
+                    f"{last_label}: {last_fee}"
+                    if last_label else last_fee
+                )
+
+            if common_tax:
+                lines.append(common_tax)
+
+            if lines:
+                return "\n".join(lines)
+
+    # 1-3 bant veya farklı yapıda tarife: kısa bant etiketleriyle göster.
+    lines: List[str] = []
+    seen: Set[str] = set()
+
+    for row in rows:
+        fee = _fee_value_compact(row)
+        if not fee:
+            continue
+
+        if spec.service == "YURT_DISI_FAST":
+            surcharge = _fixed_transfer_surcharge(row)
+            if surcharge:
+                fee += f" + {surcharge} sabit"
+
+        label = _transfer_band_label(row)
+        line = f"{label}: {fee}" if label else fee
+
+        # Vergi bilgisi tüm satırlarda aynı değilse satır bazında göster.
+        if not common_tax:
+            tax = _bsmv_label(row)
+            if tax:
+                line += f" ({tax})"
+
+        key = _norm(line)
+        if key in seen:
+            continue
+        seen.add(key)
+        lines.append(line)
+
+    if common_tax:
+        lines.append(common_tax)
+
+    return "\n".join(lines)
+
+
+def _aggregate_service_fee(
+    rows: Sequence[FeeRow], bank: str, spec: RowSpec, wanted_channel: str,
+) -> Optional[Tuple[str, FeeRow]]:
+    """
+    Çok satırlı tarifeleri tek hücrede özetler.
+
+    Yurt dışı transferlerde eski "ilk 5 adayı bas" mantığı kullanılmaz.
+    Önce banka bazında tek kanonik ürün ailesi seçilir; yalnız o ürünün
+    gerçek tutar bantları gösterilir.
+    """
+    transfer_services = {
+        "SWIFT_GELEN",
+        "SWIFT_GIDEN",
+        "YURT_DISI_FAST",
+        "KART_YURTDISI_TRANSFER",
+    }
+
+    if spec.service in transfer_services:
+        candidates = _canonical_transfer_rows(
+            rows,
+            bank,
+            spec,
+            wanted_channel,
+        )
+
+        if not candidates:
+            return None
+
+        canonical_rows = [row for _, row in candidates]
+        value = _compact_transfer_blocks(
+            canonical_rows,
+            spec,
+        )
+
+        if not value:
+            return None
+
+        return value, canonical_rows[0]
+
+    # Altın transferinde eski aggregate davranışı korunur; burada aynı
+    # ürünün gram/tutar kademeleri gerçekten aynı hizmetin parçasıdır.
+    if spec.service != "ALTIN_TRANSFER":
+        return None
+
+    candidates = []
+
+    for row in rows:
+        if row.banka != bank:
+            continue
+
+        score = _candidate_score(row, spec, "GENEL")
+        if score <= -10_000 or not _has_numeric_fee(row):
             continue
 
         mas = _norm(row.masraf)
-        cat = _norm(row.kategori)
-        full = _norm(row.text)
 
-        if spec.service in {"SWIFT_GELEN", "SWIFT_GIDEN", "YURT_DISI_FAST", "KART_YURTDISI_TRANSFER"}:
-            if any(x in mas for x in ("paket", "kobi")) or "ek kaynak - akbank ticari" in cat:
-                continue
+        if not any(x in mas for x in (
+            "altin transfer",
+            "ats ile altin gonderimi",
+            "kiymetli maden transferi ucreti - altin",
+        )):
+            continue
 
-        # SWIFT gelen/giden yönünü yalnız MASRAF adındaki açık ifadelerle ayır.
-        # Açıklama/kategori içinde "gelen/giden" geçmesi tek başına yeterli değil.
-        if spec.service == "SWIFT_GELEN":
-            if not any(
-                x in mas
-                for x in (
-                    "gelen swift",
-                    "gelen doviz",
-                    "yurtdisindan",
-                    "yurt disindan",
-                    "diger bankalardan gelen",
-                    "gelen uluslararasi fon transfer",
-                )
-            ):
-                continue
-            if any(x in mas for x in ("giden swift", "gonderim", "gonderilen", "baska bankaya doviz")):
-                continue
-
-        if spec.service == "SWIFT_GIDEN":
-            if not any(
-                x in mas
-                for x in (
-                    "giden swift",
-                    "hesaptan giden swift",
-                    "doviz havale gonder",
-                    "baska bankaya doviz transfer",
-                    "diger bankaya giden",
-                    "giden doviz",
-                    "uluslararasi fon transferi giden",
-                )
-            ):
-                continue
-            if any(x in mas for x in ("gelen swift", "gelen doviz", "yurtdisindan", "yurt disindan")):
-                continue
-
-        if spec.service == "KART_YURTDISI_TRANSFER":
-            # Karşılaştırma gönderici ücretidir; alıcı ücretini veya KKTC özel
-            # varyantını standart Türkiye tarifesine karıştırma.
-            if "alici" in full or "kktc" in full:
-                continue
-            if not (
-                ("moneysend" in full and "gonderici" in full)
-                or ("moneysend" in full and any(x in full for x in (
-                    "yurtdisi banka kartina", "yurt disi banka kartina",
-                )))
-                or ("global fast" in full and "karta para gonder" in full)
-                or "visa direct" in full
-            ):
-                continue
-
-        if spec.service == "ALTIN_TRANSFER":
-            if not any(x in mas for x in (
-                "altin transfer", "ats ile altin gonderimi",
-                "kiymetli maden transferi ucreti - altin",
-            )):
-                continue
-            if any(x in mas for x in ("western union", "eft", "havale", "fast", "fiziki", "teslim")):
-                continue
+        if any(x in mas for x in (
+            "western union", "eft", "havale", "fast", "fiziki", "teslim",
+        )):
+            continue
 
         candidates.append((score, row))
 
     if not candidates:
         return None
 
-    candidates.sort(key=lambda item: (item[0], -len(_norm(item[1].masraf))), reverse=True)
-    blocks = []
-    seen = set()
+    candidates.sort(
+        key=lambda item: (
+            item[0],
+            -len(_norm(item[1].masraf)),
+        ),
+        reverse=True,
+    )
+
+    blocks: List[str] = []
+    seen: Set[str] = set()
     first_row = candidates[0][1]
+
     for _, row in candidates:
-        fee = (
-            _card_transfer_description_fee(row)
-            if spec.service == "KART_YURTDISI_TRANSFER"
-            else ""
-        ) or _fee_value_compact(row)
+        fee = _fee_value_compact(row)
         if not fee:
             continue
+
         hint = _compact_hint(row)
-        if spec.service == "KART_YURTDISI_TRANSFER" and "\n" in fee:
-            block = fee
-        else:
-            block = f"{hint}: {fee}" if hint else fee
+        block = f"{hint}: {fee}" if hint else fee
+
         tax = _bsmv_label(row)
         if tax:
             block += f" ({tax})"
+
         key = _norm(block)
         if key in seen:
             continue
+
         seen.add(key)
         blocks.append(block)
+
         if len(blocks) >= 5:
             break
 
     if not blocks:
         return None
+
     return "\n".join(blocks), first_row
 
 
@@ -2585,6 +3001,31 @@ def _assert_safe_source(row: Optional[FeeRow], spec: RowSpec) -> None:
         if any(x in mas for x in ("paket", "kobi", "kota")):
             raise RuntimeError(
                 f"Güvenlik: Tekil transfer tarifesine paket/kota karıştı: {row.masraf}"
+            )
+
+        # Yön/ürün güvenliği. Aggregate tarafı daha da dar banka-bazlı
+        # filtre uygular; burası son savunma katmanıdır.
+        if spec.service == "SWIFT_GELEN" and any(x in mas for x in (
+            "arastirma", "iade", "isme", "kasaya", "giden",
+        )):
+            raise RuntimeError(
+                f"Güvenlik: Gelen SWIFT'e farklı varyant karıştı: {row.masraf}"
+            )
+
+        if spec.service == "YURT_DISI_FAST" and any(x in _norm(row.text) for x in (
+            "moneysend", "western union", "karta para gonder",
+            "visa ile yurt disi para transferi",
+            "visa ile yurtdisi para transferi",
+        )):
+            raise RuntimeError(
+                f"Güvenlik: Hızlı hesaba transfere farklı ürün karıştı: {row.masraf}"
+            )
+
+        if spec.service == "KART_YURTDISI_TRANSFER" and any(x in _norm(row.text) for x in (
+            "alici", "kktc",
+        )):
+            raise RuntimeError(
+                f"Güvenlik: Karta transfere alıcı/KKTC varyantı karıştı: {row.masraf}"
             )
 
 
@@ -2799,6 +3240,13 @@ def _write_comparison(ws, rows: Sequence[FeeRow], notes: Mapping[Tuple[str, str]
             ws.row_dimensions[current_row].height = 105
         elif spec.service == "KASA":
             ws.row_dimensions[current_row].height = 72
+        elif spec.service in {
+            "SWIFT_GELEN",
+            "SWIFT_GIDEN",
+            "YURT_DISI_FAST",
+            "KART_YURTDISI_TRANSFER",
+        }:
+            ws.row_dimensions[current_row].height = 66
         else:
             ws.row_dimensions[current_row].height = 52
         current_row += 1
