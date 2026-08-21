@@ -28,15 +28,29 @@ from supplemental_sources import (
     enrich_all,
     print_supplemental_report,
 )
-from update_comparison import (
-    COMPARISON_SHEET,
-    COMPARISON_VERSION,
-    update_comparison_sheet,
+import update_comparison as comparison_mod
+
+# Eski/yanlış bir update_comparison.py dosyası varsa import aşamasında
+# patlamak yerine aşağıdaki sürüm kontrolünde anlaşılır FATAL mesajı üret.
+COMPARISON_SHEET = getattr(
+    comparison_mod,
+    "COMPARISON_SHEET",
+    "KARŞILAŞTIRMA",
+)
+COMPARISON_VERSION = getattr(
+    comparison_mod,
+    "COMPARISON_VERSION",
+    "__MISSING_COMPARISON_VERSION__",
+)
+update_comparison_sheet = getattr(
+    comparison_mod,
+    "update_comparison_sheet",
+    None,
 )
 from update_excel import EXCEL_DOSYA_ADI, excel_guncelle_coklu
 
 
-MAIN_VERSION = "2026-08-20-v8-precision-first-final"
+MAIN_VERSION = "2026-08-21-v8.1-import-compat-final"
 EXPECTED_SUPPLEMENTAL_VERSION = "2026-08-20-v7-precision-source-audit"
 EXPECTED_COMPARISON_VERSION = "2026-08-20-v15-precision-first-matching"
 
@@ -85,6 +99,19 @@ def _component_versions_ok() -> bool:
         print(
             "[FATAL] update_comparison.py yanlış/eski sürüm. "
             f"Beklenen={EXPECTED_COMPARISON_VERSION} | Gelen={COMPARISON_VERSION}",
+            file=sys.stderr,
+        )
+        print(
+            f"[FATAL] Yüklenen comparison modülü: "
+            f"{getattr(comparison_mod, '__file__', 'bilinmiyor')}",
+            file=sys.stderr,
+        )
+        ok = False
+
+    if update_comparison_sheet is None:
+        print(
+            "[FATAL] update_comparison.py içinde "
+            "update_comparison_sheet() fonksiyonu yok.",
             file=sys.stderr,
         )
         ok = False
