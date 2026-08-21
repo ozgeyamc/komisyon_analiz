@@ -76,6 +76,7 @@ YAPIKREDI_REGULAR_URL = "https://www.yapikredi.com.tr/bireysel-bankacilik/odemel
 YAPIKREDI_BILL_URL = "https://www.yapikredi.com.tr/odemeler-ve-hizmetler/otomatik-fatura-odeme-talimati"
 YAPIKREDI_MIM_URL = "https://www.yapikredi.com.tr/kendim-icin/sinirsiz-bankacilik/iletisim-ve-yardim/musteri-iletisim-merkezi/"
 YAPIKREDI_FAST_URL = "https://www.yapikredi.com.tr/bireysel-bankacilik/odemeler-ve-hizmetler/fonlarin-anlik-transferi"
+YAPIKREDI_FEE_URL = "https://www.yapikredi.com.tr/bireysel-bankacilik/hesaplama-araclari/bireysel-urun-ve-hizmet-ucretleri"
 GARANTI_SCHOOL_URL = "https://www.garantibbva.com.tr/odemeler-ve-hizmetler/ozel-okul-odemeleri"
 GARANTI_FAST_URL = "https://www.garantibbva.com.tr/odemeler-ve-hizmetler/fast-kolay-adres"
 GARANTI_BILL_URL = "https://www.garantibbva.com.tr/odemeler-ve-hizmetler/fatura-odeme"
