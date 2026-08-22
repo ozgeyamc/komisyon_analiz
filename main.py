@@ -18,11 +18,18 @@ from __future__ import annotations
 
 import shutil
 import sys
+import time
 import zipfile
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
-from safety_guard import print_guard_report, validate_run
+from safety_guard import (
+    BASELINE_COUNTS,
+    MAX_RATIO,
+    MIN_RATIO,
+    print_guard_report,
+    validate_run,
+)
 from supplemental_sources import (
     SUPPLEMENTAL_VERSION,
     enrich_all,
@@ -55,10 +62,16 @@ from update_excel import (
 )
 
 
-MAIN_VERSION = "2026-08-23-v16-user-audit-final"
+MAIN_VERSION = "2026-08-23-v17-guard-auto-retry"
 EXPECTED_SUPPLEMENTAL_VERSION = "2026-08-23-v11-user-audit-final"
 EXPECTED_COMPARISON_VERSION = "2026-08-23-v21-user-audit-final"
 EXPECTED_EXCEL_WRITER_VERSION = "2026-08-21-v2-clean-supplemental-display"
+
+# Primary scraper güvenlik retry ayarları.
+# İlk deneme + 2 tekrar = toplam 3 deneme.
+MAX_SCRAPE_ATTEMPTS = 3
+RETRY_WAIT_SECONDS = 3
+
 
 BANKA_SIRASI = [
     ("GARANTİ",   "scraper",            "scrape_garanti_bbva"),
@@ -157,6 +170,165 @@ def _version_ok(banka_adi: str, module) -> bool:
     return True
 
 
+
+def _bank_guard_problem_banks(guard) -> set[str]:
+    """
+    Guard raporundaki banka-bazlı hatalardan hangi scraper'ların yeniden
+    denenmesi gerektiğini çıkarır.
+
+    TOPLAM hatası tek başına varsa güvenli olmak için tüm bankalar tekrar
+    denenir. Sürüm hataları burada çözülmez; onlar ayrıca bloklanır.
+    """
+    retry_banks: set[str] = set()
+
+    for error in getattr(guard, "errors", ()):
+        text = str(error)
+
+        for bank in BASELINE_COUNTS:
+            if text.startswith(f"{bank}:"):
+                retry_banks.add(bank)
+
+        if text.startswith("TOPLAM:") and not retry_banks:
+            retry_banks.update(BASELINE_COUNTS)
+
+    return retry_banks
+
+
+def _count_status(bank: str, rows) -> str:
+    baseline = BASELINE_COUNTS[bank]
+
+    if rows is None:
+        return f"veri yok | ref={baseline}"
+
+    try:
+        count = len(rows)
+    except TypeError:
+        rows = list(rows)
+        count = len(rows)
+
+    min_count = int(baseline * MIN_RATIO)
+    max_count = int(baseline * MAX_RATIO)
+
+    return (
+        f"satır={count} | ref={baseline} | "
+        f"güvenli_aralık={min_count}-{max_count}"
+    )
+
+
+def _retry_failed_primary_scrapers(
+    primary_data: dict,
+    scraper_functions: dict,
+    version_errors: list[str],
+):
+    """
+    İlk safety guard başarısız olduğunda yalnız problemli primary scraper'ları
+    tekrar çalıştırır.
+
+    Güvenlik sınırları DEĞİŞTİRİLMEZ.
+    Bir tekrar başarılı olursa yeni veri kullanılır. Başarısız/None sonuç eski
+    kullanılabilir sonucu silmez.
+    """
+    guard = validate_run(primary_data)
+
+    if version_errors:
+        for bank in version_errors:
+            guard.errors.append(
+                f"{bank}: doğrulanmış scraper sürümü yüklenmedi."
+            )
+        guard.ok = False
+
+    if guard.ok:
+        return primary_data, guard
+
+    retry_banks = _bank_guard_problem_banks(guard)
+
+    # Sürüm uyuşmazlığı retry ile çözülmez.
+    retry_banks.difference_update(version_errors)
+
+    if not retry_banks:
+        return primary_data, guard
+
+    print()
+    print("=" * 68)
+    print("PRIMARY OTOMATİK TEKRAR KONTROLÜ")
+    print("=" * 68)
+    print(
+        "[retry] İlk güvenlik kontrolü geçmedi. "
+        "Yalnız problemli bankalar tekrar çekilecek."
+    )
+
+    for bank in sorted(retry_banks):
+        print(f"[retry] {bank}: {_count_status(bank, primary_data.get(bank))}")
+
+    # İlk scrape zaten 1. denemeydi. Burada 2 ve 3. denemeleri yapıyoruz.
+    for attempt in range(2, MAX_SCRAPE_ATTEMPTS + 1):
+        if not retry_banks:
+            break
+
+        print()
+        print(
+            f"[retry] Tur {attempt}/{MAX_SCRAPE_ATTEMPTS} "
+            f"| bankalar={', '.join(sorted(retry_banks))}"
+        )
+
+        if RETRY_WAIT_SECONDS:
+            time.sleep(RETRY_WAIT_SECONDS)
+
+        for bank in list(sorted(retry_banks)):
+            fn = scraper_functions.get(bank)
+
+            if fn is None:
+                print(
+                    f"[retry][ATLANDI] {bank}: scraper fonksiyonu hazır değil.",
+                    file=sys.stderr,
+                )
+                continue
+
+            print(f"\n--- {bank} yeniden çekiliyor ({attempt}/{MAX_SCRAPE_ATTEMPTS}) ---")
+            rows = _try_scrape(bank, fn)
+
+            # Başarısız tekrar, elimizdeki önceki veriyi silmesin.
+            if rows is not None:
+                primary_data[bank] = rows
+
+        guard = validate_run(primary_data)
+
+        if version_errors:
+            for bank in version_errors:
+                guard.errors.append(
+                    f"{bank}: doğrulanmış scraper sürümü yüklenmedi."
+                )
+            guard.ok = False
+
+        if guard.ok:
+            print()
+            print(
+                f"[retry] BAŞARILI - güvenlik kontrolü "
+                f"{attempt}. denemede geçti."
+            )
+            print("=" * 68)
+            return primary_data, guard
+
+        retry_banks = _bank_guard_problem_banks(guard)
+        retry_banks.difference_update(version_errors)
+
+        if retry_banks:
+            for bank in sorted(retry_banks):
+                print(
+                    f"[retry] hâlâ sorunlu: {bank} | "
+                    f"{_count_status(bank, primary_data.get(bank))}"
+                )
+
+    print()
+    print(
+        "[retry] Tekrarlar tamamlandı; güvenlik kontrolü hâlâ geçmiyor. "
+        "Yanlış/eksik veri yazılmaması için Excel bloke kalacak."
+    )
+    print("=" * 68)
+
+    return primary_data, guard
+
+
 def _prepare_temp_excel(final_path: Path) -> Path:
     temp_path = final_path.with_name(final_path.stem + ".pipeline.tmp" + final_path.suffix)
     if temp_path.exists():
@@ -231,6 +403,7 @@ def main() -> int:
 
     primary_data = {}
     version_errors = []
+    scraper_functions = {}
 
     # 1) PRIMARY SCRAPER'LAR
     for banka_adi, module_name, func_name in BANKA_SIRASI:
@@ -241,6 +414,7 @@ def main() -> int:
                 version_errors.append(banka_adi)
                 continue
             fn = getattr(module, func_name)
+            scraper_functions[banka_adi] = fn
             satirlar = _try_scrape(banka_adi, fn)
             if satirlar is not None:
                 primary_data[banka_adi] = satirlar
@@ -251,18 +425,24 @@ def main() -> int:
         except Exception as exc:
             print(f"[HATA] {banka_adi}: {exc}", file=sys.stderr)
 
-    # 2) PRIMARY GLOBAL SAFETY GUARD
-    guard = validate_run(primary_data)
-    if version_errors:
-        for banka in version_errors:
-            guard.errors.append(f"{banka}: doğrulanmış scraper sürümü yüklenmedi.")
-        guard.ok = False
+    # 2) PRIMARY GLOBAL SAFETY GUARD + OTOMATİK RETRY
+    #
+    # İlk koşu geçmezse güvenlik sınırlarını gevşetmek yerine yalnız sorunlu
+    # scraper'lar iki kez daha denenir. Böylece geçici site/timeout/DOM yükleme
+    # sorunları toparlanabilir; kalıcı veya şüpheli veri değişiminde Excel yine
+    # korunur.
+    primary_data, guard = _retry_failed_primary_scrapers(
+        primary_data,
+        scraper_functions,
+        version_errors,
+    )
 
     print_guard_report(guard)
+
     if not guard.ok:
         print(
-            "\n[SONUÇ] Primary güvenlik kontrolü geçmedi. "
-            "Excel güncellenmedi; son doğru dosya korunuyor.",
+            "\n[SONUÇ] Primary güvenlik kontrolü, otomatik tekrarların ardından "
+            "da geçmedi. Excel güncellenmedi; son doğru dosya korunuyor.",
             file=sys.stderr,
         )
         return 2
