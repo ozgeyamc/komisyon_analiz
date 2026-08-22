@@ -41,7 +41,7 @@ import requests
 from bs4 import BeautifulSoup
 
 
-SUPPLEMENTAL_VERSION = "2026-08-21-v9-primary-fee-backfill"
+SUPPLEMENTAL_VERSION = "2026-08-23-v11-user-audit-final"
 
 HEADERS = {
     "User-Agent": (
@@ -594,6 +594,27 @@ def _generic_institution_score(row, bank: str, wanted_channel: str) -> int:
         return -10_000
 
     kategori, masraf, full = _primary_row_text(row)
+
+    # İş Bankası kanal isimleri özel dikkat ister: "İnternet Şube" fiziksel
+    # şube değildir. Supplemental backfill doğrudan ilk sayfadaki üç gerçek
+    # Fatura Ödemeleri kategorisinden doğru olanı seçer.
+    if bank == "İŞBANKASI" and masraf == "fatura odemeleri":
+        if wanted_channel == "MOBIL":
+            if ("internet sube" in kategori or "iscep" in kategori) and "bankamatik" not in kategori:
+                return 1000
+            return -10_000
+        if wanted_channel == "SUBE":
+            if (
+                "fatura odemeleri - sube" in kategori
+                and "internet sube" not in kategori
+                and "iscep" not in kategori
+                and "bankamatik" not in kategori
+            ):
+                return 1000
+            return -10_000
+        if wanted_channel == "ATM":
+            return 1000 if "bankamatik" in kategori else -10_000
+
     tags = _primary_service_tags(row)
     if "FATURA" not in tags:
         return -10_000
@@ -992,32 +1013,63 @@ def _garanti_fast_rows() -> List[SupplementalRow]:
 
 
 def _isbank_tax_findeks_rows() -> List[SupplementalRow]:
-    tax = _fetch_html(ISBANK_TAX_URL, must_contain=("İşCep", "İnternet Şubesi", "Çözüm Merkezi"))
+    tax = _fetch_html(
+        ISBANK_TAX_URL,
+        must_contain=("İşCep", "İnternet Şubesi", "Çözüm Merkezi"),
+    )
     tax_text = _norm(BeautifulSoup(tax, "html.parser").get_text(" ", strip=True))
     if "vergi" not in tax_text:
         raise SupplementalSourceError("İş Bankası Vergi Ödeme sayfası doğrulanamadı.")
 
-    findeks = _fetch_html(ISBANK_FINDEKS_URL, must_contain=("Çek Raporu", "Yılda 50 Çek Raporu"))
+    findeks = _fetch_html(
+        ISBANK_FINDEKS_URL,
+        must_contain=("Çek Raporu", "Yılda 50 Çek Raporu", "Yılda 250 Çek Raporu"),
+    )
     findeks_text = _clean(BeautifulSoup(findeks, "html.parser").get_text(" ", strip=True))
-    m = re.search(r"Yılda\s*50\s*Çek\s*Raporu.{0,100}?([0-9][0-9.]*,[0-9]{2})\s*TL", findeks_text, flags=re.I | re.S)
-    package = m.group(1) if m else "3.660,00"
+
+    def package_amount(count: int, fallback: str) -> str:
+        match = re.search(
+            rf"Yılda\s*{count}\s*Çek\s*Raporu.{{0,140}}?([0-9][0-9.]*,[0-9]{{2}})\s*TL",
+            findeks_text,
+            flags=re.I | re.S,
+        )
+        return match.group(1) if match else fallback
+
+    package_50 = package_amount(50, "3.660,00")
+    package_250 = package_amount(250, "15.240,00")
 
     rows: List[SupplementalRow] = []
+
+    # Vergi sayfası kanalları doğruluyor; ayrı bir numeric "Vergi Tahsilat
+    # Komisyonu" ürünü uydurulmuyor. Karşılaştırma bu statüyü kullanır.
     rows += _add_service_status(
-        "İŞBANKASI", "VERGI", "Vergi / Harç Ödemeleri",
-        ("MOBIL", "SUBE"), ISBANK_TAX_URL,
+        "İŞBANKASI",
+        "VERGI",
+        "Vergi / Harç Ödemeleri",
+        ("MOBIL", "SUBE"),
+        ISBANK_TAX_URL,
         "Vergi sayfası İşCep, İnternet Şubesi ve Çözüm Merkezi kanallarını doğruluyor.",
-        display_text="Hizmet var\\nAyrı vergi aracılık ücreti yayımlanmıyor",
+        display_text="Hizmet var\nAyrı vergi aracılık ücreti yayımlanmıyor",
     )
+
+    # İş Bankası Çek Raporu tek-rapor fiyatı yerine yıllık paket olarak
+    # yayımlanıyor. Kredi Risk Raporu'nun 95 TL tarifesi buraya taşınmaz.
+    # Karekodlu Çek Raporu da farklı bir üründür ve bu satıra karıştırılmaz.
     rows += _add_service_status(
-        "İŞBANKASI", "CEK_RISK", "Findeks Çek Raporu",
-        ("MOBIL", "SUBE"), ISBANK_FINDEKS_URL,
-        "Findeks sayfası tek rapor tarifesi yerine yıllık Çek Raporu paketleri yayımlıyor.",
-        display_text=f"Tek rapor ücreti ayrı yayımlanmıyor\\n50 rapor/yıl: {package} TRY (KDV dahil)",
+        "İŞBANKASI",
+        "CEK_RISK",
+        "Findeks Çek Raporu",
+        ("MOBIL", "SUBE"),
+        ISBANK_FINDEKS_URL,
+        "Findeks sayfası Çek Raporu için tek rapor yerine yıllık paket tarifeleri yayımlıyor.",
+        display_text=(
+            "Çek Raporu paketleri\n"
+            f"50 rapor/yıl: {package_50} TRY\n"
+            f"250 rapor/yıl: {package_250} TRY\n"
+            "KDV dahil"
+        ),
     )
     return rows
-
-
 
 def _garanti_phone_tax_rows() -> List[SupplementalRow]:
     """Garanti telefon ve vergi hizmetinin resmî kanal varlığını doğrular.
