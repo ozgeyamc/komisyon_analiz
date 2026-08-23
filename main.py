@@ -62,9 +62,9 @@ from update_excel import (
 )
 
 
-MAIN_VERSION = "2026-08-23-v17-guard-auto-retry"
+MAIN_VERSION = "2026-08-23-v18-comparison-v22"
 EXPECTED_SUPPLEMENTAL_VERSION = "2026-08-23-v11-user-audit-final"
-EXPECTED_COMPARISON_VERSION = "2026-08-23-v21-user-audit-final"
+EXPECTED_COMPARISON_VERSION = "2026-08-23-v22-final-gap-cleanup"
 EXPECTED_EXCEL_WRITER_VERSION = "2026-08-21-v2-clean-supplemental-display"
 
 # Primary scraper güvenlik retry ayarları.
