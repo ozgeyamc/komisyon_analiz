@@ -41,7 +41,7 @@ import requests
 from bs4 import BeautifulSoup
 
 
-SUPPLEMENTAL_VERSION = "2026-08-23-v11-user-audit-final"
+SUPPLEMENTAL_VERSION = "2026-08-24-v12-billing-methods-cleanup"
 
 HEADERS = {
     "User-Agent": (
@@ -59,6 +59,7 @@ ISBANK_SITE_AIDAT_URL = "https://www.isbank.com.tr/apartman-yonetim-ve-site-tahs
 ISBANK_TAX_URL = "https://www.isbank.com.tr/vergi-odeme"
 ISBANK_FINDEKS_URL = "https://www.isbank.com.tr/is-ticari/findeks-hizmetleri"
 ISBANK_BILL_URL = "https://www.isbank.com.tr/fatura-odemeleri"
+ISBANK_FAQ_URL = "https://www.isbank.com.tr/sss"
 
 ISBANK_FAST_URL = "https://www.isbank.com.tr/fast-anlik-para-transferi"
 ISBANK_SGK_URL = "https://www.isbank.com.tr/sgk-odemeleri"
@@ -800,6 +801,13 @@ def _fill_supplemental_fees(
             unresolved += 1
             continue
 
+        # Aidat / özel okul / telefon satırları yalnız hizmet-kanal kanıtıdır.
+        # Genel Fatura/Kurum tarifesini bu supplemental satırlara numeric ücret
+        # gibi taşımıyoruz. Karşılaştırma katmanı gerekiyorsa genel tarifeyi
+        # açıkça "genel tarife" etiketiyle ayrıca gösterir.
+        if service in {"AIDAT", "OZEL_OKUL", "TELEFON", "FATURA_KREDI_KARTI", "FATURA_HESAPTAN"}:
+            continue
+
         # Band statüsü varsa ve uygulanabilir bir satırsa yalnız aynı banda ait
         # primary tarife kullanılmalı. Şu an TRANSFER_3 statüleri NOT_APPLICABLE
         # olduğu için yukarıda zaten atlanıyor; bu guard gelecekteki değişiklikler için.
@@ -819,12 +827,6 @@ def _fill_supplemental_fees(
                 if exact_score > -10_000:
                     candidates.append((exact_score, False, row))
 
-            # Aidat / özel okul / telefonun bankada ayrı komisyon satırı yoksa,
-            # bankanın zaten yayımladığı genel Fatura/Kurum tarifesini kullan.
-            if service in {"AIDAT", "OZEL_OKUL", "TELEFON"}:
-                generic_score = _generic_institution_score(row, bank, channel)
-                if generic_score > -10_000:
-                    candidates.append((generic_score, True, row))
 
         if not candidates:
             unresolved += 1
@@ -963,6 +965,14 @@ def _yk_phone_tax_fast_rows() -> List[SupplementalRow]:
     bill_text = _norm(BeautifulSoup(bill, "html.parser").get_text(" ", strip=True))
     if "cep telefonu" not in bill_text:
         raise SupplementalSourceError("Yapı Kredi fatura/telefon sayfası doğrulanamadı.")
+    if not (
+        "vadesiz hesap" in bill_text
+        and "fatura odem" in bill_text
+        and "herhangi bir ucret alinmaz" in bill_text
+    ):
+        raise SupplementalSourceError(
+            "Yapı Kredi Mobil/İnternet vadesiz hesaptan fatura ödemesinin ücretsiz olduğu doğrulanamadı."
+        )
 
     mim = _fetch_html(YAPIKREDI_MIM_URL, must_contain=("Vergi / Devlet", "SGK Ödemeleri"))
     mim_text = _norm(BeautifulSoup(mim, "html.parser").get_text(" ", strip=True))
@@ -975,6 +985,16 @@ def _yk_phone_tax_fast_rows() -> List[SupplementalRow]:
         raise SupplementalSourceError("Yapı Kredi FAST 100.000 TL limiti doğrulanamadı.")
 
     rows: List[SupplementalRow] = []
+    rows += _add_service_status(
+        "YAPIKREDI",
+        "FATURA_HESAPTAN",
+        "Hesaptan Fatura / Kurum Ödemesi",
+        ("MOBIL",),
+        YAPIKREDI_BILL_URL,
+        "Resmî fatura sayfası Yapı Kredi Mobil ve Bireysel İnternet Şubesi'nden "
+        "vadesiz hesap kullanılarak yapılan fatura ödemelerinde ücret alınmadığını belirtiyor.",
+        display_text="Ücretsiz / 0 TRY\\nVadesiz hesaptan",
+    )
     rows += _add_service_status(
         "YAPIKREDI", "TELEFON", "Telefon / Cep Telefonu Faturası Ödemeleri",
         ("MOBIL", "SUBE"), YAPIKREDI_BILL_URL,
@@ -1111,6 +1131,58 @@ def _garanti_phone_tax_rows() -> List[SupplementalRow]:
         "Ürün ve Hizmet Ücretleri sayfasındaki genel Fatura/Kurum açıklaması site/vakıf/aidat tahsilatını kapsıyor. Ayrı aidat tarifesi yoksa genel Fatura/Kurum tarifesi açıkça genel tarife etiketiyle kullanılır.",
     )
     return rows
+
+
+
+def _isbank_fatura_faq_rows() -> List[SupplementalRow]:
+    """
+    İş Bankası'nın resmî SSS sayfasındaki kredi kartından anında fatura ödeme
+    ücretini doğrular.
+
+    Kullanıcı denetiminde esas alınan kural:
+      0-150 TL       -> 5 TL
+      150 TL üzeri   -> işlem tutarının %3,5'i + BSMV
+
+    SSS metni bu üç kritik unsuru içermiyorsa status üretmeyiz; kritik kaynak
+    kontrolü başarısız olur ve final Excel korunur.
+    """
+    html = _fetch_html(
+        ISBANK_FAQ_URL,
+        must_contain=(
+            "Kredi kartlarından Fatura Ödemelerinde ücret alınıyor mu",
+            "0-150 TL",
+            "150 TL üzeri",
+        ),
+    )
+    text = _norm(BeautifulSoup(html, "html.parser").get_text(" ", strip=True))
+
+    has_question = "kredi kartlarindan fatura odemelerinde ucret aliniyor mu" in text
+    has_low = "0-150 tl" in text and "5 tl" in text
+    has_high = (
+        "150 tl uzeri" in text
+        and ("3,5" in text or "3.5" in text)
+        and "bsmv" in text
+    )
+    if not (has_question and has_low and has_high):
+        raise SupplementalSourceError(
+            "İş Bankası SSS kredi kartından fatura ödeme ücret kuralı doğrulanamadı."
+        )
+
+    return _add_service_status(
+        "İŞBANKASI",
+        "FATURA_KREDI_KARTI",
+        "Kredi Kartından Fatura / Kurum Ödemesi",
+        ("GENEL",),
+        ISBANK_FAQ_URL,
+        "Resmî SSS, kredi kartıyla anında fatura ödemelerinde 0-150 TL için 5 TL; "
+        "150 TL üzeri için işlem tutarının %3,5'i kadar ücret + BSMV uygulandığını belirtiyor.",
+        display_text=(
+            "Genel kredi kartı tarifesi:\\n"
+            "0-150 TRY: 5 TRY\\n"
+            "150 TRY üzeri: %3,50 + BSMV\\n"
+            "Kanal ayrımı yayımlanmıyor"
+        ),
+    )
 
 
 def _isbank_phone_rows() -> List[SupplementalRow]:
@@ -1699,6 +1771,7 @@ def enrich_all(banka_verileri: Mapping[str, Sequence]) -> Tuple[Dict[str, List],
     apply("İŞBANKASI", "ISBANK_VERGI_FINDEKS", ISBANK_TAX_URL, _isbank_tax_findeks_rows)
     apply("GARANTİ", "GARANTI_TELEFON_VERGI", GARANTI_BILL_URL, _garanti_phone_tax_rows)
     apply("İŞBANKASI", "ISBANK_TELEFON", ISBANK_BILL_URL, _isbank_phone_rows)
+    apply("İŞBANKASI", "ISBANK_FATURA_KART_SSS", ISBANK_FAQ_URL, _isbank_fatura_faq_rows)
 
     # Özel okul / aidat hizmet kanıtları da karşılaştırma mantığının parçasıdır.
     apply("GARANTİ", "GARANTI_OZEL_OKUL", GARANTI_SCHOOL_URL, _garanti_service_rows)
