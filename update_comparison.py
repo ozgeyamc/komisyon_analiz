@@ -38,9 +38,9 @@ from openpyxl.comments import Comment
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
 
-COMPARISON_VERSION = "2026-08-24-v24-status-resolution-fix"
+COMPARISON_VERSION = "2026-08-24-v25-filtered-plain-notes"
 COMPARISON_SHEET = "KARŞILAŞTIRMA"
-PREVIEW_LAYOUT_SIGNATURE = "4BANKS|A:I|J:L_EMPTY|M_NOTES|FAIL_CLOSED_V24|USER_AUDIT|FATURA_METHODS|STATUS_ROWS_FIXED|SCHOOL_STATUS|AIDAT_GENERIC_LABEL|PHONE_REFERENCE"
+PREVIEW_LAYOUT_SIGNATURE = "4BANKS|A:I_FILTERED|J:L_EMPTY|M_PLAIN_TERM_NOTES|FAIL_CLOSED_V25|USER_AUDIT|FATURA_METHODS|STATUS_ROWS_FIXED|SCHOOL_STATUS|AIDAT_GENERIC_LABEL|PHONE_REFERENCE"
 
 STATUS_AVAILABLE = "[SUPPLEMENTAL][AVAILABLE_NO_SEPARATE_FEE]"
 STATUS_EMPTY = "[SUPPLEMENTAL][PUBLISHED_EMPTY]"
@@ -5051,10 +5051,273 @@ def _preserve_notes(old_ws) -> Dict[Tuple[str, str], str]:
             section = label
             continue
 
-        if note:
+        if note and not _looks_like_generated_note(note):
             notes[(section, label)] = note
 
     return notes
+
+
+
+# ---------------------------------------------------------------------------
+# NOTLAR SÖZLÜĞÜ
+# ---------------------------------------------------------------------------
+# NOTLAR hücresinde yalnız satırda gerçekten geçen kavramların kısa anlamı
+# gösterilir. Metinler özellikle kısa ve düz tutulur; kalın/rich-text yoktur.
+_AUTO_NOTE_LABELS = {
+    "BSMV dahil",
+    "BSMV hariç",
+    "Genel Fatura/Kurum tarifesi",
+    "Genel kurum tarifesi",
+    "Genel tarife",
+    "Genel gişe tarifesi",
+    "Kanal ayrımı yayımlanmıyor",
+    "Ödeme aracı ayrımı yayımlanmıyor",
+    "Hesap/nakit ayrımı yayımlanmıyor",
+    "Nakit/hesap ayrımı yayımlanmıyor",
+    "Ayrı ücret yayımlanmıyor",
+    "Bu kanalda tarife yayımlanmıyor",
+    "Hizmet var",
+    "Ücretsiz / 0 TRY",
+    "Kuruma/işleme göre",
+    "Firmaya göre",
+    "Fatura türüne göre",
+    "Asgari",
+    "Azami",
+    "Valör",
+    "YP",
+    "Depozito",
+    "Değerli kağıt bedeli hariç",
+}
+
+
+def _append_note(notes: List[str], label: str, explanation: str) -> None:
+    line = f"• {label}: {explanation}"
+    if line not in notes:
+        notes.append(line)
+
+
+def _automatic_notes(values: Sequence[str]) -> str:
+    """
+    B:I hücrelerinde kullanılan terimleri algılar ve M sütununda
+    tek tek kısa açıklama listesine dönüştürür.
+    """
+    raw = "\n".join(_clean(v) for v in values if _clean(v))
+    n = _norm(raw)
+    notes: List[str] = []
+
+    if "bsmv dahil" in n:
+        _append_note(
+            notes,
+            "BSMV dahil",
+            "BSMV gösterilen tutarın içindedir.",
+        )
+    if "bsmv haric" in n:
+        _append_note(
+            notes,
+            "BSMV hariç",
+            "BSMV gösterilen tutara dahil değildir; ayrıca eklenebilir.",
+        )
+
+    # En spesifik genel-tarife ifadesini kullan; aynı satırda gereksiz tekrar yaratma.
+    if "genel fatura/kurum tarifesi" in n:
+        _append_note(
+            notes,
+            "Genel Fatura/Kurum tarifesi",
+            "Gösterilen ücret bu hizmete özel değil, bankanın genel fatura/kurum tarifesidir.",
+        )
+    elif "genel kurum tarifesi" in n:
+        _append_note(
+            notes,
+            "Genel kurum tarifesi",
+            "Gösterilen ücret bu alt hizmete özel değil, genel kurum ödeme tarifesidir.",
+        )
+    elif "genel tarife" in n:
+        _append_note(
+            notes,
+            "Genel tarife",
+            "Banka işlemi daha alt türlere ayırmadan ortak bir ücret yayımlamıştır.",
+        )
+
+    if "genel gise tarifesi" in n:
+        _append_note(
+            notes,
+            "Genel gişe tarifesi",
+            "Şubede/gişede yapılan işlem için yayımlanan genel ücrettir.",
+        )
+
+    if "kanal/odeme araci ayrimi yayimlanmiyor" in n:
+        _append_note(
+            notes,
+            "Kanal ayrımı yayımlanmıyor",
+            "Banka Mobil ve Şube için ayrı ücret açıklamamıştır.",
+        )
+        _append_note(
+            notes,
+            "Ödeme aracı ayrımı yayımlanmıyor",
+            "Hesap, nakit veya kredi kartı için ayrı fiyat açıklanmamıştır.",
+        )
+    else:
+        if "kanal ayrimi yayimlanmiyor" in n:
+            _append_note(
+                notes,
+                "Kanal ayrımı yayımlanmıyor",
+                "Banka Mobil ve Şube için ayrı ücret açıklamamıştır.",
+            )
+        if "odeme araci ayrimi yayimlanmiyor" in n:
+            _append_note(
+                notes,
+                "Ödeme aracı ayrımı yayımlanmıyor",
+                "Hesap, nakit veya kredi kartı için ayrı fiyat açıklanmamıştır.",
+            )
+
+    if "hesap/nakit ayrimi yayimlanmiyor" in n:
+        _append_note(
+            notes,
+            "Hesap/nakit ayrımı yayımlanmıyor",
+            "Banka hesaptan ve nakit ödemeyi ayrı fiyatlandırmamıştır.",
+        )
+    if "nakit/hesap ayrimi yayimlanmiyor" in n:
+        _append_note(
+            notes,
+            "Nakit/hesap ayrımı yayımlanmıyor",
+            "Banka nakit ve hesaptan ödemeyi ayrı fiyatlandırmamıştır.",
+        )
+
+    # "Ayrı ... ücret/tarife yayımlanmıyor" türlerinin tümü tek açıklamada birleşir.
+    if (
+        "ayri aidat ucreti yayimlanmiyor" in n
+        or "aidata ozel ucret yayimlanmiyor" in n
+        or "ayri ozel okul ucreti yayimlanmiyor" in n
+        or "ayri ozel okul/egitim ucreti yayimlanmiyor" in n
+        or "ayri ucret tutari belirtilmemis" in n
+        or "ayri ucret ilan edilmemis" in n
+        or "ayri vergi ucreti yayimlanmiyor" in n
+    ):
+        _append_note(
+            notes,
+            "Ayrı ücret yayımlanmıyor",
+            "Hizmet veya kalem kaynakta var, ancak ona özel sayısal ücret açıklanmamıştır.",
+        )
+
+    if (
+        "bu kanalda tarife yayimlanmiyor" in n
+        or "bu kanalda ozel okul odeme tarifesi yayimlanmiyor" in n
+        or "sube icin ayri" in n
+        or "mobil icin ayri" in n
+    ):
+        _append_note(
+            notes,
+            "Bu kanalda tarife yayımlanmıyor",
+            "İlgili kanal için ayrı ve güvenilir bir ücret tarifesi yayımlanmamıştır.",
+        )
+
+    if "hizmet var" in n:
+        _append_note(
+            notes,
+            "Hizmet var",
+            "Bankanın bu işlemi sunduğu resmî kaynakta doğrulanmıştır.",
+        )
+
+    if "ucretsiz / 0 try" in n or "ucretsiz/0 try" in n:
+        _append_note(
+            notes,
+            "Ücretsiz / 0 TRY",
+            "Banka bu işlemden ücret alınmadığını belirtmektedir.",
+        )
+
+    if "kuruma/isleme gore" in n:
+        _append_note(
+            notes,
+            "Kuruma/işleme göre",
+            "Ücret, ödeme yapılan kurum veya işlem türüne göre değişebilir.",
+        )
+    if "firmaya gore" in n:
+        _append_note(
+            notes,
+            "Firmaya göre",
+            "Ücret, ödeme yapılan firmaya göre değişebilir.",
+        )
+    if "fatura turune gore" in n:
+        _append_note(
+            notes,
+            "Fatura türüne göre",
+            "Ücret, ödenen fatura türüne göre değişebilir.",
+        )
+
+    # Sık kullanılan finansal terimler.
+    if re.search(r"\basgari\b|\bmin\b", n):
+        _append_note(
+            notes,
+            "Asgari",
+            "Uygulanabilecek en düşük ücret veya tutardır.",
+        )
+    if re.search(r"\bazami\b|\bmax\b", n):
+        _append_note(
+            notes,
+            "Azami",
+            "Uygulanabilecek en yüksek ücret veya tutardır.",
+        )
+    if "valor" in n:
+        _append_note(
+            notes,
+            "Valör",
+            "Transferin hesaba değer kazanacağı/işleme alınacağı günü ifade eder.",
+        )
+    if re.search(r"(^|[^a-z])yp([^a-z]|$)", n):
+        _append_note(
+            notes,
+            "YP",
+            "Yabancı para anlamına gelir.",
+        )
+    if "depozito" in n:
+        _append_note(
+            notes,
+            "Depozito",
+            "Kiralık kasa için ayrıca alınabilen güvence bedelidir.",
+        )
+    if "degerli kagit" in n and "haric" in n:
+        _append_note(
+            notes,
+            "Değerli kağıt bedeli hariç",
+            "Gösterilen çek ücretine resmî değerli kağıt bedeli dahil değildir.",
+        )
+
+    return "\n".join(notes)
+
+
+def _looks_like_generated_note(note: str) -> bool:
+    """Önceki V25 çalışmasının otomatik sözlük notlarını manuel not sanma."""
+    lines = [x.strip() for x in str(note or "").splitlines() if x.strip()]
+    if not lines:
+        return False
+    if not all(line.startswith("• ") and ":" in line for line in lines):
+        return False
+
+    heads = {line[2:].split(":", 1)[0].strip() for line in lines}
+    return bool(heads) and heads.issubset(_AUTO_NOTE_LABELS)
+
+
+def _compose_notes(auto_note: str, manual_note: str) -> str:
+    """
+    Otomatik terim açıklamalarını ve varsa gerçek manuel notu aynı hücrede,
+    yine madde madde gösterir.
+    """
+    lines = [x.strip() for x in str(auto_note or "").splitlines() if x.strip()]
+
+    manual_note = _clean(manual_note)
+    if manual_note and not _looks_like_generated_note(manual_note):
+        for raw_line in str(manual_note).splitlines():
+            clean_line = raw_line.strip()
+            if not clean_line:
+                continue
+            if clean_line.startswith("• "):
+                line = clean_line
+            else:
+                line = f"• Not: {clean_line}"
+            if line not in lines:
+                lines.append(line)
+
+    return "\n".join(lines)
 
 
 def _sheet_row_key(section: str, label: str) -> Tuple[str, str]:
@@ -5105,6 +5368,13 @@ def _write_comparison(ws, rows: Sequence[FeeRow], notes: Mapping[Tuple[str, str]
                 c.font = Font(bold=True, color="595959")
                 c.alignment = Alignment(horizontal="center", vertical="center")
                 c.border = Border(top=medium, bottom=thin)
+
+            # NOTLAR bölümünde section satırını yalnız görsel olarak devam ettir;
+            # açıklama metni burada tutulmaz.
+            note_section = ws.cell(row=current_row, column=13)
+            note_section.fill = PatternFill("solid", fgColor="E7E6E6")
+            note_section.font = Font(bold=False, color="595959", size=8.5)
+            note_section.border = Border(top=medium, bottom=thin)
             ws.row_dimensions[current_row].height = 24
             current_row += 1
             continue
@@ -5153,9 +5423,31 @@ def _write_comparison(ws, rows: Sequence[FeeRow], notes: Mapping[Tuple[str, str]
                 if comment:
                     c.comment = comment
 
-        note = notes.get(_sheet_row_key(section, spec.label))
-        if note:
-            ws.cell(row=current_row, column=13).value = note
+        # NOTLAR: satırdaki B:I hücrelerinde gerçekten kullanılan terimleri
+        # kısa bir sözlük halinde, tek tek maddeleyerek açıkla.
+        row_values = [
+            _clean(ws.cell(row=current_row, column=col_idx).value)
+            for col_idx in range(2, 10)
+        ]
+        auto_note = _automatic_notes(row_values)
+        manual_note = notes.get(_sheet_row_key(section, spec.label), "")
+        note_value = _compose_notes(auto_note, manual_note)
+
+        note_cell = ws.cell(row=current_row, column=13)
+        note_cell.value = note_value or None
+        note_cell.font = Font(
+            bold=False,
+            italic=False,
+            color="595959",
+            size=8.5,
+        )
+        note_cell.fill = PatternFill("solid", fgColor="FFF9E6")
+        note_cell.alignment = Alignment(
+            horizontal="left",
+            vertical="top",
+            wrap_text=True,
+        )
+        note_cell.border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
         if spec.service == "KASA" and spec.detail == "OZEL":
             ws.row_dimensions[current_row].height = 105
@@ -5170,6 +5462,15 @@ def _write_comparison(ws, rows: Sequence[FeeRow], notes: Mapping[Tuple[str, str]
             ws.row_dimensions[current_row].height = 66
         else:
             ws.row_dimensions[current_row].height = 52
+
+        # Not listesinin alt satırları görünür kalsın; gereksiz dev satır oluşturma.
+        if note_value:
+            note_lines = len(note_value.splitlines())
+            ws.row_dimensions[current_row].height = max(
+                ws.row_dimensions[current_row].height or 52,
+                min(108, 18 + note_lines * 13),
+            )
+
         current_row += 1
 
     for row_cells in ws.iter_rows(min_row=1, max_row=current_row - 1, min_col=1, max_col=13):
@@ -5182,7 +5483,11 @@ def _write_comparison(ws, rows: Sequence[FeeRow], notes: Mapping[Tuple[str, str]
         ws.column_dimensions[col_letter].width = 18
     for col_letter in "JKL":
         ws.column_dimensions[col_letter].width = 3
-    ws.column_dimensions["M"].width = 44
+    ws.column_dimensions["M"].width = 52
+
+    # Birleşik banka başlıklarını bozmadan gerçek Excel filtresi.
+    # A2:I... aralığı kullanılır: A=masraf adı, B:I=4 bankanın Mobil/Şube sütunları.
+    ws.auto_filter.ref = f"A2:I{current_row - 1}"
 
     ws.row_dimensions[1].height = 24
     ws.row_dimensions[2].height = 22
@@ -5316,6 +5621,13 @@ def _assert_preview_layout(ws) -> None:
             + ", ".join(bad)
         )
 
+    expected_filter = f"A2:I{ws.max_row}"
+    if ws.auto_filter.ref != expected_filter:
+        raise RuntimeError(
+            "Karşılaştırma filtresi oluşmadı: "
+            f"beklenen={expected_filter!r}, gelen={ws.auto_filter.ref!r}"
+        )
+
 
 def update_comparison_sheet(excel_path: str = "komisyonlar_guncel.xlsx") -> Dict[str, int]:
     path = Path(excel_path)
@@ -5367,7 +5679,7 @@ def update_comparison_sheet(excel_path: str = "komisyonlar_guncel.xlsx") -> Dict
     )
     print(
         "[comparison] Görünüm doğrulandı: "
-        "A=ortak masraf, B:I=4 banka Mobil/Şube, J:L=boş, M=NOTLAR."
+        "A=ortak masraf, B:I=4 banka Mobil/Şube (filtreli), J:L=boş, M=NOTLAR (düz font, maddeli terim açıklamaları)."
     )
 
     resolution_counts = {
