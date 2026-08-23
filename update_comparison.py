@@ -38,9 +38,9 @@ from openpyxl.comments import Comment
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
 
-COMPARISON_VERSION = "2026-08-24-v23-billing-methods-cleanup"
+COMPARISON_VERSION = "2026-08-24-v24-status-resolution-fix"
 COMPARISON_SHEET = "KARŞILAŞTIRMA"
-PREVIEW_LAYOUT_SIGNATURE = "4BANKS|A:I|J:L_EMPTY|M_NOTES|FAIL_CLOSED_V23|USER_AUDIT|FATURA_METHODS|SGK_GENERAL_CHANNELS|SCHOOL_STATUS|AIDAT_GENERIC_LABEL|PHONE_REFERENCE"
+PREVIEW_LAYOUT_SIGNATURE = "4BANKS|A:I|J:L_EMPTY|M_NOTES|FAIL_CLOSED_V24|USER_AUDIT|FATURA_METHODS|STATUS_ROWS_FIXED|SCHOOL_STATUS|AIDAT_GENERIC_LABEL|PHONE_REFERENCE"
 
 STATUS_AVAILABLE = "[SUPPLEMENTAL][AVAILABLE_NO_SEPARATE_FEE]"
 STATUS_EMPTY = "[SUPPLEMENTAL][PUBLISHED_EMPTY]"
@@ -2948,6 +2948,7 @@ def _audit_fatura_methods(
                     "service=fatura_kredi_karti" in _norm(r.aciklama)
                     and _status_kind(r) in {"AVAILABLE", "OFFICIAL_FEE"}
                 ),
+                numeric_only=False,
             )
             if not faq_rows:
                 return (_source_gap_text(spec, bank, wanted_channel), None, "SOURCE_GAP")
@@ -3122,6 +3123,7 @@ def _audit_fatura_methods(
                         and "channel=mobil" in _norm(r.aciklama)
                         and _status_kind(r) in {"AVAILABLE", "OFFICIAL_FEE"}
                     ),
+                    numeric_only=False,
                 )
                 if not status_rows:
                     return (_source_gap_text(spec, bank, wanted_channel), None, "SOURCE_GAP")
@@ -4487,6 +4489,7 @@ def _audit_school(
             and wanted_channel in _channels(r)
             and _status_kind(r) in {"AVAILABLE", "OFFICIAL_FEE"}
         ),
+        numeric_only=False,
     )
     if not candidates:
         return (_source_gap_text(spec, bank, wanted_channel), None, "SOURCE_GAP")
@@ -4516,6 +4519,7 @@ def _audit_phone(
             and wanted_channel in _channels(r)
             and _status_kind(r) in {"AVAILABLE", "OFFICIAL_FEE"}
         ),
+        numeric_only=False,
     )
     if not candidates:
         return (_source_gap_text(spec, bank, wanted_channel), None, "SOURCE_GAP")
