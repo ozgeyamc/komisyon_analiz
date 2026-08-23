@@ -38,9 +38,9 @@ from openpyxl.comments import Comment
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
 
-COMPARISON_VERSION = "2026-08-23-v22-final-gap-cleanup"
+COMPARISON_VERSION = "2026-08-24-v23-billing-methods-cleanup"
 COMPARISON_SHEET = "KARŞILAŞTIRMA"
-PREVIEW_LAYOUT_SIGNATURE = "4BANKS|A:I|J:L_EMPTY|M_NOTES|FAIL_CLOSED_V22|USER_AUDIT|ATM_EXACT|CHEQUE_CLEANUP|FATURA_BANDS"
+PREVIEW_LAYOUT_SIGNATURE = "4BANKS|A:I|J:L_EMPTY|M_NOTES|FAIL_CLOSED_V23|USER_AUDIT|FATURA_METHODS|SGK_GENERAL_CHANNELS|SCHOOL_STATUS|AIDAT_GENERIC_LABEL|PHONE_REFERENCE"
 
 STATUS_AVAILABLE = "[SUPPLEMENTAL][AVAILABLE_NO_SEPARATE_FEE]"
 STATUS_EMPTY = "[SUPPLEMENTAL][PUBLISHED_EMPTY]"
@@ -162,9 +162,10 @@ LAYOUT = [
     ("ROW", RowSpec("Ortak ATM Para Çekme", "ORTAK_ATM_PARA_CEKME", split_channel=False)),
     ("ROW", RowSpec("Ortak ATM Bakiye Sorgulama", "BAKIYE_ATM_YURTICI", split_channel=False)),
 
-    ("SECTION", "FATURA"),
-    ("ROW", RowSpec("0 TRY - 149,99 TRY", "FATURA", "FATURA_1")),
-    ("ROW", RowSpec("150 TRY -", "FATURA", "FATURA_2")),
+    ("SECTION", "FATURA / KURUM ÖDEMELERİ"),
+    ("ROW", RowSpec("Hesaptan Fatura / Kurum Ödemesi", "FATURA", detail="HESAPTAN")),
+    ("ROW", RowSpec("Kredi Kartından Fatura / Kurum Ödemesi", "FATURA", detail="KREDI_KARTI")),
+    ("ROW", RowSpec("Nakit Fatura / Kurum Ödemesi", "FATURA", detail="NAKIT")),
 
     ("SECTION", "HAVALE"),
     ("ROW", RowSpec("0 TRY - 8.300 TRY", "HAVALE", "TRANSFER_1")),
@@ -2756,79 +2757,463 @@ def _audit_exact_status(
 
 
 
-def _audit_fatura_garanti(
+
+def _audit_fatura_methods(
     rows: Sequence[FeeRow], bank: str, spec: RowSpec, wanted_channel: str,
 ) -> Optional[Tuple[str, Optional[FeeRow], str]]:
     """
-    Garanti'nin kredi kartından Fatura/Kurum ödemesinde tek kaynak satırında
-    iki farklı eşik yayımlanıyor:
-      <=149,99 TRY -> asgari sabit tutar
-      >=150 TRY    -> azami oran
-    Alt bantta oranı da birlikte göstermek yanlış olduğundan bantları burada
-    açıklamadaki resmî kurala göre ayırıyoruz.
+    Fatura/Kurum ödemelerini ödeme yöntemine göre ayırır.
+
+    Kritik kural:
+    - "Hesaptan", "kredi kartından" ve "nakit" tarifeleri birbirine taşınmaz.
+    - Banka yalnız genel/gişe Fatura-Kurum tarifesi yayımlıyorsa hücre bunu
+      açıkça "Genel tarife" diye belirtir; yöntem-spesifik ücretmiş gibi sunmaz.
+    - İş Bankası kredi kartı kuralı resmî SSS sayfasındaki doğrulanmış
+      supplemental status satırından alınır.
+    - Yapı Kredi Mobil/İnternet vadesiz hesaptan fatura ödemesinin ücretsiz
+      olduğu resmî fatura sayfasındaki supplemental status ile doğrulanır.
     """
-    if bank != "GARANTİ" or spec.service != "FATURA" or wanted_channel != "MOBIL":
+    if spec.service != "FATURA":
         return None
 
-    candidates = _audit_rows(
-        rows, bank,
-        lambda r: (
-            "kredi kartindan fatura/kurum odemesi" in _norm(r.masraf)
-            and "mobil" in _norm(r.masraf)
-            and "ek kaynak" not in _norm(r.kategori)
-        ),
-    )
-    if not candidates:
+    method = (spec.detail or "").upper()
+    if method not in {"HESAPTAN", "KREDI_KARTI", "NAKIT"}:
         return None
 
-    row = candidates[0]
-    band = spec.band_key or ""
+    def first(pred) -> Optional[FeeRow]:
+        candidates = _audit_rows(rows, bank, pred)
+        return candidates[0] if candidates else None
 
-    if band == "FATURA_1":
-        value = _display_amount(row.asgari_tutar)
-    elif band == "FATURA_2":
-        value = _percent(row.azami_oran) or _percent(row.asgari_oran)
-    else:
-        return None
+    def amount_range(row: Optional[FeeRow]) -> str:
+        if row is None:
+            return ""
+        lo = _display_amount(row.asgari_tutar)
+        hi = _display_amount(row.azami_tutar)
+        if lo and hi:
+            return lo if _norm(lo) == _norm(hi) else f"{lo} - {hi}"
+        return hi or lo
 
-    if not value:
-        return (_source_gap_text(spec, bank, wanted_channel), None, "SOURCE_GAP")
+    def with_tax(lines: List[str], row: Optional[FeeRow]) -> str:
+        tax = _bsmv_label(row)
+        if tax:
+            lines.append(tax)
+        return "\n".join(x for x in lines if x)
 
-    tax = _bsmv_label(row)
-    if tax:
-        value += f"\n{tax}"
+    # ------------------------------------------------------------------
+    # GARANTİ BBVA
+    # ------------------------------------------------------------------
+    if bank == "GARANTİ":
+        if method == "HESAPTAN":
+            if wanted_channel == "SUBE":
+                return (
+                    "Ayrı hesaptan-Şube tarifesi yayımlanmıyor",
+                    None,
+                    "PUBLICATION_STATUS",
+                )
 
-    return (value, row, "NUMERIC")
-
-
-def _audit_fatura_isbank(
-    rows: Sequence[FeeRow], bank: str, spec: RowSpec, wanted_channel: str,
-) -> Optional[Tuple[str, Optional[FeeRow], str]]:
-    if bank != "İŞBANKASI" or spec.service != "FATURA":
-        return None
-
-    def pred(row: FeeRow) -> bool:
-        t = _norm(f"{row.kategori} | {row.masraf}")
-        if "fatura odemeleri" not in t:
-            return False
-        if wanted_channel == "MOBIL":
-            return ("internet sube" in t or "iscep" in t) and "bankamatik" not in t
-        if wanted_channel == "SUBE":
-            # Fiziksel Şube satırı; "İnternet Şube" kesinlikle hariç.
-            return (
-                "sube" in t
-                and "internet sube" not in t
-                and "iscep" not in t
-                and "bankamatik" not in t
+            row = first(
+                lambda r: (
+                    "hesaptan fatura/kurum odemesi" in _norm(r.masraf)
+                    and "mobil" in _norm(r.masraf)
+                    and "ek kaynak" not in _norm(r.kategori)
+                )
             )
-        return False
+            if row is None:
+                return (_source_gap_text(spec, bank, wanted_channel), None, "SOURCE_GAP")
 
-    candidates = _audit_rows(rows, bank, pred)
-    if not candidates:
-        return (_source_gap_text(spec, bank, wanted_channel), None, "SOURCE_GAP")
-    # En kısa/özgül satır yeterli; aynı kanalın tekrarları varsa ücret imzası aynı olmalı.
-    row = sorted(candidates, key=lambda r: len(_norm(r.masraf)))[0]
-    return (_audit_institution_range(row), row, "NUMERIC")
+            lines = [amount_range(row)]
+            rate = _percent(row.azami_oran) or _percent(row.asgari_oran)
+            if rate:
+                lines.append(f"azami {rate}")
+            lines.append("Kuruma/işleme göre")
+            return (with_tax(lines, row), row, "NUMERIC")
+
+        if method == "KREDI_KARTI":
+            if wanted_channel == "SUBE":
+                return (
+                    "Ayrı kredi kartı-Şube tarifesi yayımlanmıyor",
+                    None,
+                    "PUBLICATION_STATUS",
+                )
+
+            row = first(
+                lambda r: (
+                    "kredi kartindan fatura/kurum odemesi" in _norm(r.masraf)
+                    and "mobil" in _norm(r.masraf)
+                    and "ek kaynak" not in _norm(r.kategori)
+                )
+            )
+            if row is None:
+                return (_source_gap_text(spec, bank, wanted_channel), None, "SOURCE_GAP")
+
+            fixed = _display_amount(row.asgari_tutar)
+            rate = _percent(row.azami_oran) or _percent(row.asgari_oran)
+            if not fixed or not rate:
+                return (_source_gap_text(spec, bank, wanted_channel), None, "SOURCE_GAP")
+
+            return (
+                with_tax(
+                    [
+                        f"149,99 TRY'ye kadar: {fixed}",
+                        f"150 TRY ve üzeri: {rate}",
+                    ],
+                    row,
+                ),
+                row,
+                "NUMERIC",
+            )
+
+        # NAKİT
+        if wanted_channel == "MOBIL":
+            return (
+                "Mobil/İnternet kanalında nakit ödeme uygulanmıyor",
+                None,
+                "NOT_APPLICABLE",
+            )
+
+        row = first(
+            lambda r: (
+                "nakit fatura/kurum odemesi" in _norm(r.masraf)
+                and "sube" in _norm(r.masraf)
+                and "ek kaynak" not in _norm(r.kategori)
+            )
+        )
+        if row is None:
+            return (_source_gap_text(spec, bank, wanted_channel), None, "SOURCE_GAP")
+
+        return (
+            with_tax(
+                [amount_range(row), "Kuruma/işleme göre"],
+                row,
+            ),
+            row,
+            "NUMERIC",
+        )
+
+    # ------------------------------------------------------------------
+    # İŞ BANKASI
+    # ------------------------------------------------------------------
+    if bank == "İŞBANKASI":
+        if method == "HESAPTAN":
+            if wanted_channel == "MOBIL":
+                row = first(
+                    lambda r: (
+                        _norm(r.masraf) == "fatura odemeleri"
+                        and (
+                            "internet sube" in _norm(r.kategori)
+                            or "iscep" in _norm(r.kategori)
+                        )
+                        and "bankamatik" not in _norm(r.kategori)
+                    )
+                )
+                if row is None:
+                    return (_source_gap_text(spec, bank, wanted_channel), None, "SOURCE_GAP")
+                return (
+                    with_tax(
+                        [amount_range(row), "Kuruma/işleme göre"],
+                        row,
+                    ),
+                    row,
+                    "NUMERIC",
+                )
+
+            row = first(
+                lambda r: (
+                    _norm(r.masraf) == "fatura odemeleri"
+                    and "fatura odemeleri - sube" in _norm(r.kategori)
+                    and "internet sube" not in _norm(r.kategori)
+                    and "bankamatik" not in _norm(r.kategori)
+                )
+            )
+            if row is None:
+                return (_source_gap_text(spec, bank, wanted_channel), None, "SOURCE_GAP")
+            return (
+                with_tax(
+                    [
+                        "Genel gişe tarifesi:",
+                        amount_range(row),
+                        "Hesap/nakit ayrımı yayımlanmıyor",
+                    ],
+                    row,
+                ),
+                row,
+                "GENERIC_TARIFF",
+            )
+
+        if method == "KREDI_KARTI":
+            faq_rows = _audit_rows(
+                rows,
+                bank,
+                lambda r: (
+                    "service=fatura_kredi_karti" in _norm(r.aciklama)
+                    and _status_kind(r) in {"AVAILABLE", "OFFICIAL_FEE"}
+                ),
+            )
+            if not faq_rows:
+                return (_source_gap_text(spec, bank, wanted_channel), None, "SOURCE_GAP")
+            row = faq_rows[0]
+            value = _audit_status_text(
+                row,
+                "Genel kredi kartı tarifesi:\n"
+                "0-150 TRY: 5 TRY\n"
+                "150 TRY üzeri: %3,50 + BSMV\n"
+                "Kanal ayrımı yayımlanmıyor",
+            )
+            return (value, row, "NUMERIC")
+
+        # NAKİT
+        if wanted_channel == "MOBIL":
+            return (
+                "Mobil/İnternet kanalında nakit ödeme uygulanmıyor",
+                None,
+                "NOT_APPLICABLE",
+            )
+
+        row = first(
+            lambda r: (
+                _norm(r.masraf) == "fatura odemeleri"
+                and "fatura odemeleri - sube" in _norm(r.kategori)
+                and "internet sube" not in _norm(r.kategori)
+                and "bankamatik" not in _norm(r.kategori)
+            )
+        )
+        if row is None:
+            return (_source_gap_text(spec, bank, wanted_channel), None, "SOURCE_GAP")
+        return (
+            with_tax(
+                [
+                    "Genel gişe tarifesi:",
+                    amount_range(row),
+                    "Nakit/hesap ayrımı yayımlanmıyor",
+                ],
+                row,
+            ),
+            row,
+            "GENERIC_TARIFF",
+        )
+
+    # ------------------------------------------------------------------
+    # AKBANK
+    # ------------------------------------------------------------------
+    if bank == "AKBANK":
+        if method == "HESAPTAN":
+            if wanted_channel == "MOBIL":
+                row = first(
+                    lambda r: (
+                        "akbank mobil'den fatura / kurum tahsilati" in _norm(r.masraf)
+                        and "ek kaynak" not in _norm(r.kategori)
+                    )
+                )
+                label = "Genel Mobil tarifesi:"
+            else:
+                row = first(
+                    lambda r: (
+                        "giseden fatura / kurum tahsilati" in _norm(r.masraf)
+                        and "ek kaynak" not in _norm(r.kategori)
+                    )
+                )
+                label = "Genel gişe tarifesi:"
+
+            if row is None:
+                return (_source_gap_text(spec, bank, wanted_channel), None, "SOURCE_GAP")
+
+            return (
+                with_tax(
+                    [
+                        label,
+                        amount_range(row),
+                        "Ödeme aracı ayrılmıyor",
+                    ],
+                    row,
+                ),
+                row,
+                "GENERIC_TARIFF",
+            )
+
+        if method == "KREDI_KARTI":
+            if wanted_channel == "MOBIL":
+                row = first(
+                    lambda r: (
+                        "kredi kartindan anlik fatura odeme ucreti (akbank internet)" in _norm(r.masraf)
+                        and "ek kaynak" not in _norm(r.kategori)
+                    )
+                )
+                if row is None:
+                    return (_source_gap_text(spec, bank, wanted_channel), None, "SOURCE_GAP")
+                max_fee = _display_amount(row.azami_tutar) or _display_amount(row.asgari_tutar)
+                return (
+                    with_tax(
+                        [
+                            "Mobil için ayrı tarife yayımlanmıyor",
+                            f"Akbank İnternet: azami {max_fee}",
+                            "Firmaya göre",
+                        ],
+                        row,
+                    ),
+                    row,
+                    "GENERIC_TARIFF",
+                )
+
+            row = first(
+                lambda r: (
+                    "kredi kartindan anlik fatura odeme ucreti (sube)" in _norm(r.masraf)
+                    and "ek kaynak" not in _norm(r.kategori)
+                )
+            )
+            if row is None:
+                return (_source_gap_text(spec, bank, wanted_channel), None, "SOURCE_GAP")
+            max_fee = _display_amount(row.azami_tutar) or _display_amount(row.asgari_tutar)
+            return (
+                with_tax(
+                    [f"Azami {max_fee}", "Firmaya göre"],
+                    row,
+                ),
+                row,
+                "NUMERIC",
+            )
+
+        # NAKİT
+        if wanted_channel == "MOBIL":
+            return (
+                "Mobil/İnternet kanalında nakit ödeme uygulanmıyor",
+                None,
+                "NOT_APPLICABLE",
+            )
+
+        row = first(
+            lambda r: (
+                "giseden fatura / kurum tahsilati" in _norm(r.masraf)
+                and "ek kaynak" not in _norm(r.kategori)
+            )
+        )
+        if row is None:
+            return (_source_gap_text(spec, bank, wanted_channel), None, "SOURCE_GAP")
+        return (
+            with_tax(
+                [
+                    "Genel gişe tarifesi:",
+                    amount_range(row),
+                    "Nakit/hesap ayrımı yayımlanmıyor",
+                ],
+                row,
+            ),
+            row,
+            "GENERIC_TARIFF",
+        )
+
+    # ------------------------------------------------------------------
+    # YAPI KREDİ
+    # ------------------------------------------------------------------
+    if bank == "YAPIKREDI":
+        general = first(
+            lambda r: (
+                "fatura ve anlasmali kurum odemeleri" in _norm(r.masraf)
+                and "ek kaynak" not in _norm(r.kategori)
+            )
+        )
+
+        if method == "HESAPTAN":
+            if wanted_channel == "MOBIL":
+                status_rows = _audit_rows(
+                    rows,
+                    bank,
+                    lambda r: (
+                        "service=fatura_hesaptan" in _norm(r.aciklama)
+                        and "channel=mobil" in _norm(r.aciklama)
+                        and _status_kind(r) in {"AVAILABLE", "OFFICIAL_FEE"}
+                    ),
+                )
+                if not status_rows:
+                    return (_source_gap_text(spec, bank, wanted_channel), None, "SOURCE_GAP")
+                row = status_rows[0]
+                return (
+                    _audit_status_text(
+                        row,
+                        "Ücretsiz / 0 TRY\nVadesiz hesaptan",
+                    ),
+                    row,
+                    "NUMERIC",
+                )
+
+            if general is None:
+                return (_source_gap_text(spec, bank, wanted_channel), None, "SOURCE_GAP")
+            return (
+                with_tax(
+                    [
+                        "Genel tarife:",
+                        amount_range(general),
+                        "Kanal/ödeme aracı ayrılmıyor",
+                    ],
+                    general,
+                ),
+                general,
+                "GENERIC_TARIFF",
+            )
+
+        if method == "KREDI_KARTI":
+            card_rows = _audit_rows(
+                rows,
+                bank,
+                lambda r: (
+                    "anlasmali kurum fatura /sgk prim odemeleri" in _norm(r.masraf)
+                    and "sube veya sgk.gov.tr" not in _norm(r.masraf)
+                    and "ek kaynak" not in _norm(r.kategori)
+                ),
+            )
+            low = next(
+                (r for r in card_rows if "0 - 150" in _norm(r.masraf) or "0-150" in _norm(r.masraf)),
+                None,
+            )
+            high = next(
+                (r for r in card_rows if "150,01" in _norm(r.masraf) or "150.01" in _norm(r.masraf)),
+                None,
+            )
+            if low is None or high is None:
+                return (_source_gap_text(spec, bank, wanted_channel), None, "SOURCE_GAP")
+
+            fixed = _display_amount(low.azami_tutar) or _display_amount(low.asgari_tutar)
+            rate = _percent(high.azami_oran) or _percent(high.asgari_oran)
+            if not fixed or not rate:
+                return (_source_gap_text(spec, bank, wanted_channel), None, "SOURCE_GAP")
+
+            return (
+                with_tax(
+                    [
+                        "Genel kredi kartı tarifesi:",
+                        f"0-150 TRY: {fixed}",
+                        f"150,01 TRY ve üzeri: {rate}",
+                        "Kanal ayrımı yayımlanmıyor",
+                    ],
+                    low,
+                ),
+                low,
+                "GENERIC_TARIFF",
+            )
+
+        # NAKİT
+        if wanted_channel == "MOBIL":
+            return (
+                "Mobil/İnternet kanalında nakit ödeme uygulanmıyor",
+                None,
+                "NOT_APPLICABLE",
+            )
+
+        if general is None:
+            return (_source_gap_text(spec, bank, wanted_channel), None, "SOURCE_GAP")
+        return (
+            with_tax(
+                [
+                    "Genel tarife:",
+                    amount_range(general),
+                    "Nakit/hesap ayrımı yayımlanmıyor",
+                ],
+                general,
+            ),
+            general,
+            "GENERIC_TARIFF",
+        )
+
+    return None
 
 
 def _audit_atm(
@@ -2989,9 +3374,16 @@ def _audit_sgk(
             return (_source_gap_text(spec, bank, wanted_channel), None, "SOURCE_GAP")
         row = candidates[0]
         if band == "SGK_LOW":
-            value = _display_amount(row.asgari_tutar) or _display_amount(row.azami_tutar)
+            fee = _display_amount(row.asgari_tutar) or _display_amount(row.azami_tutar)
         else:
-            value = _percent(row.asgari_oran) or _percent(row.azami_oran)
+            fee = _percent(row.asgari_oran) or _percent(row.azami_oran)
+        if not fee:
+            return (_source_gap_text(spec, bank, wanted_channel), None, "SOURCE_GAP")
+        value = (
+            "Genel SGK tarifesi:\n"
+            f"{fee}\n"
+            "Kanal ayrımı yayımlanmıyor"
+        )
         tax = _bsmv_label(row)
         if tax:
             value += f"\n{tax}"
@@ -3036,7 +3428,8 @@ def _audit_sgk(
         )
         if not candidates:
             return (_source_gap_text(spec, bank, wanted_channel), None, "SOURCE_GAP")
-        # En ayrıntılı numeric satırı seç: min tutar + oran varsa onu tercih et.
+        # Kanal ayrımı yayımlanmayan genel Anlık SGK tarifesini kullan.
+        # Min tutar + oran birlikte yayımlanan satır varsa onu tercih et.
         candidates.sort(
             key=lambda r: (
                 bool(_display_amount(r.asgari_tutar) or _display_amount(r.azami_tutar)),
@@ -3045,7 +3438,18 @@ def _audit_sgk(
             reverse=True,
         )
         row = candidates[0]
-        return (_fee_text(row, None), row, "NUMERIC")
+        fee = _fee_value_compact(row)
+        if not fee:
+            return (_source_gap_text(spec, bank, wanted_channel), None, "SOURCE_GAP")
+        value = (
+            "Genel SGK tarifesi:\n"
+            f"{fee}\n"
+            "Kanal ayrımı yayımlanmıyor"
+        )
+        tax = _bsmv_label(row)
+        if tax:
+            value += f"\n{tax}"
+        return (value, row, "NUMERIC")
 
     if bank == "YAPIKREDI":
         if wanted_channel == "SUBE":
@@ -3884,86 +4288,172 @@ def _audit_normal_kasa(
     return (value, row, "NUMERIC")
 
 
+
 def _audit_aidat(
     rows: Sequence[FeeRow], bank: str, spec: RowSpec, wanted_channel: str,
 ) -> Optional[Tuple[str, Optional[FeeRow], str]]:
     if spec.service != "AIDAT":
         return None
 
-    # Garanti'nin ilk sayfasında aidatı kapsayan iki ayrı mobil tarife var:
-    # hesaptan Fatura/Kurum (kuruma göre) ve kredi kartından Fatura/Kurum
-    # (149,99 TRY'ye kadar sabit; 150 TRY+ oran). Birini diğerinin yerine
-    # seçmek yerine ikisini gerçek ödeme yöntemi etiketiyle aynı hücrede göster.
-    if bank == "GARANTİ" and wanted_channel == "MOBIL":
-        account_rows = _audit_rows(
-            rows, bank,
-            lambda r: (
-                "hesaptan fatura/kurum odemesi" in _norm(r.masraf)
-                and "mobil" in _norm(r.masraf)
-            ),
-        )
-        card_rows = _audit_rows(
-            rows, bank,
-            lambda r: (
-                "kredi kartindan fatura/kurum odemesi" in _norm(r.masraf)
-                and "mobil" in _norm(r.masraf)
-            ),
-        )
-        if account_rows or card_rows:
-            lines: List[str] = []
-            first = (account_rows or card_rows)[0]
-            if account_rows:
-                row = account_rows[0]
-                lines.append(f"Hesaptan: {_fee_value_compact(row)} (kuruma/işleme göre)")
-            if card_rows:
-                row = card_rows[0]
-                min_amt = _display_amount(row.asgari_tutar)
-                max_rate = _percent(row.azami_oran or row.asgari_oran)
-                if min_amt and max_rate:
-                    lines.append(f"Kredi kartından: ≤149,99 TRY {min_amt}; 150 TRY+ {max_rate}")
-                else:
-                    lines.append(f"Kredi kartından: {_fee_value_compact(row)}")
-            # Her iki ilgili satır da BSMV dahil yayımlanıyor.
-            lines.append("BSMV dahil")
-            return ("\n".join(lines), first, "NUMERIC")
+    def first(pred) -> Optional[FeeRow]:
+        candidates = _audit_rows(rows, bank, pred)
+        return candidates[0] if candidates else None
 
-    # İş Bankası ilk sayfada hizmeti doğruluyor fakat ayrı numeric aidat ücreti
-    # yayımlamıyor. Genel fatura tarifesi otomatik olarak aidata taşınmaz.
+    def range_text(row: Optional[FeeRow]) -> str:
+        if row is None:
+            return ""
+        lo = _display_amount(row.asgari_tutar)
+        hi = _display_amount(row.azami_tutar)
+        if lo and hi:
+            return lo if _norm(lo) == _norm(hi) else f"{lo} - {hi}"
+        return hi or lo
+
+    # Garanti'nin ana resmî Fatura/Kurum satırlarının açıklaması aidat/site
+    # tahsilatını açıkça kapsar. Bu nedenle burada generic eşleştirme değil,
+    # kaynağın bizzat aidatı kapsadığını belirten gerçek satırlar kullanılır.
+    if bank == "GARANTİ":
+        if wanted_channel == "MOBIL":
+            account = first(
+                lambda r: (
+                    "hesaptan fatura/kurum odemesi" in _norm(r.masraf)
+                    and "mobil" in _norm(r.masraf)
+                    and "aidat" in _norm(r.aciklama)
+                    and "ek kaynak" not in _norm(r.kategori)
+                )
+            )
+            card = first(
+                lambda r: (
+                    "kredi kartindan fatura/kurum odemesi" in _norm(r.masraf)
+                    and "mobil" in _norm(r.masraf)
+                    and "ek kaynak" not in _norm(r.kategori)
+                )
+            )
+            if account is None and card is None:
+                return (_source_gap_text(spec, bank, wanted_channel), None, "SOURCE_GAP")
+
+            lines: List[str] = []
+            first_row = account or card
+            if account is not None:
+                amount = range_text(account)
+                rate = _percent(account.azami_oran) or _percent(account.asgari_oran)
+                line = f"Hesaptan (Fatura/aidat genel tarifesi): {amount}"
+                if rate:
+                    line += f" / azami {rate}"
+                lines.append(line)
+                lines.append("Kuruma/işleme göre")
+            if card is not None:
+                fixed = _display_amount(card.asgari_tutar)
+                rate = _percent(card.azami_oran) or _percent(card.asgari_oran)
+                if fixed and rate:
+                    lines.append(
+                        f"Kredi kartından: ≤149,99 TRY {fixed}; 150 TRY+ {rate}"
+                    )
+            tax = _bsmv_label(first_row)
+            if tax:
+                lines.append(tax)
+            return ("\n".join(lines), first_row, "NUMERIC")
+
+        row = first(
+            lambda r: (
+                "nakit fatura/kurum odemesi" in _norm(r.masraf)
+                and "sube" in _norm(r.masraf)
+                and "aidat" in _norm(r.aciklama)
+                and "ek kaynak" not in _norm(r.kategori)
+            )
+        )
+        if row is None:
+            return (_source_gap_text(spec, bank, wanted_channel), None, "SOURCE_GAP")
+        lines = [
+            "Fatura/aidat genel Şube-Nakit tarifesi:",
+            range_text(row),
+            "Kuruma/işleme göre",
+        ]
+        tax = _bsmv_label(row)
+        if tax:
+            lines.append(tax)
+        return ("\n".join(lines), row, "GENERIC_TARIFF")
+
+    # İş Bankası aidat hizmetini resmî hizmet sayfasında doğruluyor; ayrı
+    # numeric aidat tarifesi yayımlanmadığı için Fatura tarifesi taşınmaz.
     if bank == "İŞBANKASI":
-        status = _audit_exact_status(rows, bank, "AIDAT", "GENEL") or _audit_exact_status(rows, bank, "AIDAT", wanted_channel)
+        status = (
+            _audit_exact_status(rows, bank, "AIDAT", "GENEL")
+            or _audit_exact_status(rows, bank, "AIDAT", wanted_channel)
+        )
         return (
-            _audit_status_text(status, "Hizmet var\nAyrı aidat ücreti yayımlanmıyor"),
+            _audit_status_text(
+                status,
+                "Hizmet var\nAyrı aidat ücreti yayımlanmıyor",
+            ),
             status,
             "STATUS",
         )
 
-    # Diğer bankalarda yalnız SERVICE=AIDAT ve aynı kanal ile üretilmiş kaynak
-    # satırını kullan; genel fatura fallback'i yok.
-    candidates = _audit_rows(
-        rows, bank,
-        lambda r: (
-            "service=aidat" in _norm(r.aciklama)
-            and wanted_channel in _channels(r)
-        ),
-    )
-    if not candidates:
-        status = _audit_exact_status(rows, bank, "AIDAT", wanted_channel)
-        if status is not None:
-            return (_audit_status_text(status, "Hizmet doğrulandı; ayrı tarife yayımlanmıyor"), status, "STATUS")
-
-        if bank in {"AKBANK", "YAPIKREDI"} and wanted_channel == "SUBE":
+    if bank == "AKBANK":
+        if wanted_channel == "SUBE":
             return (
                 "Şube için ayrı aidat tarifesi yayımlanmıyor",
                 None,
                 "PUBLICATION_STATUS",
             )
+        status = _audit_exact_status(rows, bank, "AIDAT", "MOBIL")
+        if status is None:
+            return (_source_gap_text(spec, bank, wanted_channel), None, "SOURCE_GAP")
+        generic = first(
+            lambda r: (
+                "akbank mobil'den fatura / kurum tahsilati" in _norm(r.masraf)
+                and "ek kaynak" not in _norm(r.kategori)
+            )
+        )
+        if generic is None:
+            return (
+                "Hizmet var\nAidata özel ücret yayımlanmıyor",
+                status,
+                "STATUS",
+            )
+        lines = [
+            "Genel Fatura/Kurum tarifesi:",
+            range_text(generic),
+            "Aidata özel ücret yayımlanmıyor",
+        ]
+        tax = _bsmv_label(generic)
+        if tax:
+            lines.append(tax)
+        return ("\n".join(lines), generic, "GENERIC_TARIFF")
 
-        return (_source_gap_text(spec, bank, wanted_channel), None, "SOURCE_GAP")
+    if bank == "YAPIKREDI":
+        if wanted_channel == "SUBE":
+            return (
+                "Şube için ayrı aidat tarifesi yayımlanmıyor",
+                None,
+                "PUBLICATION_STATUS",
+            )
+        status = _audit_exact_status(rows, bank, "AIDAT", "MOBIL")
+        if status is None:
+            return (_source_gap_text(spec, bank, wanted_channel), None, "SOURCE_GAP")
+        generic = first(
+            lambda r: (
+                "fatura ve anlasmali kurum odemeleri" in _norm(r.masraf)
+                and "ek kaynak" not in _norm(r.kategori)
+            )
+        )
+        if generic is None:
+            return (
+                "Hizmet var\nAidata özel ücret yayımlanmıyor",
+                status,
+                "STATUS",
+            )
+        lines = [
+            "Genel Fatura/Kurum tarifesi:",
+            range_text(generic),
+            "Aidata özel ücret yayımlanmıyor",
+        ]
+        tax = _bsmv_label(generic)
+        if tax:
+            lines.append(tax)
+        return ("\n".join(lines), generic, "GENERIC_TARIFF")
 
-    row = candidates[0]
-    primary = _audit_backfill_primary_source(rows, bank, row)
-    source = primary or row
-    return (_audit_institution_range(source), source, "NUMERIC")
+    return None
 
 
 def _audit_school(
@@ -3972,42 +4462,41 @@ def _audit_school(
     if spec.service != "OZEL_OKUL":
         return None
 
-    # Resmî okul sayfalarının doğruladığı ödeme kanalları.
+    # Resmî okul/hizmet sayfalarının doğruladığı kanallar.
     allowed = {
         "GARANTİ": {"SUBE"},
-        "İŞBANKASI": {"SUBE"},       # ATM de var; karşılaştırmada ATM sütunu yok.
+        "İŞBANKASI": {"SUBE"},       # Bankamatik de var; karşılaştırmada ATM sütunu yok.
         "AKBANK": {"MOBIL"},
         "YAPIKREDI": {"MOBIL"},
     }
+
     if wanted_channel not in allowed.get(bank, set()):
-        return ("Bu kanalda tarife yayımlanmıyor", None, "PUBLICATION_STATUS")
-
-    # İş Bankası özel okul sayfası Şube/Bankamatik kanalını doğrular.
-    # Karşılaştırmadaki Şube sütununda fiziksel "Fatura Ödemeleri - Şube"
-    # tarifesi kullanılmalı; ATM tarifesi yanlışlıkla seçilmemeli.
-    if bank == "İŞBANKASI" and wanted_channel == "SUBE":
-        exact = _audit_fatura_isbank(
-            rows,
-            bank,
-            RowSpec("audit", "FATURA"),
-            "SUBE",
+        return (
+            "Bu kanalda özel okul ödeme tarifesi yayımlanmıyor",
+            None,
+            "PUBLICATION_STATUS",
         )
-        if exact is not None:
-            return exact
 
+    # Hizmet/kanal varlığı supplemental resmî kaynaktan doğrulanır.
+    # Genel Fatura/Kurum ücretini özel okul ücretiymiş gibi numeric taşımıyoruz.
     candidates = _audit_rows(
-        rows, bank,
+        rows,
+        bank,
         lambda r: (
             "service=ozel_okul" in _norm(r.aciklama)
             and wanted_channel in _channels(r)
+            and _status_kind(r) in {"AVAILABLE", "OFFICIAL_FEE"}
         ),
     )
     if not candidates:
         return (_source_gap_text(spec, bank, wanted_channel), None, "SOURCE_GAP")
+
     row = candidates[0]
-    primary = _audit_backfill_primary_source(rows, bank, row)
-    source = primary or row
-    return (_audit_institution_range(source), source, "NUMERIC")
+    return (
+        "Hizmet var\nAyrı özel okul ücreti yayımlanmıyor",
+        row,
+        "STATUS",
+    )
 
 
 def _audit_phone(
@@ -4016,38 +4505,29 @@ def _audit_phone(
     if spec.service != "TELEFON":
         return None
 
-    # İş Bankası telefon faturalarını genel Fatura Ödemeleri sistemi altında
-    # yayımlar. İnternet Şube/İşCep/Çözüm Merkezi dijital; fiziksel Şube ayrıdır.
-    # Supplemental backfill'in ATM tarifesini seçmesine izin verme.
-    if bank == "İŞBANKASI":
-        exact = _audit_fatura_isbank(
-            rows,
-            bank,
-            RowSpec("audit", "FATURA"),
-            wanted_channel,
-        )
-        if exact is not None:
-            return exact
-
-    # Telefon hizmeti için supplemental satır ilk sayfadaki genel fatura/kurum
-    # tarifesini kanıtlı biçimde taşımışsa onu kullan. Sabit ücret gibi sunma;
-    # min-max aralığı ve kuruma/işleme göre notunu koru.
+    # Telefon/cep telefonu faturası için ayrı operatör ücreti varmış gibi genel
+    # Fatura/Kurum rakamını tekrar etmiyoruz. Hizmet kanalı doğrulanır ve kullanıcı
+    # ücret için yeni FATURA / KURUM ÖDEMELERİ bölümüne yönlendirilir.
     candidates = _audit_rows(
-        rows, bank,
+        rows,
+        bank,
         lambda r: (
             "service=telefon" in _norm(r.aciklama)
             and wanted_channel in _channels(r)
+            and _status_kind(r) in {"AVAILABLE", "OFFICIAL_FEE"}
         ),
     )
     if not candidates:
-        status = _audit_exact_status(rows, bank, "TELEFON", wanted_channel)
-        if status is not None:
-            return (_audit_status_text(status, "Hizmet var; ayrı telefon tarifesi yayımlanmıyor"), status, "STATUS")
         return (_source_gap_text(spec, bank, wanted_channel), None, "SOURCE_GAP")
+
     row = candidates[0]
-    primary = _audit_backfill_primary_source(rows, bank, row)
-    source = primary or row
-    return (_audit_institution_range(source), source, "NUMERIC")
+    return (
+        "Telefon faturası ödeme hizmeti var\n"
+        "Genel Fatura/Kurum Ödemeleri tarifesi uygulanır\n"
+        "(Bkz. FATURA / KURUM ÖDEMELERİ)",
+        row,
+        "STATUS",
+    )
 
 
 def _audit_vergi(
@@ -4096,8 +4576,7 @@ def _user_audit_override(
 ) -> Optional[Tuple[str, Optional[FeeRow], str]]:
     """Kullanıcı tarafından tek tek denetlenen yüksek riskli aileler."""
     for resolver in (
-        _audit_fatura_garanti,
-        _audit_fatura_isbank,
+        _audit_fatura_methods,
         _audit_akbank_havale,
         _audit_sgk,
         _audit_regular_transfer,
