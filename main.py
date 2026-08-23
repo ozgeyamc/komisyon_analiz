@@ -62,9 +62,9 @@ from update_excel import (
 )
 
 
-MAIN_VERSION = "2026-08-24-v20-status-resolution-fix"
+MAIN_VERSION = "2026-08-24-v21-filtered-plain-notes"
 EXPECTED_SUPPLEMENTAL_VERSION = "2026-08-24-v12-billing-methods-cleanup"
-EXPECTED_COMPARISON_VERSION = "2026-08-24-v24-status-resolution-fix"
+EXPECTED_COMPARISON_VERSION = "2026-08-24-v25-filtered-plain-notes"
 EXPECTED_EXCEL_WRITER_VERSION = "2026-08-21-v2-clean-supplemental-display"
 
 # Primary scraper güvenlik retry ayarları.
