@@ -6,7 +6,12 @@ Bu sürüm:
 - Statik sayfalardaki tüm productservicefee tablo kimliklerini keşfeder.
 - Dinamik tabloları Halkbank'ın kullandığı resmî web API'sinden eksiksiz çeker.
 - 148 tablo / 367 dinamik satır altına düşerse yarım veri yazmak yerine hata verir.
-- Ticari ücretleri resmî PDF kaynağından almaya devam eder.
+- Doğrudan API geçici olarak erişilemezse, Chromium'da 148 tablonun tamamının
+  dolmasını bekleyen ve aynı bütünlük kurallarını uygulayan güvenli fallback kullanır.
+- Ticari ücret PDF'inin dört sayfasını da okur; sonraki sayfalarda başlık satırı
+  tekrarlanmasa bile kolon düzenini korur.
+- PDF bölüm başlıklarını ücret satırı yapmaz, alt hizmetleri hiyerarşik adlarıyla
+  korur ve satır taşmalarını ücret kolonlarına sızmadan birleştirir.
 - Güncel Halkbank sayfa başlıklarını / alt başlıklarını MASRAF alanında korur.
 - Kart ürün/tablo adlarını MASRAF alanında korur; aynı tutarlı farklı kartları birleştirmez.
 - Havale / EFT / FAST başlıklarını kaybetmez.
@@ -31,7 +36,7 @@ import requests
 from bs4 import BeautifulSoup
 
 
-SCRAPER_VERSION = "2026-08-24-v4-halkbank-official-api-completeness"
+SCRAPER_VERSION = "2026-08-24-v6-halkbank-full-commercial-pdf"
 
 HALKBANK_ANA_URL = "https://www.halkbank.com.tr/tr/urun-ve-hizmet-ucretleri"
 HALKBANK_API_URL = "https://webapi.halkbank.com.tr/api/productservicefee/{table_id}"
@@ -42,8 +47,18 @@ HALKBANK_API_URL = "https://webapi.halkbank.com.tr/api/productservicefee/{table_
 # yalnız eksik yükleme Excel yazımını durdurur.
 MIN_API_TABLE_COUNT = 148
 MIN_API_ITEM_COUNT = 367
-API_MAX_WORKERS = 12
-API_MAX_ATTEMPTS = 3
+API_MAX_WORKERS = 4
+API_MAX_ATTEMPTS = 4
+
+# 24.08.2026 tarihli güncel resmî ticari PDF envanteri. PDF dört sayfada
+# 199 numaralı satır ve en az 116 ücret/açıklama içeren gerçek hizmet satırı
+# yayımlıyor. Başlık satırları bu sayılara dahil edilmez.
+MIN_COMMERCIAL_PDF_PAGE_COUNT = 4
+MIN_COMMERCIAL_PDF_NUMBERED_ROWS = 190
+MIN_COMMERCIAL_PDF_OUTPUT_ROWS = 116
+
+# 367 dinamik API satırı + en az 116 ticari PDF hizmet satırı.
+MIN_FINAL_ROW_COUNT = MIN_API_ITEM_COUNT + MIN_COMMERCIAL_PDF_OUTPUT_ROWS
 
 REQUIRED_API_TERMS = (
     "mkk hesap bakim ucreti",
@@ -53,6 +68,21 @@ REQUIRED_API_TERMS = (
     "mkk osba alim-satim ucreti",
     "uyelerarasi menkul kiymet transferi",
     "uye ici hesaplararasi",
+)
+
+REQUIRED_COMMERCIAL_TERMS = (
+    "nakit yonetimi",
+    "uluslararasi fon transferi",
+    "fast islemleri",
+    "belge ve bilgilendirme",
+    "cek defteri",
+    "uye isyeri",
+)
+
+REQUIRED_FINAL_TERMS = REQUIRED_API_TERMS + REQUIRED_COMMERCIAL_TERMS + (
+    "paraf klasik",
+    "paraf gold",
+    "paraf platinum",
 )
 
 _API_THREAD_LOCAL = threading.local()
@@ -569,19 +599,103 @@ def _commercial_pdf_rows(
             "requirements.txt dosyasına 'pdfplumber>=0.11.0' ekleyin."
         ) from exc
 
-    result: List[
-        UcretSatiri
-    ] = []
+    raw_records: List[Dict[str, str]] = []
+    page_count = 0
+    canonical_columns: Optional[Dict[str, int]] = None
 
-    # Numara seviyesine göre başlık hiyerarşisi.
-    hierarchy: Dict[
-        int,
-        str,
-    ] = {}
+    def _find_columns(header_row: List[str]) -> Optional[Dict[str, int]]:
+        header = [_normalize_key(cell) for cell in header_row]
+
+        def find_col(*needles: str) -> int:
+            for idx, cell in enumerate(header):
+                if all(needle in cell for needle in needles):
+                    return idx
+            return -1
+
+        name = find_col("kalem", "adi")
+        min_amount = find_col("asgari", "tutar")
+        max_amount = find_col("azami", "tutar")
+
+        if min(name, min_amount, max_amount) < 0:
+            return None
+
+        date = find_col("guncelle")
+        if date == -1:
+            date = find_col("tarih")
+        if date == -1 and len(header) >= 8:
+            date = len(header) - 1
+
+        # Halkbank PDF'inde kod kolonu başlıksız ilk kolondur.
+        code = 0 if name > 0 else -1
+        return {
+            "code": code,
+            "name": name,
+            "currency": find_col("para", "birimi"),
+            "min_amount": min_amount,
+            "min_rate": find_col("asgari", "oran"),
+            "max_amount": max_amount,
+            "max_rate": find_col("azami", "oran"),
+            "desc": find_col("aciklama"),
+            "date": date,
+        }
+
+    def _clean_code(value: str) -> str:
+        value = _normalize(value).strip(" .")
+        return value if re.fullmatch(r"\d+(?:\.\d+)*", value) else ""
+
+    def _clean_numeric_cell(value: str) -> str:
+        value = _normalize(value)
+        if not value:
+            return ""
+
+        # PDF metin katmanı bazen binlik ayıracını rakamdan ayırıyor:
+        # "1 .960" -> "1.960", "3 6.000" -> "36.000".
+        if re.fullmatch(r"[\d\s.,%+-]+", value):
+            value = re.sub(r"\s*([.,])\s*", r"\1", value)
+            value = re.sub(r"(?<=\d)\s+(?=\d)", "", value)
+        return value
+
+    def _is_overflow_fragment(value: str) -> bool:
+        if not value:
+            return False
+        key = _normalize_key(value)
+        return bool(key) and not re.search(r"\d", key) and len(key) <= 16
+
+    def _has_fee_payload(record: Dict[str, str]) -> bool:
+        return any(
+            record[field]
+            for field in (
+                "min_amount",
+                "min_rate",
+                "max_amount",
+                "max_rate",
+                "desc",
+            )
+        )
+
+    def _with_currency(currency: str, amount: str) -> str:
+        if not currency or not amount:
+            return amount
+        currency = _normalize(currency).upper()
+        amount = _normalize(amount)
+        suffixes = [currency]
+        if currency == "TRY":
+            suffixes.append("TL")
+        for suffix in suffixes:
+            amount = re.sub(
+                rf"\s+{re.escape(suffix)}$",
+                "",
+                amount,
+                flags=re.IGNORECASE,
+            )
+        if amount.upper().startswith(currency):
+            return amount
+        return f"{currency} {amount}"
 
     with pdfplumber.open(
         io.BytesIO(pdf_bytes)
     ) as pdf:
+        page_count = len(pdf.pages)
         for page_no, page in enumerate(
             pdf.pages,
             start=1,
@@ -605,103 +719,27 @@ def _commercial_pdf_rows(
                     continue
 
                 header_index = -1
+                columns: Optional[Dict[str, int]] = None
 
                 for i, row in enumerate(
                     table[:8]
                 ):
-                    cells = [
-                        _normalize_key(
-                            _pdf_clean_cell(x)
-                        )
-                        for x in row
-                    ]
-
-                    joined = " | ".join(
-                        cells
-                    )
-
-                    if (
-                        "kalem adi" in joined
-                        and "asgari" in joined
-                        and "azami" in joined
-                    ):
+                    cleaned = [_pdf_clean_cell(x) for x in row]
+                    detected = _find_columns(cleaned)
+                    if detected is not None:
                         header_index = i
+                        columns = detected
+                        canonical_columns = detected
                         break
 
-                if header_index == -1:
+                # Sonraki sayfalarda kolon başlığı tekrarlanmıyor.
+                # İlk sayfada doğrulanan düzeni aynen kullan.
+                if columns is None:
+                    columns = canonical_columns
+                if columns is None:
                     continue
 
-                header = [
-                    _normalize_key(
-                        _pdf_clean_cell(x)
-                    )
-                    for x in table[
-                        header_index
-                    ]
-                ]
-
-                def find_col(
-                    *needles: str,
-                ) -> int:
-                    for idx, cell in enumerate(
-                        header
-                    ):
-                        if all(
-                            needle in cell
-                            for needle in needles
-                        ):
-                            return idx
-                    return -1
-
-                col_name = find_col(
-                    "kalem",
-                    "adi",
-                )
-                col_currency = find_col(
-                    "para",
-                    "birimi",
-                )
-                col_min_amount = find_col(
-                    "asgari",
-                    "tutar",
-                )
-                col_min_rate = find_col(
-                    "asgari",
-                    "oran",
-                )
-                col_max_amount = find_col(
-                    "azami",
-                    "tutar",
-                )
-                col_max_rate = find_col(
-                    "azami",
-                    "oran",
-                )
-                col_desc = find_col(
-                    "aciklama",
-                )
-                col_date = find_col(
-                    "guncelle",
-                )
-
-                if col_date == -1:
-                    col_date = find_col(
-                        "tarih",
-                    )
-
-                # PDF extractor bazen tarih başlığını boş verir;
-                # en sağ kolon tarih görünümündeyse fallback yap.
-                if (
-                    col_date == -1
-                    and len(header) >= 8
-                ):
-                    col_date = len(
-                        header
-                    ) - 1
-
-                data_rows = table[
-                    header_index + 1:
-                ]
+                data_rows = table[header_index + 1:] if header_index >= 0 else table
 
                 for raw_row in data_rows:
                     row = [
@@ -722,168 +760,150 @@ def _commercial_pdf_rows(
                             return ""
                         return row[index]
 
-                    raw_name = get(
-                        col_name
-                    )
+                    raw_code = get(columns["code"])
+                    raw_name = get(columns["name"])
 
                     if not raw_name:
                         continue
 
-                    number, name = (
-                        _numeric_prefix(
-                            raw_name
-                        )
-                    )
+                    number = _clean_code(raw_code)
+                    prefixed_number, name = _numeric_prefix(raw_name)
+                    if not number:
+                        number = prefixed_number
 
                     if not name:
                         name = raw_name
 
-                    currency = get(
-                        col_currency
-                    )
-                    min_amount = get(
-                        col_min_amount
-                    )
-                    min_rate = get(
-                        col_min_rate
-                    )
-                    max_amount = get(
-                        col_max_amount
-                    )
-                    max_rate = get(
-                        col_max_rate
-                    )
-                    desc = get(
-                        col_desc
-                    )
-                    date = get(
-                        col_date
-                    ).replace("/", ".")
+                    record = {
+                        "number": number,
+                        "name": _normalize(name),
+                        "currency": get(columns["currency"]),
+                        "min_amount": _clean_numeric_cell(get(columns["min_amount"])),
+                        "min_rate": _clean_numeric_cell(get(columns["min_rate"])),
+                        "max_amount": _clean_numeric_cell(get(columns["max_amount"])),
+                        "max_rate": _clean_numeric_cell(get(columns["max_rate"])),
+                        "desc": get(columns["desc"]),
+                        "date": get(columns["date"]).replace("/", "."),
+                        "page": str(page_no),
+                    }
 
-                    has_value = any(
-                        [
-                            currency,
-                            min_amount,
-                            min_rate,
-                            max_amount,
-                            max_rate,
-                            desc,
-                            date,
-                        ]
-                    )
-
-                    # Sadece başlık satırıysa hierarchy güncelle.
+                    # Dört uzun kredi adında kapanış parantezi asgari tutar
+                    # kolonuna taşıyor. Bu metin ücret değildir.
                     if (
-                        number
-                        and not has_value
-                    ):
-                        level = len(
-                            number.split(".")
-                        )
-
-                        hierarchy[
-                            level
-                        ] = name
-
-                        for old_level in list(
-                            hierarchy
-                        ):
-                            if old_level > level:
-                                del hierarchy[
-                                    old_level
-                                ]
-
-                        continue
-
-                    # Para birimini tutarlarda kaybetme.
-                    if (
-                        currency
-                        and min_amount
-                        and not min_amount.upper().startswith(
-                            currency.upper()
-                        )
-                    ):
-                        min_amount = (
-                            f"{currency} "
-                            f"{min_amount}"
-                        )
-
-                    if (
-                        currency
-                        and max_amount
-                        and not max_amount.upper().startswith(
-                            currency.upper()
-                        )
-                    ):
-                        max_amount = (
-                            f"{currency} "
-                            f"{max_amount}"
-                        )
-
-                    if number:
-                        level = len(
-                            number.split(".")
-                        )
-
-                        parents = [
-                            hierarchy[l]
-                            for l in sorted(
-                                hierarchy
+                        _is_overflow_fragment(record["min_amount"])
+                        and not any(
+                            record[field]
+                            for field in (
+                                "currency",
+                                "min_rate",
+                                "max_amount",
+                                "max_rate",
+                                "desc",
+                                "date",
                             )
-                            if l < level
-                        ]
-                    else:
-                        parents = []
-
-                    masraf = " - ".join(
-                        [
-                            p
-                            for p in (
-                                parents
-                                + [name]
-                            )
-                            if p
-                        ]
-                    )
-
-                    masraf = _normalize(
-                        masraf
-                    )
-
-                    # Ticari PDF'teki EFT/Havale/FAST/SWIFT hiyerarşisi
-                    # satır adına yansısın.
-                    combined = _normalize_key(
-                        " ".join(
-                            parents
-                            + [name]
-                        )
-                    )
-
-                    if (
-                        "uluslararasi fon transfer" in combined
-                        and not _has_transfer_term(
-                            masraf,
-                            "swift",
                         )
                     ):
-                        masraf = (
-                            f"SWIFT - {masraf}"
+                        record["name"] = _normalize(
+                            f"{record['name']}{record['min_amount']}"
                         )
+                        record["min_amount"] = ""
 
-                    result.append(
-                        UcretSatiri(
-                            kategori=(
-                                "Ticari Ücret ve Komisyonları"
-                            ),
-                            masraf=masraf,
-                            asgari_tutar=min_amount,
-                            asgari_oran=min_rate,
-                            azami_tutar=max_amount,
-                            azami_oran=max_rate,
-                            aciklama=desc,
-                            site_guncelleme_tarihi=date,
-                        )
-                    )
+                    # Sayfa başlığı / kolon başlığı gibi numarasız
+                    # metinler ticari tarife satırı değildir.
+                    if record["number"]:
+                        raw_records.append(record)
+
+    all_codes = {record["number"] for record in raw_records}
+    if page_count < MIN_COMMERCIAL_PDF_PAGE_COUNT:
+        raise ScraperError(
+            "Halkbank ticari PDF sayfa envanteri eksik: "
+            f"bulunan={page_count} | beklenen_en_az={MIN_COMMERCIAL_PDF_PAGE_COUNT}"
+        )
+    if len(raw_records) < MIN_COMMERCIAL_PDF_NUMBERED_ROWS:
+        raise ScraperError(
+            "Halkbank ticari PDF numaralı satır envanteri eksik: "
+            f"bulunan={len(raw_records)} | "
+            f"beklenen_en_az={MIN_COMMERCIAL_PDF_NUMBERED_ROWS}"
+        )
+
+    result: List[UcretSatiri] = []
+    headings: Dict[str, str] = {}
+    skipped_headings = 0
+    unspecified_rows = 0
+
+    for record in raw_records:
+        number = record["number"]
+        name = record["name"]
+        has_descendant = any(code.startswith(number + ".") for code in all_codes)
+        has_payload = _has_fee_payload(record)
+
+        # Alt satırı bulunan ve kendi ücret/açıklaması olmayan satır başlıktır.
+        # Yalnız tarih veya para birimi bulunması onu ücret satırı yapmaz.
+        if has_descendant and not has_payload:
+            headings[number] = name
+            skipped_headings += 1
+            continue
+
+        parts = number.split(".")
+        parent_codes = [".".join(parts[:i]) for i in range(1, len(parts))]
+        parents = [headings[code] for code in parent_codes if code in headings]
+
+        min_amount = record["min_amount"]
+        max_amount = record["max_amount"]
+        currency = record["currency"]
+
+        min_amount = _with_currency(currency, min_amount)
+        max_amount = _with_currency(currency, max_amount)
+
+        masraf = _normalize(" - ".join([part for part in parents + [name] if part]))
+
+        # Ticari PDF'teki uluslararası transfer hiyerarşisi SWIFT filtresinde
+        # de görünür kalsın.
+        combined = _normalize_key(" ".join(parents + [name]))
+        if "uluslararasi fon transfer" in combined and not _has_transfer_term(masraf, "swift"):
+            masraf = f"SWIFT - {masraf}"
+
+        desc = record["desc"]
+        if not has_payload:
+            desc = "Ücret tutarı belirtilmemiş."
+            unspecified_rows += 1
+
+        result.append(
+            UcretSatiri(
+                kategori="Ticari Ücret ve Komisyonları",
+                masraf=masraf,
+                asgari_tutar=min_amount,
+                asgari_oran=record["min_rate"],
+                azami_tutar=max_amount,
+                azami_oran=record["max_rate"],
+                aciklama=desc,
+                site_guncelleme_tarihi=record["date"],
+            )
+        )
+
+    if len(result) < MIN_COMMERCIAL_PDF_OUTPUT_ROWS:
+        raise ScraperError(
+            "Halkbank ticari PDF hizmet satırları eksik: "
+            f"bulunan={len(result)} | beklenen_en_az={MIN_COMMERCIAL_PDF_OUTPUT_ROWS}"
+        )
+
+    searchable = "\n".join(
+        _normalize_key(f"{row.kategori} {row.masraf}") for row in result
+    )
+    missing_terms = [term for term in REQUIRED_COMMERCIAL_TERMS if term not in searchable]
+    if missing_terms:
+        raise ScraperError(
+            "Halkbank ticari PDF kritik bölümleri eksik: "
+            + ", ".join(missing_terms)
+        )
+
+    print(
+        "[halkbank][ticari-pdf] "
+        f"sayfa={page_count} | numaralı={len(raw_records)} | "
+        f"başlık={skipped_headings} | hizmet={len(result)} | "
+        f"tutarı_belirtilmemiş={unspecified_rows}",
+        file=sys.stderr,
+    )
 
     return result
 
@@ -1335,6 +1355,8 @@ def _find_table_title(
       HGS
       ...
     """
+    section_title = ""
+
     for heading in table.find_all_previous(
         ["h3", "h4", "h5", "h6"],
         limit=20,
@@ -1355,9 +1377,20 @@ def _find_table_title(
         ):
             continue
 
-        return text
+        section_title = text
+        break
 
-    return ""
+    # Dinamik bileşen ürün adını caption içinde yayımlar. Sadece H3
+    # kullanılırsa aynı tutarlı farklı Paraf ürünleri dedup'ta birleşir.
+    caption = table.find("caption")
+    table_name = ""
+
+    if caption is not None:
+        table_name = _normalize(caption.get_text(" ", strip=True))
+        if not _is_valid_title(table_name):
+            table_name = ""
+
+    return _combine_api_table_title(section_title, table_name)
 
 
 def _build_masraf(
@@ -1867,8 +1900,9 @@ def _fetch_official_api_table(
                 headers={
                     "Referer": page_url,
                     "Origin": "https://www.halkbank.com.tr",
+                    "Accept": "application/json, text/plain, */*",
                 },
-                timeout=40,
+                timeout=60,
             )
             response.raise_for_status()
             payload = response.json()
@@ -1899,7 +1933,7 @@ def _fetch_official_api_table(
         except Exception as exc:
             last_error = exc
             if attempt < API_MAX_ATTEMPTS:
-                time.sleep(attempt)
+                time.sleep(2 ** attempt)
 
     raise ScraperError(
         "Halkbank resmî API tablosu alınamadı: "
@@ -1925,20 +1959,33 @@ def _validate_official_api_inventory(
         )
 
     searchable = "\n".join(
-        _normalize_key(
-            f"{row.kategori} {row.masraf}"
-        )
-        for row in api_rows
+        _normalize_key(f"{row.kategori} {row.masraf}") for row in api_rows
     )
-    missing_terms = [
-        term
-        for term in REQUIRED_API_TERMS
-        if term not in searchable
-    ]
-
+    missing_terms = [term for term in REQUIRED_API_TERMS if term not in searchable]
     if missing_terms:
         raise ScraperError(
             "Halkbank kritik resmî API kalemleri eksik: "
+            + ", ".join(missing_terms)
+        )
+
+
+def _validate_complete_halkbank_rows(
+    rows: List[UcretSatiri],
+) -> None:
+    """Kaynak yolu ne olursa olsun final Halkbank bütünlüğünü doğrular."""
+    if len(rows) < MIN_FINAL_ROW_COUNT:
+        raise ScraperError(
+            "Halkbank final satır sayısı eksik: "
+            f"bulunan={len(rows)} | beklenen_en_az={MIN_FINAL_ROW_COUNT}"
+        )
+
+    searchable = "\n".join(
+        _normalize_key(f"{row.kategori} {row.masraf}") for row in rows
+    )
+    missing_terms = [term for term in REQUIRED_FINAL_TERMS if term not in searchable]
+    if missing_terms:
+        raise ScraperError(
+            "Halkbank final kritik kalemleri/ürünleri eksik: "
             + ", ".join(missing_terms)
         )
 
@@ -2316,6 +2363,66 @@ def _scrape_all_playwright(
                         except Exception:
                             break
 
+                    # Dinamik bileşenlerin hepsi ayrı API çağrısıyla doluyor.
+                    # Sabit süre beklemek yerine her wrapper içinde gerçek veri satırı
+                    # oluşana kadar bekle; eksik DOM'u başarılı kabul etme.
+                    if page_category != "Ticari Ücret ve Komisyonları":
+                        expected_components = page.locator(
+                            "[data-productservicefeetableid]"
+                        ).count()
+
+                        if expected_components <= 0:
+                            raise ScraperError(
+                                "Playwright sayfasında Halkbank API tablo "
+                                f"bileşeni bulunamadı: {page_category}"
+                            )
+
+                        page.wait_for_function(
+                            """
+                            () => {
+                                const wrappers = Array.from(
+                                    document.querySelectorAll(
+                                        "[data-productservicefeetableid]"
+                                    )
+                                );
+                                return wrappers.length > 0 && wrappers.every(
+                                    wrapper =>
+                                        wrapper.querySelector("table") !== null &&
+                                        wrapper.querySelector("tbody tr") !== null
+                                );
+                            }
+                            """,
+                            timeout=180000,
+                        )
+
+                        loaded_components = page.evaluate(
+                            """
+                            () => Array.from(
+                                document.querySelectorAll(
+                                    "[data-productservicefeetableid]"
+                                )
+                            ).filter(
+                                wrapper =>
+                                    wrapper.querySelector("table") !== null &&
+                                    wrapper.querySelector("tbody tr") !== null
+                            ).length
+                            """
+                        )
+
+                        if loaded_components != expected_components:
+                            raise ScraperError(
+                                "Playwright Halkbank tablo yüklemesi eksik: "
+                                f"kategori={page_category} | "
+                                f"yüklenen={loaded_components}/{expected_components}"
+                            )
+
+                        print(
+                            "[halkbank][playwright-complete] "
+                            f"{page_category}: "
+                            f"{loaded_components}/{expected_components} tablo doldu.",
+                            file=sys.stderr,
+                        )
+
                     # XHR/JS render tamamlanması için kısa bekleme.
                     try:
                         page.wait_for_load_state(
@@ -2445,6 +2552,20 @@ def _scrape_all_playwright(
 
         finally:
             browser.close()
+
+    expected_fee_tables = MIN_API_TABLE_COUNT + 1  # dinamik tablolar + ticari PDF
+    if (
+        total.get("pages_failed", 0)
+        or total.get("pages_with_rows", 0) != len(pages)
+        or total.get("fee_tables", 0) < expected_fee_tables
+    ):
+        raise ScraperError(
+            "Halkbank eksiksiz Playwright envanteri doğrulanamadı: "
+            f"sayfa={total.get('pages_with_rows', 0)}/{len(pages)} | "
+            f"hatalı_sayfa={total.get('pages_failed', 0)} | "
+            f"ücret_tablosu={total.get('fee_tables', 0)}/"
+            f"{expected_fee_tables}"
+        )
 
     return all_rows, total
 
@@ -2862,14 +2983,27 @@ def scrape_halkbank(
             "Halkbank alt sayfa listesi boş."
         )
 
-    # Dinamik ücret tabloları bankanın kendi web API'sinden çekilir. API'de
-    # tek tablo bile eksik kalırsa burada hata üretilir; yarım Playwright DOM'u
-    # ile devam edilmez. main.py aynı bankayı otomatik olarak tekrar dener.
-    rows, stats = _scrape_all_official_api(
-        pages,
-        session,
-    )
-    source = "official-api + commercial-pdf"
+    # Önce resmî API. GitHub Actions ağında geçici timeout/429/5xx olursa,
+    # 148 tablonun tamamını bekleyen doğrulanmış browser yolu kullanılır.
+    try:
+        rows, stats = _scrape_all_official_api(pages, session)
+        source = "official-api + commercial-pdf"
+    except Exception as api_exc:
+        print(
+            "[halkbank][UYARI] Doğrudan resmî API yolu tamamlanamadı; "
+            "eksiksiz Playwright fallback çalışacak. "
+            f"Hata={api_exc}",
+            file=sys.stderr,
+        )
+        try:
+            rows, stats = _scrape_all_playwright(pages)
+            source = "playwright-complete + commercial-pdf"
+        except Exception as playwright_exc:
+            raise ScraperError(
+                "Halkbank hem doğrudan API hem eksiksiz Playwright "
+                "yolunda başarısız oldu. "
+                f"API={api_exc} | Playwright={playwright_exc}"
+            ) from playwright_exc
 
     if not rows or stats is None:
         raise ScraperError(
@@ -2892,6 +3026,8 @@ def scrape_halkbank(
             ),
         ),
     )
+
+    _validate_complete_halkbank_rows(rows)
 
     print(
         f"[halkbank] Kullanılan kaynak: "
