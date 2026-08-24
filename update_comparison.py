@@ -38,9 +38,9 @@ from openpyxl.comments import Comment
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
 
-COMPARISON_VERSION = "2026-08-24-v26-glossary-aidat-school-phone"
+COMPARISON_VERSION = "2026-08-24-v27-final-source-audit"
 COMPARISON_SHEET = "KARŞILAŞTIRMA"
-PREVIEW_LAYOUT_SIGNATURE = "4BANKS|A:I_FILTERED|J:L_EMPTY|M_GLOSSARY_LIST|FAIL_CLOSED_V26|USER_AUDIT|FATURA_METHODS|AIDAT_VERIFIED|SCHOOL_VERIFIED|PHONE_NUMERIC"
+PREVIEW_LAYOUT_SIGNATURE = "4BANKS|A:I_FILTERED|J:L_EMPTY|M_GLOSSARY_LIST|FAIL_CLOSED_V27|FINAL_SOURCE_AUDIT|PRIMARY_PRIORITY|ATM_YKB_FIXED|SGK_AKBANK_VARIANTS|CHEQUE_FRESHNESS|KKB_CHANNELS"
 
 STATUS_AVAILABLE = "[SUPPLEMENTAL][AVAILABLE_NO_SEPARATE_FEE]"
 STATUS_EMPTY = "[SUPPLEMENTAL][PUBLISHED_EMPTY]"
@@ -2645,8 +2645,42 @@ def _compact_transfer_blocks(
 
 
 # ---------------------------------------------------------------------------
-# KULLANICI DENETİMİ SONRASI YÜKSEK RİSKLİ ÖZEL ÇÖZÜCÜLER (V20)
+# KULLANICI DENETİMİ SONRASI YÜKSEK RİSKLİ ÖZEL ÇÖZÜCÜLER (V27)
 # ---------------------------------------------------------------------------
+
+def _is_supplemental_fee_row(row: FeeRow) -> bool:
+    """Primary resmî tablo satırını ek kaynak satırından ayır."""
+    return _norm(row.kategori).startswith("ek kaynak")
+
+
+def _audit_date_timestamp(row: FeeRow) -> float:
+    """Kaynak güncelleme tarihini güvenli sıralama için sayıya çevir."""
+    raw = _clean(row.guncelleme_tarihi)
+    if not raw:
+        return 0.0
+
+    raw = raw.split(" ")[0].strip()
+    for fmt in ("%d.%m.%Y", "%d/%m/%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(raw, fmt).timestamp()
+        except ValueError:
+            pass
+    return 0.0
+
+
+def _audit_source_priority(row: FeeRow) -> Tuple[int, float]:
+    """
+    Aynı ürün birden fazla resmî kaynakta bulunuyorsa:
+    1) ana/primary ücret tablosu,
+    2) ek kaynak,
+    3) kendi katmanında daha yeni güncelleme
+    sırasını kullan.
+    """
+    return (
+        1 if _is_supplemental_fee_row(row) else 0,
+        -_audit_date_timestamp(row),
+    )
+
 
 def _audit_rows(
     rows: Sequence[FeeRow],
@@ -2677,6 +2711,10 @@ def _audit_rows(
             continue
         seen.add(key)
         result.append(row)
+
+    # Aynı hizmet hem primary hem supplemental kaynaktan geldiyse eski ek
+    # kaynak ana güncel tabloyu ezmesin.
+    result.sort(key=_audit_source_priority)
     return result
 
 
@@ -3328,6 +3366,43 @@ def _audit_atm(
             return (value, first, "NUMERIC")
 
     # -----------------------------------------------------
+    # YAPI KREDİ - Ortak ATM para çekmede oran + maktu tutar birlikte
+    # -----------------------------------------------------
+    if bank == "YAPIKREDI" and spec.service == "ORTAK_ATM_PARA_CEKME":
+        candidates = _audit_rows(
+            rows,
+            bank,
+            lambda r: (
+                "ortak atm" in _norm(r.masraf)
+                and "para cekme" in _norm(r.masraf)
+                and "1,04 tl maktu" in _norm(r.aciklama)
+            ),
+        )
+        if not candidates:
+            return (_source_gap_text(spec, bank, "GENEL"), None, "SOURCE_GAP")
+
+        row = candidates[0]
+        m = re.search(
+            r"ayrıca\s*([0-9][0-9.,]*)\s*TL\s*maktu",
+            _clean(row.aciklama),
+            flags=re.I,
+        )
+        flat_fee = _display_amount((m.group(1) + " TL") if m else "")
+        rate = _percent(row.azami_oran) or _percent(row.asgari_oran)
+
+        pieces: List[str] = []
+        if flat_fee:
+            pieces.append(flat_fee)
+        if rate:
+            pieces.append(rate)
+
+        value = " + ".join(pieces) or _fee_value_compact(row)
+        tax = _bsmv_label(row)
+        if tax:
+            value += f"\n{tax}"
+        return (value, row, "NUMERIC")
+
+    # -----------------------------------------------------
     # GARANTİ - yalnız yurtiçi TRY satırları
     # -----------------------------------------------------
     if bank != "GARANTİ":
@@ -3419,39 +3494,62 @@ def _audit_sgk(
         return (value, row, "NUMERIC")
 
     if bank == "AKBANK":
+        # Akbank üç ayrı SGK tarifesi yayımlıyor. Bunlar tutar bandı veya
+        # Mobil/Şube bazında ayrılmadığı için üç gerçek alt tarifeyi birlikte
+        # göster; ticari supplemental satırı (%3,33) bireysel karşılaştırmaya
+        # karışmasın.
         candidates = _audit_rows(
-            rows, bank,
+            rows,
+            bank,
             lambda r: (
-                "anlik sgk prim odeme" in _norm(r.text)
-                and "sgk.gov.tr" not in _norm(r.text)
-                and "talimat" not in _norm(r.text)
-                and "ticari" not in _norm(r.kategori)
+                _norm(r.kategori) == "kredi kartlari"
+                and "sgk prim odeme" in _norm(r.masraf)
+                and "ticari" not in _norm(r.text)
             ),
         )
         if not candidates:
             return (_source_gap_text(spec, bank, wanted_channel), None, "SOURCE_GAP")
-        # Kanal ayrımı yayımlanmayan genel Anlık SGK tarifesini kullan.
-        # Min tutar + oran birlikte yayımlanan satır varsa onu tercih et.
-        candidates.sort(
-            key=lambda r: (
-                bool(_display_amount(r.asgari_tutar) or _display_amount(r.azami_tutar)),
-                bool(_percent(r.asgari_oran) or _percent(r.azami_oran)),
-            ),
-            reverse=True,
-        )
-        row = candidates[0]
-        fee = _fee_value_compact(row)
-        if not fee:
+
+        def pick(kind: str) -> Optional[FeeRow]:
+            for r in candidates:
+                t = _norm(r.masraf)
+                if kind == "ANLIK" and "anlik sgk" in t and "sgk.gov.tr" not in t and "talimat" not in t:
+                    return r
+                if kind == "TALIMATLI" and "talimatli sgk" in t:
+                    return r
+                if kind == "SGK_GOV" and "sgk.gov.tr" in t:
+                    return r
+            return None
+
+        def amount_plus_rate(r: Optional[FeeRow]) -> str:
+            if r is None:
+                return ""
+            amount = _display_amount(r.asgari_tutar) or _display_amount(r.azami_tutar)
+            rate = _percent(r.asgari_oran) or _percent(r.azami_oran)
+            bits = []
+            if amount:
+                bits.append(f"min {amount}")
+            if rate:
+                bits.append(rate)
+            return " + ".join(bits) or _fee_value_compact(r)
+
+        anlik = pick("ANLIK")
+        talimatli = pick("TALIMATLI")
+        sgk_gov = pick("SGK_GOV")
+        if not all((anlik, talimatli, sgk_gov)):
             return (_source_gap_text(spec, bank, wanted_channel), None, "SOURCE_GAP")
+
         value = (
-            "Genel SGK tarifesi:\n"
-            f"{fee}\n"
+            "Genel SGK tarifeleri:\n"
+            f"Anlık: {amount_plus_rate(anlik)}\n"
+            f"Talimatlı: {amount_plus_rate(talimatli)}\n"
+            f"sgk.gov.tr: {amount_plus_rate(sgk_gov)}\n"
             "Kanal ayrımı yayımlanmıyor"
         )
-        tax = _bsmv_label(row)
-        if tax:
-            value += f"\n{tax}"
-        return (value, row, "NUMERIC")
+        taxes = {_bsmv_label(r) for r in (anlik, talimatli, sgk_gov) if _bsmv_label(r)}
+        if len(taxes) == 1:
+            value += f"\n{next(iter(taxes))}"
+        return (value, anlik, "NUMERIC")
 
     if bank == "YAPIKREDI":
         if wanted_channel == "SUBE":
@@ -3578,6 +3676,7 @@ def _audit_cheque(
         return (
             "cek" in masraf
             or "is bankasi bhs - cek" in kategori
+            or "cekler ve senetler - cek" in kategori
         )
 
     # -----------------------------------------------------
@@ -3629,10 +3728,10 @@ def _audit_cheque(
                 bits: List[str] = []
                 def sort_key(r: FeeRow):
                     t = _norm(r.masraf)
-                    if "25 yaprak" in t: return 0
-                    if "50" in t and "350" in t: return 1
-                    if "351" in t: return 2
-                    if "10 yaprak" in t: return 3
+                    if "10 yaprak" in t: return 0
+                    if "25 yaprak" in t: return 1
+                    if "50" in t and "350" in t: return 2
+                    if "351" in t: return 3
                     return 9
                 for row in sorted(group_rows, key=sort_key):
                     t = _norm(row.masraf)
@@ -3659,22 +3758,50 @@ def _audit_cheque(
             return ("\n".join(lines), first, "NUMERIC")
 
         if bank == "AKBANK":
-            candidates = _audit_rows(
-                rows, bank,
+            # Akbank yaprak başı ücretinin yanında 10 ve 25 yapraklı karnenin
+            # yayımlanmış toplam ücretlerini de ayrıca verir. Toplamları yaprak
+            # fiyatından hesaplama; doğrudan primary satırlardan al.
+            per_leaf_rows = _audit_rows(
+                rows,
+                bank,
                 lambda r: (
                     safe_cheque(r)
                     and "cek defteri" in _norm(r.masraf)
-                    and "yaprak" in _norm(r.masraf)
+                    and "yaprak basi" in _norm(r.masraf)
+                    and "paket" not in _norm(r.kategori)
                 ),
             )
-            if not candidates:
+            total_rows = _audit_rows(
+                rows,
+                bank,
+                lambda r: (
+                    _norm(r.kategori) == "cekler ve senetler"
+                    and "cek karnesi" in _norm(r.masraf)
+                    and ("10 yaprak" in _norm(r.masraf) or "25 yaprak" in _norm(r.masraf))
+                ),
+            )
+
+            ten = next((r for r in total_rows if "10 yaprak" in _norm(r.masraf)), None)
+            twenty_five = next((r for r in total_rows if "25 yaprak" in _norm(r.masraf)), None)
+            per_leaf = per_leaf_rows[0] if per_leaf_rows else None
+
+            if not any((ten, twenty_five, per_leaf)):
                 return (_source_gap_text(spec, bank, "GENEL"), None, "SOURCE_GAP")
-            row = candidates[0]
-            value = f"Yaprak başı: {_fee_value_compact(row)}\nDeğerli kâğıt bedeli ayrıca"
-            tax = _bsmv_label(row)
+
+            lines: List[str] = []
+            if per_leaf is not None:
+                lines.append(f"Yaprak başı: {_fee_value_compact(per_leaf)}")
+            if ten is not None:
+                lines.append(f"10 yaprak: {_fee_value_compact(ten)}")
+            if twenty_five is not None:
+                lines.append(f"25 yaprak: {_fee_value_compact(twenty_five)}")
+
+            source_rows = [r for r in (per_leaf, ten, twenty_five) if r is not None]
+            tax = _audit_common_tax(source_rows)
             if tax:
-                value += f"\n{tax}"
-            return (value, row, "NUMERIC")
+                lines.append(tax)
+            lines.append("Değerli kâğıt bedeli ayrıca")
+            return ("\n".join(lines), per_leaf or ten or twenty_five, "NUMERIC")
 
         if bank == "YAPIKREDI":
             candidates = _audit_rows(
@@ -3923,6 +4050,11 @@ def _audit_cheque(
             if bank == "İŞBANKASI":
                 return (
                     "diger banka yp" in m
+                    or (
+                        "diger banka" in m
+                        and "tahsile alinan" in m
+                        and re.search(r"(?:^|[^a-z])yp(?:$|[^a-z])", m) is not None
+                    )
                     or "dovizli cek - tahsile alinan" in m
                 )
             if bank == "AKBANK":
@@ -3939,6 +4071,27 @@ def _audit_cheque(
         candidates = _audit_rows(rows, bank, doviz_pred)
         if not candidates:
             return (_source_gap_text(spec, bank, "GENEL"), None, "SOURCE_GAP")
+
+        if bank == "İŞBANKASI":
+            # Aynı "Diğer Banka YP - Tahsile Alınan" kalemi BHS ek kaynağında
+            # 1.170 TRY (13.02.2026), ana ücret tablosunda ise daha yeni
+            # 1.543 TRY (24.04.2026). Ana/primary satır varsa eski supplemental
+            # eşdeğerini tamamen dışarıda bırak.
+            primary_yp = [
+                r for r in candidates
+                if not _is_supplemental_fee_row(r)
+                and "diger banka - tahsile alinan - yp" in _norm(r.masraf)
+            ]
+            if primary_yp:
+                candidates = [
+                    r for r in candidates
+                    if not (
+                        _is_supplemental_fee_row(r)
+                        and "diger banka yp" in _norm(r.masraf)
+                        and "tahsile alinan" in _norm(r.masraf)
+                    )
+                ]
+
         value, first = _audit_lines(candidates, lambda r: _clean(r.masraf))
         return (value, first, "NUMERIC")
 
@@ -4014,7 +4167,7 @@ def _audit_cheque(
             r for r in rows
             if r.banka == bank
             and "karsiliksiz cek belgelendirme" in _norm(r.masraf)
-            and _status_kind(r)
+            and not _has_numeric_fee(r)
         ]
         lines: List[str] = []
         first: Optional[FeeRow] = None
@@ -4032,8 +4185,23 @@ def _audit_cheque(
                 first = first or row
         if status_candidates:
             st = status_candidates[0]
-            lines.insert(0, "Belgelendirme: Ayrı ücret yayımlanmıyor")
+            lines.insert(0, "Belgelendirme: Ayrı ücret tutarı yayımlanmıyor.")
             first = first or st
+
+        if bank == "AKBANK":
+            correction_status = _audit_rows(
+                rows,
+                bank,
+                lambda r: (
+                    "cek duzeltme hakki" in _norm(r.masraf)
+                    and not _has_numeric_fee(r)
+                ),
+                numeric_only=False,
+            )
+            if correction_status:
+                lines.append("Düzeltme Hakkı: Ücret tutarı belirtilmemiş.")
+                first = first or correction_status[0]
+
         if not lines:
             return (_source_gap_text(spec, bank, "GENEL"), None, "SOURCE_GAP")
         return ("\n".join(lines), first, "NUMERIC" if numeric else "STATUS")
@@ -4041,11 +4209,71 @@ def _audit_cheque(
     return None
 
 
+
+def _audit_hgs(
+    rows: Sequence[FeeRow], bank: str, spec: RowSpec,
+) -> Optional[Tuple[str, Optional[FeeRow], str]]:
+    if bank != "İŞBANKASI" or spec.service not in {"HGS_ETIKET", "HGS_KART"}:
+        return None
+
+    target = "hgs etiket ucretleri" if spec.service == "HGS_ETIKET" else "hgs kart ucretleri"
+    candidates = _audit_rows(
+        rows,
+        bank,
+        lambda r: _norm(r.masraf) == target,
+    )
+    if not candidates:
+        return (_source_gap_text(spec, bank, "GENEL"), None, "SOURCE_GAP")
+
+    # Mobil, İnternet ve Şube satırlarının ücret imzaları aynı olmalı.
+    signatures = {_row_fee_signature(r) for r in candidates}
+    if len(signatures) != 1:
+        return (
+            "Kaynakta kanallara göre farklı HGS ücretleri var; otomatik özetlenmedi.",
+            candidates[0],
+            "SOURCE_GAP",
+        )
+
+    row = candidates[0]
+    value = f"Mobil / İnternet / Şube: {_fee_value_compact(row)}"
+    tax = _audit_common_tax(candidates)
+    if tax:
+        value += f"\n{tax}"
+    return (value, row, "NUMERIC")
+
+
 def _audit_kkb(
     rows: Sequence[FeeRow], bank: str, spec: RowSpec,
 ) -> Optional[Tuple[str, Optional[FeeRow], str]]:
     if spec.service not in {"KREDI_RISK", "CEK_RISK"}:
         return None
+
+    # Garanti aynı KKB Çek/Risk Raporu tarifesini İnternet Şubesi ve Şube
+    # için ayrı satırlarda, aynı tutarla yayımlıyor.
+    if bank == "GARANTİ":
+        candidates = _audit_rows(
+            rows,
+            bank,
+            lambda r: (
+                "kkb cek / risk raporu" in _norm(r.masraf)
+                and "ek kaynak" not in _norm(r.kategori)
+            ),
+        )
+        if not candidates:
+            return (_source_gap_text(spec, bank, "GENEL"), None, "SOURCE_GAP")
+
+        internet = next((r for r in candidates if "internet subesi" in _norm(r.masraf)), None)
+        sube = next((r for r in candidates if "sube" in _norm(r.masraf) and "internet" not in _norm(r.masraf)), None)
+        source = internet or sube or candidates[0]
+        lines: List[str] = []
+        if internet:
+            lines.append(f"İnternet Şubesi: {_fee_value_compact(internet)}")
+        if sube:
+            lines.append(f"Şube: {_fee_value_compact(sube)}")
+        tax = _audit_common_tax([r for r in (internet, sube) if r])
+        if tax:
+            lines.append(tax)
+        return ("\n".join(lines), source, "NUMERIC")
 
     if bank == "İŞBANKASI" and spec.service == "KREDI_RISK":
         candidates = _audit_rows(
@@ -4057,18 +4285,87 @@ def _audit_kkb(
         )
         if not candidates:
             return (_source_gap_text(spec, bank, "GENEL"), None, "SOURCE_GAP")
-        # Aynı 95 TL tarife farklı kanallarda tekrar eder; bir kez göster.
+
+        # Şube ücreti yayımlanmıyor; yalnız gerçekten yayımlanan kanalları yaz.
         row = candidates[0]
-        return (_fee_text(row, None), row, "NUMERIC")
+        value = f"Bankamatik / İnternet / İşCep: {_fee_value_compact(row)}"
+        tax = _audit_common_tax(candidates)
+        if tax:
+            value += f"\n{tax}"
+        return (value, row, "NUMERIC")
 
     if bank == "İŞBANKASI" and spec.service == "CEK_RISK":
-        status = _audit_exact_status(rows, bank, "CEK_RISK", "MOBIL") or _audit_exact_status(rows, bank, "CEK_RISK", "GENEL")
-        if status is not None:
-            return (_audit_status_text(status, "Çek Raporu paket tarifeleri yayımlanıyor"), status, "STATUS")
+        statuses = _audit_rows(
+            rows,
+            bank,
+            lambda r: "findeks cek raporu" in _norm(r.masraf),
+            numeric_only=False,
+        )
+        if statuses:
+            text = _audit_status_text(statuses[0], "")
+            if not text:
+                text = _clean(statuses[0].aciklama) or "Çek Raporu paket tarifeleri yayımlanıyor"
+            return (
+                "Mobil/İnternet ve Şube:\n" + text,
+                statuses[0],
+                "STATUS",
+            )
         return (_source_gap_text(spec, bank, "GENEL"), None, "SOURCE_GAP")
 
-    return None
+    if bank == "AKBANK" and spec.service == "KREDI_RISK":
+        candidates = _audit_rows(
+            rows,
+            bank,
+            lambda r: (
+                "kkb risk raporu hizmet bedeli (gercek kisiler icin)" in _norm(r.masraf)
+                and "ek kaynak" not in _norm(r.kategori)
+            ),
+        )
+        if not candidates:
+            return (_source_gap_text(spec, bank, "GENEL"), None, "SOURCE_GAP")
+        row = candidates[0]
+        value = f"Akbank Mobil / İnternet / Şube: {_fee_value_compact(row)}"
+        tax = _audit_common_tax(candidates)
+        if tax:
+            value += f"\n{tax}"
+        return (value, row, "NUMERIC")
 
+    if bank == "AKBANK" and spec.service == "CEK_RISK":
+        mobile = next(
+            (
+                r for r in _audit_rows(
+                    rows, bank,
+                    lambda r: (
+                        "akbank mobil ve internet" in _norm(r.masraf)
+                        and "kkb cek risk raporu" in _norm(r.masraf)
+                    ),
+                )
+            ),
+            None,
+        )
+        general = next(
+            (
+                r for r in _audit_rows(
+                    rows, bank,
+                    lambda r: "kkb cek bilgileri raporu ucreti (rapor basina)" in _norm(r.masraf),
+                )
+            ),
+            None,
+        )
+        if not mobile and not general:
+            return (_source_gap_text(spec, bank, "GENEL"), None, "SOURCE_GAP")
+
+        lines: List[str] = []
+        if mobile:
+            lines.append(f"Mobil / İnternet: {_fee_value_compact(mobile)}")
+        if general:
+            lines.append(f"Rapor başına genel tarife: {_fee_value_compact(general)}")
+        tax = _audit_common_tax([r for r in (mobile, general) if r])
+        if tax:
+            lines.append(tax)
+        return ("\n".join(lines), mobile or general, "NUMERIC")
+
+    return None
 
 def _audit_senet_tahsil(
     rows: Sequence[FeeRow], bank: str, spec: RowSpec,
@@ -4185,10 +4482,33 @@ def _audit_regular_transfer(
     if spec.service not in {"DUZENLI_EFT", "DUZENLI_HAVALE"}:
         return None
 
-    # Yapı Kredi: düzenli transferlerde normal EFT/Havale tarifesi uygulanıyor.
+    # Yapı Kredi: resmî ücret tablosunda "Düzenli ödeme talimatlarında aynı
+    # tarife uygulanmaktadır" notu yalnız İnternet/Mobil EFT-Havale satırlarında
+    # yer alıyor. Şube için ayrı düzenli tarife yayımlanmıyor; normal Şube
+    # ücretini otomatik olarak düzenliye taşımıyoruz.
     if bank == "YAPIKREDI":
+        if wanted_channel == "SUBE":
+            keyword = "duzenli eft" if spec.service == "DUZENLI_EFT" else "duzenli havale"
+            status_rows = _audit_rows(
+                rows,
+                bank,
+                lambda r: (
+                    keyword in _norm(r.masraf)
+                    and "sube" in _norm(r.masraf)
+                    and "ayri yayimlanmiyor" in _norm(r.aciklama)
+                ),
+                numeric_only=False,
+            )
+            if status_rows:
+                return (_clean(status_rows[0].aciklama), status_rows[0], "STATUS")
+            return (
+                "Şube için düzenli transfer tarifesi ayrı yayımlanmıyor",
+                None,
+                "PUBLICATION_STATUS",
+            )
+
         base_service = "EFT" if spec.service == "DUZENLI_EFT" else "HAVALE"
-        row = _audit_normal_transfer_row(rows, bank, base_service, spec.band_key or "", wanted_channel)
+        row = _audit_normal_transfer_row(rows, bank, base_service, spec.band_key or "", "MOBIL")
         if row is None:
             return (_source_gap_text(spec, bank, wanted_channel), None, "SOURCE_GAP")
         return (_fee_text(row, None), row, "NUMERIC")
@@ -4531,33 +4851,18 @@ def _audit_school(
     )
     status_row = candidates[0] if candidates else None
 
-    # Garanti Şube: özel okul hizmeti var; 0–50 TRY yalnız genel Nakit
-    # Fatura/Kurum tarifesidir. Özel okul ücreti gibi sunulmaz.
+    # Garanti Şube: özel okul hizmetinin varlığı doğrulanıyor; ancak genel
+    # Nakit Fatura/Kurum 0–50 TRY tarifesini özel okula bağlayan açık bir
+    # ücret satırı yok. Yanlış kesinlik üretmemek için rakam taşımıyoruz.
     if bank == "GARANTİ" and wanted_channel == "SUBE":
-        generic = next(
-            (
-                r for r in rows
-                if r.banka == bank
-                and "nakit fatura/kurum odemesi" in _norm(r.masraf)
-                and "sube" in _norm(r.masraf)
-                and "ek kaynak" not in _norm(r.kategori)
-                and _has_numeric_fee(r)
-            ),
-            None,
-        )
-        if generic is None and status_row is None:
+        if status_row is None:
             return (_source_gap_text(spec, bank, wanted_channel), None, "SOURCE_GAP")
-
-        lines = ["Hizmet var."]
-        if generic is not None:
-            lo = _display_amount(generic.asgari_tutar)
-            hi = _display_amount(generic.azami_tutar)
-            amount = hi or lo
-            if lo and hi and _norm(lo) != _norm(hi):
-                amount = f"{lo} – {hi}"
-            lines.append(f"Genel Nakit Fatura/Kurum tarifesi: {amount}")
-        lines.append("Özel okul ücreti yayımlanmıyor.")
-        return ("\n".join(lines), generic or status_row, "GENERIC_TARIFF")
+        return (
+            "Hizmet var / ayrı tarife yayımlanmıyor.\n"
+            "Özel okul ücreti yayımlanmıyor.",
+            status_row,
+            "STATUS",
+        )
 
     if status_row is None:
         return (_source_gap_text(spec, bank, wanted_channel), None, "SOURCE_GAP")
@@ -4752,6 +5057,55 @@ def _audit_phone(
 
     return None
 
+
+def _audit_sans_oyunu(
+    rows: Sequence[FeeRow], bank: str, spec: RowSpec, wanted_channel: str,
+) -> Optional[Tuple[str, Optional[FeeRow], str]]:
+    if spec.service != "SANS_OYUNU":
+        return None
+
+    if bank == "İŞBANKASI":
+        candidates = _audit_rows(
+            rows,
+            bank,
+            lambda r: _norm(r.masraf) == "sans oyunu odemeleri",
+        )
+        if not candidates:
+            return (_source_gap_text(spec, bank, wanted_channel), None, "SOURCE_GAP")
+        row = candidates[0]
+        value = (
+            f"Genel tarife: {_fee_value_compact(row)}\n"
+            "Kanal ayrımı yayımlanmıyor"
+        )
+        tax = _bsmv_label(row)
+        if tax:
+            value += f"\n{tax}"
+        return (value, row, "NUMERIC")
+
+    if bank == "YAPIKREDI":
+        candidates = _audit_rows(
+            rows,
+            bank,
+            lambda r: (
+                "fatura ve anlasmali kurum odemeleri" in _norm(r.masraf)
+                and "sans oyunlari" in _norm(r.aciklama)
+            ),
+        )
+        if not candidates:
+            return (_source_gap_text(spec, bank, wanted_channel), None, "SOURCE_GAP")
+        row = candidates[0]
+        value = (
+            f"Genel Fatura/Kurum tarifesi: {_fee_value_compact(row)}\n"
+            "Kanal ayrımı yayımlanmıyor"
+        )
+        tax = _bsmv_label(row)
+        if tax:
+            value += f"\n{tax}"
+        return (value, row, "GENERIC_TARIFF")
+
+    return None
+
+
 def _audit_vergi(
     rows: Sequence[FeeRow], bank: str, spec: RowSpec, wanted_channel: str,
 ) -> Optional[Tuple[str, Optional[FeeRow], str]]:
@@ -4805,6 +5159,7 @@ def _user_audit_override(
         _audit_aidat,
         _audit_school,
         _audit_phone,
+        _audit_sans_oyunu,
         _audit_vergi,
     ):
         result = resolver(rows, bank, spec, wanted_channel)
@@ -4816,6 +5171,7 @@ def _user_audit_override(
         _audit_normal_kasa,
         _audit_isbank_special_kasa,
         _audit_cheque,
+        _audit_hgs,
         _audit_kkb,
         _audit_senet_tahsil,
     ):
@@ -4862,6 +5218,14 @@ def _aggregate_service_fee(
 
         if not value:
             return None
+
+        if spec.service == "SWIFT_GELEN":
+            # Gelen SWIFT satırı kanal-birleşik gösterilir. Kaynağın kanal
+            # kapsamını hücre içinde açıkça yaz ki Mobil ücreti sanılmasın.
+            if bank == "GARANTİ":
+                value += "\nKaynak kanalı: Şube"
+            else:
+                value += "\nKanal belirtilmemiş."
 
         return value, canonical_rows[0]
 
@@ -4976,6 +5340,15 @@ def _kasa24_special_fee(
 
     if not blocks or first is None:
         return None
+
+    tax_rows = [
+        r for r in rows
+        if r.banka == bank and "kasa24" in _norm(r.text) and _bsmv_label(r)
+    ]
+    tax = _audit_common_tax(tax_rows)
+    if tax:
+        blocks.append(tax)
+
     return "\n".join(blocks), first
 
 
