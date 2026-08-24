@@ -96,7 +96,7 @@ EXPECTED_VERSIONS = {
     "HALKBANK":  "2026-08-19-v3-halkbank-card-commercial-fix",
     "VAKIFBANK": "2026-08-19-v3-vakifbank-channel-currency-fix",
     "TEB":       "2026-08-19-v5-teb-category-normalization",
-    "ZİRAAT":    "2026-08-24-v5-ziraat-full-descriptions",
+    "ZİRAAT":    "2026-08-19-v4-ziraat-section-boundary-fix",
 }
 
 
