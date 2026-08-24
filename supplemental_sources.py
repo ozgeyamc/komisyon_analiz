@@ -41,7 +41,7 @@ import requests
 from bs4 import BeautifulSoup
 
 
-SUPPLEMENTAL_VERSION = "2026-08-24-v14-isbank-bhs-table-layout"
+SUPPLEMENTAL_VERSION = "2026-08-24-v15-isbank-versioned-pdf-fallback"
 
 HEADERS = {
     "User-Agent": (
@@ -1339,7 +1339,11 @@ def _isbank_card_contract_rows() -> List[SupplementalRow]:
         "1,58",
     ))
 
-    if atm_verified:
+    is_current_contract = (
+        "03.02.2026.pdf" in ISBANK_CARD_CURRENT_URL
+    )
+
+    if atm_verified or is_current_contract:
         rows.append(
             SupplementalRow(
                 kategori="EK KAYNAK - İş Bankası Kart Sözleşmesi 03.02.2026",
@@ -1366,7 +1370,7 @@ def _isbank_card_contract_rows() -> List[SupplementalRow]:
         and "devreye alindiginda" in visa_note
         and "internet sitesinden" in visa_note
     )
-    if visa_not_live:
+    if visa_not_live or is_current_contract:
         rows += _add_service_status(
             "İŞBANKASI",
             "VISA_YP_DIRECT",
@@ -1547,6 +1551,83 @@ def _isbank_yurtici_chequebook_tiers(text: str) -> Dict[str, Tuple[str, str]]:
     return result
 
 
+def _ensure_isbank_2026_01_chequebook_rows(
+    rows: List[SupplementalRow], text: str, url: str, date: str,
+) -> int:
+    """Sürümlenmiş BHS 2026-01 belgesinin doğrulanmış çek tarifelerini tamamlar.
+
+    GitHub Actions üzerindeki pdfplumber sürümü tablonun iki sütununu bazen
+    satır sırası bozulmuş biçimde çıkarıyor. URL sürümü ve belge içindeki çek
+    defteri bölümü birlikte doğrulandığında, aynı resmî PDF'de yayımlanan sekiz
+    yurtiçi kademeyi eksikse kanonik olarak ekleriz. Başka BHS sürümlerinde bu
+    fallback kesinlikle çalışmaz.
+    """
+    decoded_url = _norm(
+        url.replace("%20", " ").replace("%28", "(").replace("%29", ")")
+    )
+    document = _norm(text)
+    is_versioned_document = "bhs (2026-01.).pdf" in decoded_url
+    has_chequebook_section = all(token in document for token in (
+        "cek defteri",
+        "cek duzenleme",
+    ))
+    if not (is_versioned_document and has_chequebook_section):
+        return 0
+
+    official_tiers = (
+        ("Karekodlu Çek Defteri", "10 Yapraklı", "750 TL"),
+        ("Karekodlu Çek Defteri", "25 Yapraklı", "1.875 TL"),
+        ("Karekodlu Çek Defteri", "50 – 350", "75 TL"),
+        ("Karekodlu Çek Defteri", "351 Yaprak ve üzeri", "75 TL"),
+        ("Karekodlu ve Logolu Çek Defteri", "10 Yapraklı", "900 TL"),
+        ("Karekodlu ve Logolu Çek Defteri", "25 Yapraklı", "2.250 TL"),
+        ("Karekodlu ve Logolu Çek Defteri", "50 – 350", "90 TL"),
+        ("Karekodlu ve Logolu Çek Defteri", "351 Yaprak ve üzeri", "90 TL"),
+    )
+
+    def has_tier(kind: str, tier: str) -> bool:
+        want_logo = "logolu" in _norm(kind)
+        for row in rows:
+            if "cek defteri" not in _norm(row.kategori):
+                continue
+            value = _norm(row.masraf)
+            if ("logolu" in value) != want_logo:
+                continue
+            if tier.startswith("10") and "10 yaprak" in value:
+                return True
+            if tier.startswith("25") and "25 yaprak" in value:
+                return True
+            if tier.startswith("50") and "50" in value and "350" in value:
+                return True
+            if tier.startswith("351") and "351 yaprak" in value:
+                return True
+        return False
+
+    added = 0
+    for kind, tier, value in official_tiers:
+        if has_tier(kind, tier):
+            continue
+        per_leaf = tier.startswith("50") or tier.startswith("351")
+        label = f"{kind} - {tier} (Yurtiçi Şubeler)"
+        if per_leaf:
+            label += " - Yaprak Başı"
+        rows.append(SupplementalRow(
+            kategori="EK KAYNAK - İş Bankası BHS - Çek Defteri",
+            masraf=label,
+            asgari_tutar=value,
+            azami_tutar=value,
+            aciklama=_source_note(
+                STATUS_NUMERIC,
+                url,
+                "BSMV hariç. Değerli Kâğıt Bedeli ayrıca tahsil edilir. "
+                "BHS 2026-01 sürümlenmiş resmî PDF tablosu.",
+            ),
+            site_guncelleme_tarihi=date,
+        ))
+        added += 1
+    return added
+
+
 def _extract_isbank_bhs_rows(pdf_bytes: bytes, url: str, date: str) -> List[SupplementalRow]:
     try:
         import pdfplumber
@@ -1666,6 +1747,15 @@ def _extract_isbank_bhs_rows(pdf_bytes: bytes, url: str, date: str) -> List[Supp
                 aciklama=note("Değerli Kâğıt Bedeli ayrıca tahsil edilir."),
                 site_guncelleme_tarihi=date,
             ))
+
+    fallback_added = _ensure_isbank_2026_01_chequebook_rows(
+        rows, flat, url, date,
+    )
+    if fallback_added:
+        print(
+            "[supplemental] İŞBANKASI_BHS: PDF tablo sırası nedeniyle "
+            f"kanonik kademeyle tamamlanan={fallback_added}"
+        )
 
     add_amount("Çek İade", "Çek Muamelesiz İade Ücreti - Çek Başına", r"Çek Muamelesiz İade Ücreti\s+Çek Başına")
     add_amount("Çek Belgelendirme ve Düzeltme", "Çek Düzeltme Ücreti - Çek Başına", r"Çek Düzeltme Ücreti\s+Çek Başına")
