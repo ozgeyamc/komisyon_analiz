@@ -18,18 +18,11 @@ from __future__ import annotations
 
 import shutil
 import sys
-import time
 import zipfile
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
-from safety_guard import (
-    BASELINE_COUNTS,
-    MAX_RATIO,
-    MIN_RATIO,
-    print_guard_report,
-    validate_run,
-)
+from safety_guard import print_guard_report, validate_run
 from supplemental_sources import (
     SUPPLEMENTAL_VERSION,
     enrich_all,
@@ -54,24 +47,12 @@ update_comparison_sheet = getattr(
     "update_comparison_sheet",
     None,
 )
-from update_excel import (
-    EXCEL_DOSYA_ADI,
-    EXCEL_WRITER_VERSION,
-    excel_guncelle_coklu,
-    final_excel_gorunumunu_temizle,
-)
+from update_excel import EXCEL_DOSYA_ADI, excel_guncelle_coklu
 
 
-MAIN_VERSION = "2026-08-24-v23-final-source-audit"
-EXPECTED_SUPPLEMENTAL_VERSION = "2026-08-24-v13-isbank-bhs-10leaf-fix"
-EXPECTED_COMPARISON_VERSION = "2026-08-24-v27-final-source-audit"
-EXPECTED_EXCEL_WRITER_VERSION = "2026-08-21-v2-clean-supplemental-display"
-
-# Primary scraper güvenlik retry ayarları.
-# İlk deneme + 2 tekrar = toplam 3 deneme.
-MAX_SCRAPE_ATTEMPTS = 3
-RETRY_WAIT_SECONDS = 3
-
+MAIN_VERSION = "2026-08-21-v9-resilient-final"
+EXPECTED_SUPPLEMENTAL_VERSION = "2026-08-21-v8-resilient-official-sources"
+EXPECTED_COMPARISON_VERSION = "2026-08-21-v16-precision-first-stable"
 
 BANKA_SIRASI = [
     ("GARANTİ",   "scraper",            "scrape_garanti_bbva"),
@@ -105,7 +86,6 @@ def _component_versions_ok() -> bool:
     print(f"[main] SÜRÜM: {MAIN_VERSION}")
     print(f"[main] supplemental: {SUPPLEMENTAL_VERSION}")
     print(f"[main] comparison: {COMPARISON_VERSION}")
-    print(f"[main] excel writer: {EXCEL_WRITER_VERSION}")
 
     if SUPPLEMENTAL_VERSION != EXPECTED_SUPPLEMENTAL_VERSION:
         print(
@@ -127,14 +107,6 @@ def _component_versions_ok() -> bool:
         print(
             "[FATAL] update_comparison.py içinde update_comparison_sheet() "
             "fonksiyonu bulunamadı.",
-            file=sys.stderr,
-        )
-        ok = False
-
-    if EXCEL_WRITER_VERSION != EXPECTED_EXCEL_WRITER_VERSION:
-        print(
-            "[FATAL] update_excel.py yanlış/eski sürüm. "
-            f"Beklenen={EXPECTED_EXCEL_WRITER_VERSION} | Gelen={EXCEL_WRITER_VERSION}",
             file=sys.stderr,
         )
         ok = False
@@ -168,165 +140,6 @@ def _version_ok(banka_adi: str, module) -> bool:
         )
         return False
     return True
-
-
-
-def _bank_guard_problem_banks(guard) -> set[str]:
-    """
-    Guard raporundaki banka-bazlı hatalardan hangi scraper'ların yeniden
-    denenmesi gerektiğini çıkarır.
-
-    TOPLAM hatası tek başına varsa güvenli olmak için tüm bankalar tekrar
-    denenir. Sürüm hataları burada çözülmez; onlar ayrıca bloklanır.
-    """
-    retry_banks: set[str] = set()
-
-    for error in getattr(guard, "errors", ()):
-        text = str(error)
-
-        for bank in BASELINE_COUNTS:
-            if text.startswith(f"{bank}:"):
-                retry_banks.add(bank)
-
-        if text.startswith("TOPLAM:") and not retry_banks:
-            retry_banks.update(BASELINE_COUNTS)
-
-    return retry_banks
-
-
-def _count_status(bank: str, rows) -> str:
-    baseline = BASELINE_COUNTS[bank]
-
-    if rows is None:
-        return f"veri yok | ref={baseline}"
-
-    try:
-        count = len(rows)
-    except TypeError:
-        rows = list(rows)
-        count = len(rows)
-
-    min_count = int(baseline * MIN_RATIO)
-    max_count = int(baseline * MAX_RATIO)
-
-    return (
-        f"satır={count} | ref={baseline} | "
-        f"güvenli_aralık={min_count}-{max_count}"
-    )
-
-
-def _retry_failed_primary_scrapers(
-    primary_data: dict,
-    scraper_functions: dict,
-    version_errors: list[str],
-):
-    """
-    İlk safety guard başarısız olduğunda yalnız problemli primary scraper'ları
-    tekrar çalıştırır.
-
-    Güvenlik sınırları DEĞİŞTİRİLMEZ.
-    Bir tekrar başarılı olursa yeni veri kullanılır. Başarısız/None sonuç eski
-    kullanılabilir sonucu silmez.
-    """
-    guard = validate_run(primary_data)
-
-    if version_errors:
-        for bank in version_errors:
-            guard.errors.append(
-                f"{bank}: doğrulanmış scraper sürümü yüklenmedi."
-            )
-        guard.ok = False
-
-    if guard.ok:
-        return primary_data, guard
-
-    retry_banks = _bank_guard_problem_banks(guard)
-
-    # Sürüm uyuşmazlığı retry ile çözülmez.
-    retry_banks.difference_update(version_errors)
-
-    if not retry_banks:
-        return primary_data, guard
-
-    print()
-    print("=" * 68)
-    print("PRIMARY OTOMATİK TEKRAR KONTROLÜ")
-    print("=" * 68)
-    print(
-        "[retry] İlk güvenlik kontrolü geçmedi. "
-        "Yalnız problemli bankalar tekrar çekilecek."
-    )
-
-    for bank in sorted(retry_banks):
-        print(f"[retry] {bank}: {_count_status(bank, primary_data.get(bank))}")
-
-    # İlk scrape zaten 1. denemeydi. Burada 2 ve 3. denemeleri yapıyoruz.
-    for attempt in range(2, MAX_SCRAPE_ATTEMPTS + 1):
-        if not retry_banks:
-            break
-
-        print()
-        print(
-            f"[retry] Tur {attempt}/{MAX_SCRAPE_ATTEMPTS} "
-            f"| bankalar={', '.join(sorted(retry_banks))}"
-        )
-
-        if RETRY_WAIT_SECONDS:
-            time.sleep(RETRY_WAIT_SECONDS)
-
-        for bank in list(sorted(retry_banks)):
-            fn = scraper_functions.get(bank)
-
-            if fn is None:
-                print(
-                    f"[retry][ATLANDI] {bank}: scraper fonksiyonu hazır değil.",
-                    file=sys.stderr,
-                )
-                continue
-
-            print(f"\n--- {bank} yeniden çekiliyor ({attempt}/{MAX_SCRAPE_ATTEMPTS}) ---")
-            rows = _try_scrape(bank, fn)
-
-            # Başarısız tekrar, elimizdeki önceki veriyi silmesin.
-            if rows is not None:
-                primary_data[bank] = rows
-
-        guard = validate_run(primary_data)
-
-        if version_errors:
-            for bank in version_errors:
-                guard.errors.append(
-                    f"{bank}: doğrulanmış scraper sürümü yüklenmedi."
-                )
-            guard.ok = False
-
-        if guard.ok:
-            print()
-            print(
-                f"[retry] BAŞARILI - güvenlik kontrolü "
-                f"{attempt}. denemede geçti."
-            )
-            print("=" * 68)
-            return primary_data, guard
-
-        retry_banks = _bank_guard_problem_banks(guard)
-        retry_banks.difference_update(version_errors)
-
-        if retry_banks:
-            for bank in sorted(retry_banks):
-                print(
-                    f"[retry] hâlâ sorunlu: {bank} | "
-                    f"{_count_status(bank, primary_data.get(bank))}"
-                )
-
-    print()
-    print(
-        "[retry] Tekrarlar tamamlandı; güvenlik kontrolü hâlâ geçmiyor. "
-        "Yanlış/eksik veri yazılmaması için Excel bloke kalacak."
-    )
-    print("=" * 68)
-
-    return primary_data, guard
 
 
 def _prepare_temp_excel(final_path: Path) -> Path:
@@ -371,7 +184,6 @@ def _verify_comparison_file(path: Path, comparison: dict) -> None:
     possible = int(comparison.get("possible_cells", 0) or 0)
     missing = int(comparison.get("missing_cells", 0) or 0)
     source_gaps = int(comparison.get("source_gap_cells", 0) or 0)
-    ambiguous = int(comparison.get("ambiguous_cells", 0) or 0)
 
     if rows < 40 or possible < 200:
         raise RuntimeError(
@@ -389,7 +201,7 @@ def _verify_comparison_file(path: Path, comparison: dict) -> None:
     print(
         f"[main] KARŞILAŞTIRMA doğrulandı: sheet var | "
         f"satır={rows} | mantıksal_hücre={possible} | "
-        f"kaynak_boşluğu={source_gaps} | belirsiz={ambiguous} | N/A={missing}"
+        f"kaynak_boşluğu={source_gaps} | N/A={missing}"
     )
 
 
@@ -403,7 +215,6 @@ def main() -> int:
 
     primary_data = {}
     version_errors = []
-    scraper_functions = {}
 
     # 1) PRIMARY SCRAPER'LAR
     for banka_adi, module_name, func_name in BANKA_SIRASI:
@@ -414,7 +225,6 @@ def main() -> int:
                 version_errors.append(banka_adi)
                 continue
             fn = getattr(module, func_name)
-            scraper_functions[banka_adi] = fn
             satirlar = _try_scrape(banka_adi, fn)
             if satirlar is not None:
                 primary_data[banka_adi] = satirlar
@@ -425,24 +235,18 @@ def main() -> int:
         except Exception as exc:
             print(f"[HATA] {banka_adi}: {exc}", file=sys.stderr)
 
-    # 2) PRIMARY GLOBAL SAFETY GUARD + OTOMATİK RETRY
-    #
-    # İlk koşu geçmezse güvenlik sınırlarını gevşetmek yerine yalnız sorunlu
-    # scraper'lar iki kez daha denenir. Böylece geçici site/timeout/DOM yükleme
-    # sorunları toparlanabilir; kalıcı veya şüpheli veri değişiminde Excel yine
-    # korunur.
-    primary_data, guard = _retry_failed_primary_scrapers(
-        primary_data,
-        scraper_functions,
-        version_errors,
-    )
+    # 2) PRIMARY GLOBAL SAFETY GUARD
+    guard = validate_run(primary_data)
+    if version_errors:
+        for banka in version_errors:
+            guard.errors.append(f"{banka}: doğrulanmış scraper sürümü yüklenmedi.")
+        guard.ok = False
 
     print_guard_report(guard)
-
     if not guard.ok:
         print(
-            "\n[SONUÇ] Primary güvenlik kontrolü, otomatik tekrarların ardından "
-            "da geçmedi. Excel güncellenmedi; son doğru dosya korunuyor.",
+            "\n[SONUÇ] Primary güvenlik kontrolü geçmedi. "
+            "Excel güncellenmedi; son doğru dosya korunuyor.",
             file=sys.stderr,
         )
         return 2
@@ -477,21 +281,7 @@ def main() -> int:
 
     try:
         ozet = excel_guncelle_coklu(enriched_data, str(temp_path))
-
-        # Teknik supplemental marker'ları KARŞILAŞTIRMA eşleştirmesi için burada
-        # hâlâ korunur. Önce karşılaştırma üretilir.
         comparison = update_comparison_sheet(str(temp_path))
-
-        # Karşılaştırma tamamlandıktan sonra yalnız final KOMİSYONLAR görünümü
-        # temizlenir. Böylece eşleştirme mantığı bozulmaz, kullanıcı teknik
-        # SERVICE/CHANNEL/SUPPLEMENTAL metinlerini görmez.
-        display_cleanup = final_excel_gorunumunu_temizle(str(temp_path))
-        print(
-            "[main] Final görünüm temizlendi: "
-            f"açıklama={display_cleanup.get('temizlenen_aciklama', 0)} | "
-            f"kaynak_linki={display_cleanup.get('kaynak_linki', 0)}"
-        )
-
         _verify_comparison_file(temp_path, comparison)
 
         # Yalnız yukarıdaki tüm kontroller başarılıysa final dosya değiştirilir.
@@ -525,7 +315,6 @@ def main() -> int:
         f"doğrulanmış {comparison.get('matched_cells', '?')}/"
         f"{comparison.get('possible_cells', '?')} | "
         f"kaynak boşluğu {comparison.get('source_gap_cells', '?')} | "
-        f"belirsiz {comparison.get('ambiguous_cells', '?')} | "
         f"N/A {comparison.get('missing_cells', '?')} | "
         f"not korundu {comparison['notes_preserved']}"
     )
