@@ -3,10 +3,12 @@ Halkbank "Ürün ve Hizmet Ücretleri" scraper.
 
 Bu sürüm:
 - Ana ücret sayfasındaki güncel alt sayfaları otomatik bulur.
-- requests'i birincil kullanır; tüm sayfalar tek Session ile hızlı çekilir.
-- requests sonucu eksik görünürse tek Chromium oturumu ile Playwright fallback kullanır.
-- Her alt sayfa için ayrı browser açmaz.
+- Statik sayfalardaki tüm productservicefee tablo kimliklerini keşfeder.
+- Dinamik tabloları Halkbank'ın kullandığı resmî web API'sinden eksiksiz çeker.
+- 148 tablo / 367 dinamik satır altına düşerse yarım veri yazmak yerine hata verir.
+- Ticari ücretleri resmî PDF kaynağından almaya devam eder.
 - Güncel Halkbank sayfa başlıklarını / alt başlıklarını MASRAF alanında korur.
+- Kart ürün/tablo adlarını MASRAF alanında korur; aynı tutarlı farklı kartları birleştirmez.
 - Havale / EFT / FAST başlıklarını kaybetmez.
 - "Uluslararası Fon Transferi Ücreti" satırlarını SWIFT filtresinde görünür yapar.
 - Duplicate kayıtları temizler.
@@ -17,6 +19,10 @@ Bu sürüm:
 import io
 import re
 import sys
+import threading
+import time
+import unicodedata
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Set, Tuple
 from urllib.parse import urljoin, urlparse
@@ -25,9 +31,31 @@ import requests
 from bs4 import BeautifulSoup
 
 
-SCRAPER_VERSION = "2026-08-19-v3-halkbank-card-commercial-fix"
+SCRAPER_VERSION = "2026-08-24-v4-halkbank-official-api-completeness"
 
 HALKBANK_ANA_URL = "https://www.halkbank.com.tr/tr/urun-ve-hizmet-ucretleri"
+HALKBANK_API_URL = "https://webapi.halkbank.com.tr/api/productservicefee/{table_id}"
+
+# 24.08.2026 tarihli resmî sayfa envanteri. Bunlar ücret tutarı değil,
+# dinamik Halkbank tablolarının eksiksiz yüklenip yüklenmediğini anlamak için
+# kullanılan asgari bütünlük eşikleridir. Yeni tablo/satırlar engellenmez;
+# yalnız eksik yükleme Excel yazımını durdurur.
+MIN_API_TABLE_COUNT = 148
+MIN_API_ITEM_COUNT = 367
+API_MAX_WORKERS = 12
+API_MAX_ATTEMPTS = 3
+
+REQUIRED_API_TERMS = (
+    "mkk hesap bakim ucreti",
+    "hesap acma",
+    "mkk yatirimci sicil numarasi ve sifre gonderim ucreti",
+    "mkk dibs alim satim islemleri ucreti",
+    "mkk osba alim-satim ucreti",
+    "uyelerarasi menkul kiymet transferi",
+    "uye ici hesaplararasi",
+)
+
+_API_THREAD_LOCAL = threading.local()
 
 HEADERS = {
     "User-Agent": (
@@ -170,6 +198,15 @@ def _normalize_key(value: Optional[str]) -> str:
 
     for old, new in replacements.items():
         text = text.replace(old, new)
+
+    # Python'da büyük Türkçe İ harfinin lower() sonucu "i + combining dot"
+    # olabilir. Arama/dedup anahtarında görünmez birleşik karakter bırakma.
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(
+        char
+        for char in text
+        if not unicodedata.combining(char)
+    )
 
     text = text.replace("%", " ")
     text = re.sub(r"\s+", " ", text)
@@ -1663,6 +1700,405 @@ def _empty_total_stats() -> Dict[str, int]:
     }
 
 
+# =========================================================
+# RESMÎ HALKBANK API - DİNAMİK TABLOLAR
+# =========================================================
+
+def _api_worker_session() -> requests.Session:
+    """Her worker için ayrı Session kullan; bağlantı havuzunu güvenle koru."""
+    session = getattr(_API_THREAD_LOCAL, "session", None)
+
+    if session is None:
+        session = requests.Session()
+        session.headers.update(HEADERS)
+        _API_THREAD_LOCAL.session = session
+
+    return session
+
+
+def _discover_api_table_specs(
+    html: str,
+    page_category: str,
+    page_url: str,
+) -> List[Tuple[str, str, str, str]]:
+    """
+    Statik sayfadaki her productservicefee bileşeninin resmî tablo kimliğini
+    ve bağlı olduğu accordion başlığını çıkarır.
+
+    Dönüş: (kategori, bölüm başlığı, tablo kimliği, sayfa URL'i)
+    """
+    soup = BeautifulSoup(html, "lxml")
+    specs: List[Tuple[str, str, str, str]] = []
+    seen_ids: Set[str] = set()
+
+    for wrapper in soup.select("[data-productservicefeetableid]"):
+        table_id = _normalize(
+            wrapper.get("data-productservicefeetableid")
+        )
+
+        if not table_id or not table_id.isdigit() or table_id in seen_ids:
+            continue
+
+        section_title = ""
+        accordion = wrapper.find_parent(
+            "div",
+            class_="cmp-accordion__item",
+        )
+
+        if accordion is not None:
+            title_node = accordion.select_one(
+                ".cmp-accordion__title"
+            )
+            if title_node is not None:
+                section_title = _normalize(
+                    title_node.get_text(" ", strip=True)
+                )
+
+        if not section_title:
+            heading = wrapper.find_previous(
+                ["h3", "h4", "h5", "h6"]
+            )
+            if heading is not None:
+                section_title = _normalize(
+                    heading.get_text(" ", strip=True)
+                )
+
+        if not _is_valid_title(section_title):
+            section_title = ""
+
+        seen_ids.add(table_id)
+        specs.append(
+            (
+                page_category,
+                section_title,
+                table_id,
+                page_url,
+            )
+        )
+
+    return specs
+
+
+def _combine_api_table_title(
+    section_title: str,
+    table_name: str,
+) -> str:
+    """Accordion başlığı ile ürün/tablo adını kayıpsız birleştirir."""
+    section_title = _normalize(section_title)
+    table_name = _normalize(table_name)
+
+    if not section_title:
+        return table_name
+    if not table_name:
+        return section_title
+
+    section_key = _normalize_key(section_title)
+    table_key = _normalize_key(table_name)
+
+    if (
+        section_key == table_key
+        or section_key in table_key
+    ):
+        return table_name
+
+    if table_key in section_key:
+        return section_title
+
+    return _normalize(
+        f"{section_title} - {table_name}"
+    )
+
+
+def _api_item_to_row(
+    item: dict,
+    page_category: str,
+    section_title: str,
+    table_name: str,
+) -> UcretSatiri:
+    raw_masraf = _normalize(item.get("costName"))
+
+    if not raw_masraf:
+        raise ScraperError(
+            f"Halkbank API boş costName döndürdü: "
+            f"kategori={page_category} | tablo={table_name or section_title}"
+        )
+
+    aciklama, aciklama_tarihi = _parse_aciklama(
+        _normalize(item.get("description"))
+    )
+    site_tarihi = _normalize(
+        item.get("updatedDate")
+    ).replace("/", ".")
+
+    if not site_tarihi:
+        site_tarihi = aciklama_tarihi
+
+    full_title = _combine_api_table_title(
+        section_title,
+        table_name,
+    )
+
+    return UcretSatiri(
+        kategori=page_category,
+        masraf=_build_masraf(
+            raw_masraf,
+            full_title,
+        ),
+        asgari_tutar=_normalize(item.get("minAmount")),
+        asgari_oran=_normalize(item.get("minRate")),
+        azami_tutar=_normalize(item.get("maxAmount")),
+        azami_oran=_normalize(item.get("maxRate")),
+        aciklama=aciklama,
+        site_guncelleme_tarihi=site_tarihi,
+    )
+
+
+def _fetch_official_api_table(
+    spec: Tuple[str, str, str, str],
+) -> Tuple[Tuple[str, str, str, str], str, List[dict]]:
+    page_category, section_title, table_id, page_url = spec
+    api_url = HALKBANK_API_URL.format(table_id=table_id)
+    last_error: Optional[Exception] = None
+
+    for attempt in range(1, API_MAX_ATTEMPTS + 1):
+        try:
+            response = _api_worker_session().get(
+                api_url,
+                headers={
+                    "Referer": page_url,
+                    "Origin": "https://www.halkbank.com.tr",
+                },
+                timeout=40,
+            )
+            response.raise_for_status()
+            payload = response.json()
+
+            if not isinstance(payload, dict):
+                raise ScraperError(
+                    "API JSON nesnesi döndürmedi."
+                )
+
+            data = payload.get("data")
+            if not isinstance(data, dict):
+                raise ScraperError(
+                    "API data alanı boş/geçersiz."
+                )
+
+            fee_items = data.get("feeItems")
+            if not isinstance(fee_items, list) or not fee_items:
+                raise ScraperError(
+                    "API feeItems alanı boş/geçersiz."
+                )
+
+            table_name = _normalize(
+                data.get("tableName")
+            )
+
+            return spec, table_name, fee_items
+
+        except Exception as exc:
+            last_error = exc
+            if attempt < API_MAX_ATTEMPTS:
+                time.sleep(attempt)
+
+    raise ScraperError(
+        "Halkbank resmî API tablosu alınamadı: "
+        f"kategori={page_category} | bölüm={section_title or '-'} | "
+        f"table_id={table_id} | hata={last_error}"
+    )
+
+
+def _validate_official_api_inventory(
+    specs: List[Tuple[str, str, str, str]],
+    api_rows: List[UcretSatiri],
+) -> None:
+    if len(specs) < MIN_API_TABLE_COUNT:
+        raise ScraperError(
+            "Halkbank resmî API tablo envanteri eksik: "
+            f"bulunan={len(specs)} | beklenen_en_az={MIN_API_TABLE_COUNT}"
+        )
+
+    if len(api_rows) < MIN_API_ITEM_COUNT:
+        raise ScraperError(
+            "Halkbank resmî API ücret satırları eksik: "
+            f"bulunan={len(api_rows)} | beklenen_en_az={MIN_API_ITEM_COUNT}"
+        )
+
+    searchable = "\n".join(
+        _normalize_key(
+            f"{row.kategori} {row.masraf}"
+        )
+        for row in api_rows
+    )
+    missing_terms = [
+        term
+        for term in REQUIRED_API_TERMS
+        if term not in searchable
+    ]
+
+    if missing_terms:
+        raise ScraperError(
+            "Halkbank kritik resmî API kalemleri eksik: "
+            + ", ".join(missing_terms)
+        )
+
+
+def _scrape_all_official_api(
+    pages: List[Tuple[str, str]],
+    session: requests.Session,
+) -> Tuple[List[UcretSatiri], Dict[str, int]]:
+    """
+    Halkbank'ın dinamik ücret bileşenlerini doğrudan bankanın kullandığı resmî
+    API'den çeker. DOM'un geç/yarım yüklenmesine bağlı veri kaybını ortadan
+    kaldırır. Ticari tarife, resmî PDF kaynağından mevcut parser ile alınır.
+    """
+    all_rows: List[UcretSatiri] = []
+    api_specs: List[Tuple[str, str, str, str]] = []
+    stats = _empty_total_stats()
+    stats["pages_total"] = len(pages)
+    stats["api_tables_discovered"] = 0
+    stats["api_tables_loaded"] = 0
+    stats["api_items"] = 0
+
+    commercial_pages: List[Tuple[str, str, str]] = []
+
+    for page_category, page_url in pages:
+        response = session.get(
+            page_url,
+            headers=HEADERS,
+            timeout=40,
+        )
+        response.raise_for_status()
+
+        if page_category == "Ticari Ücret ve Komisyonları":
+            commercial_pages.append(
+                (
+                    page_category,
+                    page_url,
+                    response.text,
+                )
+            )
+            continue
+
+        page_specs = _discover_api_table_specs(
+            response.text,
+            page_category,
+            page_url,
+        )
+
+        if not page_specs:
+            raise ScraperError(
+                "Halkbank alt sayfasında resmî API tablo kimliği bulunamadı: "
+                f"{page_category} | {page_url}"
+            )
+
+        api_specs.extend(page_specs)
+
+    table_ids = [spec[2] for spec in api_specs]
+    if len(table_ids) != len(set(table_ids)):
+        raise ScraperError(
+            "Halkbank resmî API envanterinde duplicate table_id bulundu."
+        )
+
+    stats["api_tables_discovered"] = len(api_specs)
+    api_results: Dict[str, Tuple[str, List[dict]]] = {}
+
+    with ThreadPoolExecutor(
+        max_workers=API_MAX_WORKERS
+    ) as executor:
+        futures = {
+            executor.submit(
+                _fetch_official_api_table,
+                spec,
+            ): spec
+            for spec in api_specs
+        }
+
+        for future in as_completed(futures):
+            spec, table_name, fee_items = future.result()
+            api_results[spec[2]] = (
+                table_name,
+                fee_items,
+            )
+
+    api_rows: List[UcretSatiri] = []
+    page_row_counts: Dict[str, int] = {}
+
+    # Sonuçlar eşzamanlı gelse de sayfa/tablo sırasını deterministik koru.
+    for spec in api_specs:
+        page_category, section_title, table_id, _ = spec
+        table_name, fee_items = api_results[table_id]
+
+        for item in fee_items:
+            if not isinstance(item, dict):
+                raise ScraperError(
+                    f"Halkbank API table_id={table_id} geçersiz satır döndürdü."
+                )
+
+            api_rows.append(
+                _api_item_to_row(
+                    item,
+                    page_category,
+                    section_title,
+                    table_name,
+                )
+            )
+            page_row_counts[page_category] = (
+                page_row_counts.get(page_category, 0)
+                + 1
+            )
+
+    _validate_official_api_inventory(
+        api_specs,
+        api_rows,
+    )
+
+    stats["api_tables_loaded"] = len(api_results)
+    stats["api_items"] = len(api_rows)
+    stats["tables_total"] += len(api_specs)
+    stats["fee_tables"] += len(api_specs)
+    stats["candidate_rows"] += len(api_rows)
+    stats["parsed_before_dedup"] += len(api_rows)
+    stats["pages_with_rows"] += len(page_row_counts)
+    all_rows.extend(api_rows)
+
+    for page_category, page_url, page_html in commercial_pages:
+        rows = _scrape_commercial_pdf(
+            page_html,
+            page_url,
+            session=session,
+        )
+
+        if not rows:
+            raise ScraperError(
+                "Halkbank ticari resmî PDF hiç ücret satırı üretmedi."
+            )
+
+        all_rows.extend(rows)
+        stats["pages_with_rows"] += 1
+        stats["tables_total"] += 1
+        stats["fee_tables"] += 1
+        stats["candidate_rows"] += len(rows)
+        stats["parsed_before_dedup"] += len(rows)
+
+    stats["pages_no_rows"] = (
+        stats["pages_total"]
+        - stats["pages_with_rows"]
+        - stats["pages_failed"]
+    )
+
+    print(
+        "[halkbank][official-api] "
+        f"tablo={stats['api_tables_loaded']}/"
+        f"{stats['api_tables_discovered']} | "
+        f"dinamik_satır={stats['api_items']} | "
+        f"toplam_ham={len(all_rows)}",
+        file=sys.stderr,
+    )
+
+    return all_rows, stats
+
+
 def _scrape_all_requests(
     pages: List[Tuple[str, str]],
     session: requests.Session,
@@ -2185,6 +2621,19 @@ def _print_integrity_report(
         file=sys.stderr,
     )
 
+    if stats.get("api_tables_discovered", 0):
+        print(
+            f"[halkbank] Resmî API tablo: "
+            f"{stats.get('api_tables_loaded', 0)}/"
+            f"{stats.get('api_tables_discovered', 0)}",
+            file=sys.stderr,
+        )
+        print(
+            f"[halkbank] Resmî API ücret satırı: "
+            f"{stats.get('api_items', 0)}",
+            file=sys.stderr,
+        )
+
     print(
         f"[halkbank] İlgisiz/atlanan tablo: "
         f"{stats.get('ignored_tables', 0)}",
@@ -2413,83 +2862,14 @@ def scrape_halkbank(
             "Halkbank alt sayfa listesi boş."
         )
 
-    rows: List[
-        UcretSatiri
-    ] = []
-
-    stats: Optional[
-        Dict[str, int]
-    ] = None
-
-    source = ""
-
-    # -----------------------------------------------------
-    # 1) REQUESTS - hızlı yol
-    # -----------------------------------------------------
-
-    try:
-        request_rows, request_stats = (
-            _scrape_all_requests(
-                pages,
-                session,
-            )
-        )
-
-        print(
-            f"[halkbank] requests sonucu: "
-            f"{len(request_rows)} ham parse satırı.",
-            file=sys.stderr,
-        )
-
-        # Güncel ücret sayfalarının önemli kısmı server-rendered.
-        # Çok az tablo/satır görülürse dinamik içeriği kaçırmış say.
-        if (
-            request_rows
-            and request_stats.get(
-                "fee_tables",
-                0,
-            ) >= 15
-            and request_stats.get(
-                "candidate_rows",
-                0,
-            ) >= 80
-            and request_stats.get(
-                "pages_failed",
-                0,
-            ) == 0
-        ):
-            rows = request_rows
-            stats = request_stats
-            source = "requests"
-
-        else:
-            print(
-                "[halkbank][UYARI] "
-                "requests sonucu eksik görünüyor; "
-                "tek-browser Playwright fallback çalışacak.",
-                file=sys.stderr,
-            )
-
-    except Exception as exc:
-        print(
-            f"[halkbank] requests başarısız: {exc}",
-            file=sys.stderr,
-        )
-
-    # -----------------------------------------------------
-    # 2) PLAYWRIGHT - yalnızca gerektiğinde
-    # -----------------------------------------------------
-
-    if not rows:
-        playwright_rows, playwright_stats = (
-            _scrape_all_playwright(
-                pages
-            )
-        )
-
-        rows = playwright_rows
-        stats = playwright_stats
-        source = "playwright"
+    # Dinamik ücret tabloları bankanın kendi web API'sinden çekilir. API'de
+    # tek tablo bile eksik kalırsa burada hata üretilir; yarım Playwright DOM'u
+    # ile devam edilmez. main.py aynı bankayı otomatik olarak tekrar dener.
+    rows, stats = _scrape_all_official_api(
+        pages,
+        session,
+    )
+    source = "official-api + commercial-pdf"
 
     if not rows or stats is None:
         raise ScraperError(
