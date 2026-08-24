@@ -62,7 +62,7 @@ from update_excel import (
 )
 
 
-MAIN_VERSION = "2026-08-24-v30-ziraat-description-filter-audit"
+MAIN_VERSION = "2026-08-24-v31-halkbank-api-completeness-guard"
 EXPECTED_SUPPLEMENTAL_VERSION = "2026-08-24-v15-isbank-versioned-pdf-fallback"
 EXPECTED_COMPARISON_VERSION = "2026-08-24-v29-fast-research-securities"
 EXPECTED_EXCEL_WRITER_VERSION = "2026-08-24-v4-filter-data-quality-report"
@@ -93,7 +93,7 @@ EXPECTED_VERSIONS = {
     "AKBANK":    "2026-08-19-v4-akbank-context-fix",
     "QNB":       "2026-08-19-v5-qnb-category-fix",
     "DENİZBANK": "2026-08-19-v2-denizbank-integrity",
-    "HALKBANK":  "2026-08-19-v3-halkbank-card-commercial-fix",
+    "HALKBANK":  "2026-08-24-v4-halkbank-official-api-completeness",
     "VAKIFBANK": "2026-08-19-v3-vakifbank-channel-currency-fix",
     "TEB":       "2026-08-19-v5-teb-category-normalization",
     "ZİRAAT":    "2026-08-24-v5-ziraat-full-descriptions",
