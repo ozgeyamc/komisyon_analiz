@@ -62,9 +62,9 @@ from update_excel import (
 )
 
 
-MAIN_VERSION = "2026-08-24-v22-glossary-aidat-school-phone"
-EXPECTED_SUPPLEMENTAL_VERSION = "2026-08-24-v12-billing-methods-cleanup"
-EXPECTED_COMPARISON_VERSION = "2026-08-24-v26-glossary-aidat-school-phone"
+MAIN_VERSION = "2026-08-24-v23-final-source-audit"
+EXPECTED_SUPPLEMENTAL_VERSION = "2026-08-24-v13-isbank-bhs-10leaf-fix"
+EXPECTED_COMPARISON_VERSION = "2026-08-24-v27-final-source-audit"
 EXPECTED_EXCEL_WRITER_VERSION = "2026-08-21-v2-clean-supplemental-display"
 
 # Primary scraper güvenlik retry ayarları.
