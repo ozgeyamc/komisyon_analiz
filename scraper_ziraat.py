@@ -22,14 +22,19 @@ import re
 import sys
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Set, Tuple
+from xml.etree import ElementTree as ET
 
 import requests
 from bs4 import BeautifulSoup
 
 
-SCRAPER_VERSION = "2026-08-19-v4-ziraat-section-boundary-fix"
+SCRAPER_VERSION = "2026-08-24-v5-ziraat-full-descriptions"
 
 ZIRAAT_URL = "https://www.ziraatbank.com.tr/tr/urun-ve-hizmet-ucretleri"
+ZIRAAT_XML_URL = (
+    "https://www.ziraatbank.com.tr/"
+    "TuketiciVerileri/TuketiciVerileri.xml"
+)
 
 HEADERS = {
     "User-Agent": (
@@ -371,6 +376,7 @@ CATEGORY_ALIASES = {
     "cekler ve senetler": "Çekler ve Senetler",
     "dis ticaret": "Dış Ticaret",
     "kiralik kasa ucretleri": "Kiralık Kasa Ücretleri",
+    "kobi kredileri": "Ticari Krediler",
     "ticari krediler": "Ticari Krediler",
     "kredi kartlari ve banka kartlari": "Kredi Kartları ve Banka Kartları",
     "menkul kiymet islemleri": "Menkul Kıymet İşlemleri",
@@ -868,12 +874,26 @@ def _table_to_rows(
             ]
             cell_index += 1
 
-            text = _normalize(
-                cell.get_text(
-                    " ",
-                    strip=True,
-                )
+            # Ziraat, 200 karakterden uzun açıklamaları görünür hücrede
+            # "... Devamı" şeklinde kısaltıyor. Tam resmî metin aynı td'nin
+            # data-full-aciklama niteliğinde tutuluyor. Görünür metni almak
+            # açıklamanın Excel'e eksik gitmesine neden olduğu için nitelik
+            # varsa onu birincil kaynak kabul ediyoruz.
+            full_description = cell.get(
+                "data-full-aciklama"
             )
+
+            if full_description is not None:
+                text = _normalize(
+                    full_description
+                )
+            else:
+                text = _normalize(
+                    cell.get_text(
+                        " ",
+                        strip=True,
+                    )
+                )
 
             try:
                 rowspan = max(
@@ -1393,6 +1413,242 @@ def _parse_html(
             )
 
     return rows_out, stats
+
+
+# =========================================================
+# RESMÎ XML PARSER
+# =========================================================
+
+def _parse_xml(
+    xml_content: bytes,
+) -> Tuple[
+    List[UcretSatiri],
+    Dict[str, int],
+]:
+    """
+    Ziraat ücret sayfasının bizzat kullandığı resmî XML'i parse eder.
+
+    Görsel sayfa, 200 karakterden uzun açıklamaları "... Devamı" diye
+    kısaltır. XML'deki Aciklama alanı ise metnin tamamını içerir. Bu yüzden
+    XML birincil, oluşturulmuş HTML ise yalnız yedek kaynaktır.
+    """
+    root = ET.fromstring(
+        xml_content
+    )
+
+    groups = root.findall(
+        "IslemGrubu"
+    )
+
+    stats: Dict[str, int] = {
+        "root_tables": len(groups),
+        "fee_tables": 0,
+        "ignored_tables": 0,
+        "zero_record_tables": 0,
+        "candidate_rows": 0,
+        "parsed_before_dedup": 0,
+        "repeated_headers": 0,
+        "notes": 0,
+        "invalid_rows": 0,
+        "missing_category_tables": 0,
+    }
+
+    rows_out: List[
+        UcretSatiri
+    ] = []
+
+    for group in groups:
+        raw_category = _normalize(
+            group.get(
+                "IslemGrubuAdi"
+            )
+        )
+        category = CATEGORY_ALIASES.get(
+            _normalize_key(
+                raw_category
+            ),
+            raw_category or "Genel",
+        )
+
+        if category == "Genel":
+            stats[
+                "missing_category_tables"
+            ] += 1
+
+        for operation in group.findall(
+            "Islem"
+        ):
+            operation_name = _normalize(
+                operation.get(
+                    "IslemAdi"
+                )
+            )
+
+            for item in operation.findall(
+                "Kalem"
+            ):
+                stats[
+                    "fee_tables"
+                ] += 1
+
+                item_name = _normalize(
+                    item.get(
+                        "KalemAdi"
+                    )
+                )
+
+                hierarchy: List[str] = []
+
+                if category == "Para Aktarma":
+                    operation_key = _normalize_key(
+                        operation_name
+                    )
+                    operation_group = (
+                        TRANSFER_GROUP_ALIASES.get(
+                            operation_key
+                        )
+                    )
+
+                    if operation_group:
+                        hierarchy.append(
+                            operation_group
+                        )
+
+                if (
+                    item_name
+                    and not any(
+                        _normalize_key(existing)
+                        == _normalize_key(item_name)
+                        for existing in hierarchy
+                    )
+                ):
+                    hierarchy.append(
+                        item_name
+                    )
+
+                item_record_count = 0
+
+                for fee in item.findall(
+                    "Masraf"
+                ):
+                    stats[
+                        "candidate_rows"
+                    ] += 1
+
+                    raw_masraf = _normalize(
+                        fee.get(
+                            "MasrafAdi"
+                        )
+                    )
+
+                    if not raw_masraf:
+                        stats[
+                            "invalid_rows"
+                        ] += 1
+                        continue
+
+                    asgari_tutar = _normalize_tutar(
+                        fee.findtext(
+                            "AsgariTutar"
+                        )
+                    )
+                    asgari_oran = _normalize_tutar(
+                        fee.findtext(
+                            "AsgariOran"
+                        )
+                    )
+                    azami_tutar = _normalize_tutar(
+                        fee.findtext(
+                            "AzamiTutar"
+                        )
+                    )
+                    azami_oran = _normalize_tutar(
+                        fee.findtext(
+                            "AzamiOran"
+                        )
+                    )
+
+                    (
+                        aciklama,
+                        aciklama_tarihi,
+                    ) = _parse_aciklama(
+                        fee.findtext(
+                            "Aciklama"
+                        )
+                        or ""
+                    )
+
+                    site_tarihi = _normalize_tarih(
+                        fee.findtext(
+                            "GuncellemeTarihi"
+                        )
+                    )
+
+                    if not site_tarihi:
+                        site_tarihi = (
+                            aciklama_tarihi
+                        )
+
+                    if not any(
+                        [
+                            asgari_tutar,
+                            asgari_oran,
+                            azami_tutar,
+                            azami_oran,
+                            aciklama,
+                            site_tarihi,
+                        ]
+                    ):
+                        stats[
+                            "invalid_rows"
+                        ] += 1
+                        continue
+
+                    rows_out.append(
+                        UcretSatiri(
+                            kategori=category,
+                            masraf=_build_masraf(
+                                raw_masraf,
+                                hierarchy,
+                            ),
+                            asgari_tutar=asgari_tutar,
+                            asgari_oran=asgari_oran,
+                            azami_tutar=azami_tutar,
+                            azami_oran=azami_oran,
+                            aciklama=aciklama,
+                            site_guncelleme_tarihi=site_tarihi,
+                        )
+                    )
+
+                    stats[
+                        "parsed_before_dedup"
+                    ] += 1
+                    item_record_count += 1
+
+                if item_record_count == 0:
+                    stats[
+                        "zero_record_tables"
+                    ] += 1
+
+    return rows_out, stats
+
+
+def _scrape_xml(
+    url: str = ZIRAAT_XML_URL,
+) -> Tuple[
+    List[UcretSatiri],
+    Dict[str, int],
+]:
+    response = requests.get(
+        url,
+        headers=HEADERS,
+        timeout=45,
+    )
+    response.raise_for_status()
+
+    return _parse_xml(
+        response.content
+    )
 
 
 # =========================================================
@@ -1991,58 +2247,108 @@ def scrape_ziraat(
     source = ""
 
     # -----------------------------------------------------
-    # REQUESTS - birincil ve hızlı yol
+    # RESMÎ XML - birincil ve tam açıklamalı yol
     # -----------------------------------------------------
 
     try:
-        request_rows, request_stats = (
-            _scrape_requests(
-                url
-            )
+        xml_rows, xml_stats = (
+            _scrape_xml()
         )
 
         print(
-            f"[ziraat][requests] "
-            f"root={request_stats['root_tables']}, "
-            f"ücret={request_stats['fee_tables']}, "
-            f"aday={request_stats['candidate_rows']}, "
-            f"parse={len(request_rows)}",
+            f"[ziraat][xml] "
+            f"grup={xml_stats['root_tables']}, "
+            f"ücret_tablosu={xml_stats['fee_tables']}, "
+            f"aday={xml_stats['candidate_rows']}, "
+            f"parse={len(xml_rows)}",
             file=sys.stderr,
         )
 
-        # Güncel Ziraat sayfası çok sayıda server-rendered ücret tablosu
-        # içeriyor. Küçük bir sonuç gelirse eksik HTML varsay.
         if (
-            request_stats.get(
+            xml_stats.get(
                 "fee_tables",
                 0,
             ) >= 30
-            and request_stats.get(
+            and xml_stats.get(
                 "candidate_rows",
                 0,
             ) >= 120
             and len(
-                request_rows
+                xml_rows
             ) >= 120
         ):
-            rows = request_rows
-            stats = request_stats
-            source = "requests"
-
+            rows = xml_rows
+            stats = xml_stats
+            source = "official-xml"
         else:
             print(
                 "[ziraat][UYARI] "
-                "requests sonucu eksik görünüyor; "
-                "Playwright fallback çalışacak.",
+                "Resmî XML sonucu eksik görünüyor; "
+                "HTML yolları denenecek.",
                 file=sys.stderr,
             )
 
     except Exception as exc:
         print(
             f"[ziraat][UYARI] "
-            f"requests başarısız: {exc}",
+            f"Resmî XML başarısız: {exc}",
             file=sys.stderr,
         )
+
+    # -----------------------------------------------------
+    # REQUESTS - birincil ve hızlı yol
+    # -----------------------------------------------------
+
+    if not rows:
+        try:
+            request_rows, request_stats = (
+                _scrape_requests(
+                    url
+                )
+            )
+
+            print(
+                f"[ziraat][requests] "
+                f"root={request_stats['root_tables']}, "
+                f"ücret={request_stats['fee_tables']}, "
+                f"aday={request_stats['candidate_rows']}, "
+                f"parse={len(request_rows)}",
+                file=sys.stderr,
+            )
+
+            # Güncel Ziraat sayfası çok sayıda server-rendered ücret tablosu
+            # içeriyor. Küçük bir sonuç gelirse eksik HTML varsay.
+            if (
+                request_stats.get(
+                    "fee_tables",
+                    0,
+                ) >= 30
+                and request_stats.get(
+                    "candidate_rows",
+                    0,
+                ) >= 120
+                and len(
+                    request_rows
+                ) >= 120
+            ):
+                rows = request_rows
+                stats = request_stats
+                source = "requests"
+
+            else:
+                print(
+                    "[ziraat][UYARI] "
+                    "requests sonucu eksik görünüyor; "
+                    "Playwright fallback çalışacak.",
+                    file=sys.stderr,
+                )
+
+        except Exception as exc:
+            print(
+                f"[ziraat][UYARI] "
+                f"requests başarısız: {exc}",
+                file=sys.stderr,
+            )
 
     # -----------------------------------------------------
     # PLAYWRIGHT - yalnız gerektiğinde
@@ -2081,6 +2387,33 @@ def scrape_ziraat(
     rows = _deduplicate(
         rows,
         stats,
+    )
+
+    truncated_descriptions = [
+        row
+        for row in rows
+        if re.search(
+            r"(?:\.\.\.|…)[\s\xa0]*Devam[ıi]\s*$",
+            row.aciklama or "",
+            flags=re.IGNORECASE,
+        )
+    ]
+
+    if truncated_descriptions:
+        examples = "; ".join(
+            row.masraf
+            for row in truncated_descriptions[:5]
+        )
+        raise ScraperError(
+            "Ziraat tam açıklama kontrolü başarısız: "
+            f"{len(truncated_descriptions)} satır hâlâ '... Devamı' ile "
+            f"bitiyor. Örnekler: {examples}"
+        )
+
+    print(
+        "[ziraat] Tam açıklama kontrolü: OK - "
+        "'... Devamı' ile kesilmiş açıklama yok.",
+        file=sys.stderr,
     )
 
     rows = sorted(
