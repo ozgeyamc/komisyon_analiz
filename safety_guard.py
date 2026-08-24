@@ -19,7 +19,8 @@ from typing import Dict, Iterable, List, Mapping, Sequence, Tuple
 
 
 # 24.08.2026 resmî kaynak envanteriyle doğrulanan primary referanslar.
-# Halkbank: 367 dinamik API + dört sayfalık ticari PDF'den 135 hizmet = 502.
+# Halkbank: 356 API ücret satırı + resmî boş yayımlanan 5 MKK durum
+# satırı + dört sayfalık ticari PDF'den 135 hizmet = 496.
 BASELINE_COUNTS: Dict[str, int] = {
     "GARANTİ": 715,
     "YAPIKREDI": 398,
@@ -27,13 +28,13 @@ BASELINE_COUNTS: Dict[str, int] = {
     "AKBANK": 461,
     "QNB": 390,
     "DENİZBANK": 492,
-    "HALKBANK": 502,
+    "HALKBANK": 496,
     "VAKIFBANK": 378,
     "TEB": 542,
     "ZİRAAT": 586,
 }
 
-BASELINE_TOTAL = sum(BASELINE_COUNTS.values())  # 5410
+BASELINE_TOTAL = sum(BASELINE_COUNTS.values())  # 5404
 
 # Banka bazında referansın %85'inden azı gelirse yazmayı durdur.
 # %70, bir alt sayfanın tamamen kaybolmasını dahi geçirebildiği için fazla
@@ -70,12 +71,11 @@ COMMON_REQUIRED_TERMS = (
 
 BANK_REQUIRED_TERMS = {
     "HALKBANK": (
-        "mkk hesap bakim ucreti",
-        "mkk yatirimci sicil numarasi ve sifre gonderim ucreti",
-        "mkk dibs alim satim islemleri ucreti",
-        "mkk osba alim-satim ucreti",
-        "uyelerarasi menkul kiymet transferi",
-        "uye ici hesaplararasi",
+        "mkk hesap bakim ucretleri",
+        "mkk hesap acma ucreti",
+        "mkk sifre gonderim ucreti",
+        "mkk menkul kiymet transferi ucretleri",
+        "mkk saklama ucretleri",
         "nakit yonetimi",
         "uluslararasi fon transferi",
         "fast islemleri",
