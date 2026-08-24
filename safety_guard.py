@@ -13,10 +13,12 @@ main.py, yalnızca bu kontrol OK ise excel_guncelle_coklu() çağırır.
 """
 
 from dataclasses import dataclass
+import re
+import unicodedata
 from typing import Dict, Iterable, List, Mapping, Sequence, Tuple
 
 
-# 20.08.2026 tarihinde 10 banka birlikte başarılı çalıştırılarak doğrulanan referanslar.
+# Başarılı koşular ve 24.08.2026 Halkbank resmî API envanteriyle doğrulanan referanslar.
 BASELINE_COUNTS: Dict[str, int] = {
     "GARANTİ": 715,
     "YAPIKREDI": 398,
@@ -24,16 +26,19 @@ BASELINE_COUNTS: Dict[str, int] = {
     "AKBANK": 461,
     "QNB": 390,
     "DENİZBANK": 492,
-    "HALKBANK": 395,
+    "HALKBANK": 427,
     "VAKIFBANK": 378,
     "TEB": 542,
     "ZİRAAT": 586,
 }
 
-BASELINE_TOTAL = sum(BASELINE_COUNTS.values())  # 5303
+BASELINE_TOTAL = sum(BASELINE_COUNTS.values())  # 5335
 
-# Banka bazında referansın %70'inden azı gelirse yazmayı durdur.
-MIN_RATIO = 0.70
+# Banka bazında referansın %85'inden azı gelirse yazmayı durdur.
+# %70, bir alt sayfanın tamamen kaybolmasını dahi geçirebildiği için fazla
+# gevşekti. Banka sitesinde gerçek ve büyük bir değişiklik varsa manuel olarak
+# doğrulanmadan eski doğru Excel'in üzerine yazılmaması tercih edilir.
+MIN_RATIO = 0.85
 
 # Duplicate / DOM patlaması gibi durumları yakalamak için aşırı artışı da durdur.
 MAX_RATIO = 1.75
@@ -43,10 +48,37 @@ TOTAL_MIN_RATIO = 0.80
 TOTAL_MAX_RATIO = 1.40
 
 # Bu seviyeyi aşan ama hâlâ güvenli aralıkta kalan değişimler logda UYARI olsun.
-WARN_DELTA_RATIO = 0.15
+WARN_DELTA_RATIO = 0.08
 
 # kategori veya masrafı boş satırlar bu orandan fazlaysa koşu güvenli sayılmaz.
 MAX_INVALID_CORE_RATIO = 0.01
+
+# Her banka için temel ürün ailelerinin kaybolmadığını doğrular. Bu kontrol
+# sayısal satır eşiğinin tek başına yakalayamadığı bölüm-bazlı scraper
+# eksiklerini bloke eder.
+COMMON_REQUIRED_TERMS = (
+    "fast",
+    "eft",
+    "havale",
+    "swift",
+    "atm",
+    "cek",
+    "fatura",
+    "menkul",
+)
+
+BANK_REQUIRED_TERMS = {
+    "HALKBANK": (
+        "mkk hesap bakim ucreti",
+        "mkk yatirimci sicil numarasi ve sifre gonderim ucreti",
+        "mkk dibs alim satim islemleri ucreti",
+        "mkk osba alim-satim ucreti",
+        "uyelerarasi menkul kiymet transferi",
+        "uye ici hesaplararasi",
+    ),
+}
+
+MIN_DISTINCT_CATEGORIES = 5
 
 
 @dataclass
@@ -80,6 +112,29 @@ def _core_is_valid(row) -> bool:
     kategori = str(getattr(row, "kategori", "") or "").strip()
     masraf = str(getattr(row, "masraf", "") or "").strip()
     return bool(kategori and masraf)
+
+
+def _normalize_key(value) -> str:
+    text = str(value or "").lower()
+    text = text.translate(
+        str.maketrans(
+            {
+                "ı": "i",
+                "ğ": "g",
+                "ü": "u",
+                "ş": "s",
+                "ö": "o",
+                "ç": "c",
+            }
+        )
+    )
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(
+        char
+        for char in text
+        if not unicodedata.combining(char)
+    )
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def validate_run(
@@ -175,13 +230,52 @@ def validate_run(
                 f"İzin verilen en fazla {allowed_invalid}."
             )
 
-        # Exact duplicate oranı. Bu kontrol sadece uyarıdır; banka sitelerinde
-        # nadiren birebir tekrarlar görülebilir.
+        distinct_categories = {
+            _normalize_key(
+                getattr(row, "kategori", "")
+            )
+            for row in rows
+            if _normalize_key(
+                getattr(row, "kategori", "")
+            )
+        }
+
+        if len(distinct_categories) < MIN_DISTINCT_CATEGORIES:
+            errors.append(
+                f"{banka}: yalnız {len(distinct_categories)} farklı kategori geldi; "
+                f"beklenen en az {MIN_DISTINCT_CATEGORIES}. Alt sayfa/bölüm kaybı olabilir."
+            )
+
+        searchable = "\n".join(
+            _normalize_key(
+                f"{getattr(row, 'kategori', '')} "
+                f"{getattr(row, 'masraf', '')}"
+            )
+            for row in rows
+        )
+        required_terms = (
+            COMMON_REQUIRED_TERMS
+            + BANK_REQUIRED_TERMS.get(banka, ())
+        )
+        missing_terms = [
+            term
+            for term in required_terms
+            if term not in searchable
+        ]
+
+        if missing_terms:
+            errors.append(
+                f"{banka}: kritik ürün/işlem kalemleri eksik: "
+                + ", ".join(missing_terms)
+            )
+
+        # Yüksek exact duplicate oranı DOM/API tekrarına işaret eder ve yanlış
+        # satırların Excel'e yazılmasına izin verilmez.
         signatures = [_row_signature(row) for row in rows]
         duplicate_count = len(signatures) - len(set(signatures))
 
         if count and duplicate_count / count >= 0.05:
-            warnings.append(
+            errors.append(
                 f"{banka}: {duplicate_count} exact duplicate satır var "
                 f"(%{duplicate_count / count * 100:.1f})."
             )
