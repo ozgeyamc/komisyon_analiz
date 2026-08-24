@@ -62,8 +62,8 @@ from update_excel import (
 )
 
 
-MAIN_VERSION = "2026-08-24-v24-isbank-bhs-table-layout"
-EXPECTED_SUPPLEMENTAL_VERSION = "2026-08-24-v14-isbank-bhs-table-layout"
+MAIN_VERSION = "2026-08-24-v25-isbank-versioned-pdf-fallback"
+EXPECTED_SUPPLEMENTAL_VERSION = "2026-08-24-v15-isbank-versioned-pdf-fallback"
 EXPECTED_COMPARISON_VERSION = "2026-08-24-v27-final-source-priority"
 EXPECTED_EXCEL_WRITER_VERSION = "2026-08-21-v2-clean-supplemental-display"
 
