@@ -62,9 +62,9 @@ from update_excel import (
 )
 
 
-MAIN_VERSION = "2026-08-24-v25-isbank-versioned-pdf-fallback"
+MAIN_VERSION = "2026-08-24-v26-document-statement-research"
 EXPECTED_SUPPLEMENTAL_VERSION = "2026-08-24-v15-isbank-versioned-pdf-fallback"
-EXPECTED_COMPARISON_VERSION = "2026-08-24-v27-final-source-priority"
+EXPECTED_COMPARISON_VERSION = "2026-08-24-v28-document-statement-research"
 EXPECTED_EXCEL_WRITER_VERSION = "2026-08-21-v2-clean-supplemental-display"
 
 # Primary scraper güvenlik retry ayarları.
