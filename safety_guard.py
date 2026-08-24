@@ -18,7 +18,8 @@ import unicodedata
 from typing import Dict, Iterable, List, Mapping, Sequence, Tuple
 
 
-# Başarılı koşular ve 24.08.2026 Halkbank resmî API envanteriyle doğrulanan referanslar.
+# 24.08.2026 resmî kaynak envanteriyle doğrulanan primary referanslar.
+# Halkbank: 367 dinamik API + dört sayfalık ticari PDF'den 135 hizmet = 502.
 BASELINE_COUNTS: Dict[str, int] = {
     "GARANTİ": 715,
     "YAPIKREDI": 398,
@@ -26,13 +27,13 @@ BASELINE_COUNTS: Dict[str, int] = {
     "AKBANK": 461,
     "QNB": 390,
     "DENİZBANK": 492,
-    "HALKBANK": 427,
+    "HALKBANK": 502,
     "VAKIFBANK": 378,
     "TEB": 542,
     "ZİRAAT": 586,
 }
 
-BASELINE_TOTAL = sum(BASELINE_COUNTS.values())  # 5335
+BASELINE_TOTAL = sum(BASELINE_COUNTS.values())  # 5410
 
 # Banka bazında referansın %85'inden azı gelirse yazmayı durdur.
 # %70, bir alt sayfanın tamamen kaybolmasını dahi geçirebildiği için fazla
@@ -75,6 +76,15 @@ BANK_REQUIRED_TERMS = {
         "mkk osba alim-satim ucreti",
         "uyelerarasi menkul kiymet transferi",
         "uye ici hesaplararasi",
+        "nakit yonetimi",
+        "uluslararasi fon transferi",
+        "fast islemleri",
+        "belge ve bilgilendirme",
+        "cek defteri",
+        "uye isyeri",
+        "paraf klasik",
+        "paraf gold",
+        "paraf platinum",
     ),
 }
 
@@ -229,6 +239,45 @@ def validate_run(
                 f"{banka}: {invalid_core}/{count} satırda KATEGORİ veya MASRAF boş. "
                 f"İzin verilen en fazla {allowed_invalid}."
             )
+
+        invalid_zero_dates = [
+            row
+            for row in rows
+            if _normalize_key(getattr(row, "site_guncelleme_tarihi", ""))
+            in {"30.12.1899", "30.12.1899 00:00", "30.12.1899 00:00:00"}
+        ]
+        if invalid_zero_dates:
+            errors.append(
+                f"{banka}: {len(invalid_zero_dates)} satırda geçersiz "
+                "30.12.1899 seri-tarih artefaktı var."
+            )
+
+        if banka == "HALKBANK":
+            malformed_fragments = {")", "de)", "erde)", "ilerde)"}
+            malformed_rows = []
+            for row in rows:
+                numeric_fields = (
+                    getattr(row, "asgari_tutar", ""),
+                    getattr(row, "asgari_oran", ""),
+                    getattr(row, "azami_tutar", ""),
+                    getattr(row, "azami_oran", ""),
+                )
+                if any(
+                    _normalize_key(value) in malformed_fragments
+                    for value in numeric_fields
+                ):
+                    malformed_rows.append(row)
+                    continue
+                if any(
+                    re.search(r"\d\s+[.,]\s*\d|\d\s+\d", str(value or ""))
+                    for value in numeric_fields
+                ):
+                    malformed_rows.append(row)
+            if malformed_rows:
+                errors.append(
+                    f"HALKBANK: {len(malformed_rows)} ticari PDF satırında "
+                    "metin parçası tutar/oran kolonuna taşmış."
+                )
 
         distinct_categories = {
             _normalize_key(
