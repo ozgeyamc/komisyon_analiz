@@ -38,9 +38,9 @@ from openpyxl.comments import Comment
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
 
-COMPARISON_VERSION = "2026-08-24-v28-document-statement-research"
+COMPARISON_VERSION = "2026-08-24-v29-fast-research-securities"
 COMPARISON_SHEET = "KARŞILAŞTIRMA"
-PREVIEW_LAYOUT_SIGNATURE = "4BANKS|A:I_FILTERED|J:L_EMPTY|M_GLOSSARY_LIST|FAIL_CLOSED_V28|PRIMARY_FIRST|CHANNEL_LABELS|CHEQUE_CURRENT|DOCUMENT_STATEMENT_RESEARCH"
+PREVIEW_LAYOUT_SIGNATURE = "4BANKS|A:I_FILTERED|J:L_EMPTY|M_GLOSSARY_LIST|FAIL_CLOSED_V29|PRIMARY_FIRST|CHANNEL_LABELS|CHEQUE_CURRENT|FAST_OFFICIAL_BANDS|RESEARCH_SECURITIES"
 
 STATUS_AVAILABLE = "[SUPPLEMENTAL][AVAILABLE_NO_SEPARATE_FEE]"
 STATUS_EMPTY = "[SUPPLEMENTAL][PUBLISHED_EMPTY]"
@@ -161,6 +161,7 @@ LAYOUT = [
     ("ROW", RowSpec("Günlük Limit Üzeri Para Çekme", "LIMIT_UZERI_PARA_CEKME", split_channel=False)),
     ("ROW", RowSpec("Ortak ATM Para Çekme", "ORTAK_ATM_PARA_CEKME", split_channel=False)),
     ("ROW", RowSpec("Ortak ATM Bakiye Sorgulama", "BAKIYE_ATM_YURTICI", split_channel=False)),
+    ("ROW", RowSpec("Ortak ATM Bakiye Sorgulama – Yurtdışı", "BAKIYE_ATM_YURTDISI", split_channel=False)),
 
     ("SECTION", "FATURA / KURUM ÖDEMELERİ"),
     ("ROW", RowSpec("Hesaptan Fatura / Kurum Ödemesi", "FATURA", detail="HESAPTAN")),
@@ -175,7 +176,6 @@ LAYOUT = [
     ("SECTION", "FAST"),
     ("ROW", RowSpec("0 TRY - 8.300 TRY", "FAST", "TRANSFER_1")),
     ("ROW", RowSpec("8.300,01 TRY - 399.000 TRY", "FAST", "TRANSFER_2")),
-    ("ROW", RowSpec("399.000,01 TRY -", "FAST", "TRANSFER_3")),
 
     # İlk sayfada ürün adı olarak bulunmayan sentetik Visa Direct / Global Fast
     # karşılaştırma satırları şimdilik kaldırıldı. Yalnız gerçek SWIFT ailesi kalır.
@@ -252,6 +252,7 @@ LAYOUT = [
     ("ROW", RowSpec("Bireysel KMH Hesap Özeti – Basılı", "DOC_KMH_BIREYSEL", split_channel=False)),
     ("ROW", RowSpec("Kredi Kartı Geçmiş Dönem Hesap Özeti", "DOC_KK_GECMIS", split_channel=False)),
     ("ROW", RowSpec("Arşiv Araştırma – Genel Belge", "DOC_ARSIV_GENEL", split_channel=False)),
+    ("ROW", RowSpec("Mevduat Araştırma", "DOC_DEPOSIT_RESEARCH", split_channel=False)),
     ("ROW", RowSpec("1 Yıldan Eski Dekont/Ekstre Verilmesi", "DOC_ESKI_DEKONT_EKSTRE", split_channel=False)),
     ("ROW", RowSpec("Aylık Hesap Özeti – Posta Gönderimi", "DOC_AYLIK_POSTA", split_channel=False)),
     ("ROW", RowSpec("Arşiv/Araştırma – Şube Bazında", "DOC_ARSIV_SUBE", split_channel=False)),
@@ -266,6 +267,21 @@ LAYOUT = [
     ("ROW", RowSpec("Ticari Kart – Ekstre Gönderim Ücreti", "DOC_TICARI_KART_GONDERIM", split_channel=False)),
     ("ROW", RowSpec("Ticari Hesap – Basılı Ekstre Gönderimi", "DOC_TICARI_HESAP_BASILI", split_channel=False)),
     ("ROW", RowSpec("Üye İşyeri/POS – Ekstre Gönderimi", "DOC_POS_EKSTRE", split_channel=False)),
+
+    # Menkul kıymet tarifeleri tek bir genel rakama indirgenemez. Hisse,
+    # virman ve saklama aileleri ayrı gösterilir; banka yalnız açıklama/formül
+    # yayımlıyorsa bu durum rakam uydurulmadan hücrede açıkça belirtilir.
+    ("SECTION", "YURTİÇİ MENKUL KIYMET İŞLEMLERİ"),
+    ("ROW", RowSpec("Hisse Senedi Alım-Satım Komisyonu", "SEC_DOMESTIC_STOCK_TRADE", split_channel=False)),
+    ("ROW", RowSpec("Hisse Senedi Virmanı", "SEC_DOMESTIC_STOCK_TRANSFER", split_channel=False)),
+    ("ROW", RowSpec("Bono/Tahvil Virmanı", "SEC_DOMESTIC_BOND_TRANSFER", split_channel=False)),
+    ("ROW", RowSpec("Yatırım Hesabı / Saklama Ücreti", "SEC_DOMESTIC_CUSTODY", split_channel=False)),
+
+    ("SECTION", "YURTDIŞI MENKUL KIYMET İŞLEMLERİ"),
+    ("ROW", RowSpec("Yurtdışı Pay Alım-Satım Komisyonu", "SEC_FOREIGN_STOCK_TRADE", split_channel=False)),
+    ("ROW", RowSpec("Yurtdışı Pay Saklama Ücreti", "SEC_FOREIGN_STOCK_CUSTODY", split_channel=False)),
+    ("ROW", RowSpec("Eurobond Virmanı", "SEC_EUROBOND_TRANSFER", split_channel=False)),
+    ("ROW", RowSpec("Eurobond Saklama Ücreti", "SEC_EUROBOND_CUSTODY", split_channel=False)),
 ]
 
 # ---------------------------------------------------------------------------
@@ -3257,6 +3273,7 @@ def _audit_atm(
         "LIMIT_UZERI_PARA_CEKME",
         "ORTAK_ATM_PARA_CEKME",
         "BAKIYE_ATM_YURTICI",
+        "BAKIYE_ATM_YURTDISI",
     }:
         return None
 
@@ -3264,6 +3281,30 @@ def _audit_atm(
     # İŞ BANKASI - ilk sayfadaki gerçek bireysel Türkiye tarifeleri
     # -----------------------------------------------------
     if bank == "İŞBANKASI":
+        if spec.service == "BAKIYE_ATM_YURTDISI":
+            candidates = _audit_rows(
+                rows,
+                bank,
+                lambda r: (
+                    "bankamatik karti - yurt disi atm bakiye sorgulama" in _norm(r.kategori)
+                    and "turkiye bireysel kartlari" in _norm(r.masraf)
+                    and "kktc" not in _norm(r.text)
+                ),
+            )
+            if not candidates:
+                return (_source_gap_text(spec, bank, "GENEL"), None, "SOURCE_GAP")
+
+            eur = next((r for r in candidates if "eur" in _norm(r.asgari_tutar)), None)
+            usd = next((r for r in candidates if "usd" in _norm(r.asgari_tutar)), None)
+            if eur is None or usd is None:
+                return (_source_gap_text(spec, bank, "GENEL"), None, "SOURCE_GAP")
+            return (
+                f"{_display_amount(eur.asgari_tutar)} / {_display_amount(usd.asgari_tutar)}\n"
+                "Türkiye bireysel Bankamatik kartı\nBSMV hariç",
+                eur,
+                "NUMERIC",
+            )
+
         if spec.service == "LIMIT_UZERI_PARA_CEKME":
             candidates = _audit_rows(
                 rows, bank,
@@ -3358,6 +3399,13 @@ def _audit_atm(
             candidates.sort(key=lambda r: 1 if "tek atm" in _norm(r.masraf) else 0)
             value, first = _audit_lines(candidates, labeler)
             return (value, first, "NUMERIC")
+
+    if spec.service == "BAKIYE_ATM_YURTDISI":
+        return (
+            "Karşılaştırılabilir ayrı yurtdışı ATM bakiye sorgulama tarifesi yayımlanmıyor",
+            None,
+            "PUBLICATION_STATUS",
+        )
 
     # -----------------------------------------------------
     # YAPI KREDİ - Ortak ATM oranına ek yayımlanan maktu tutar
@@ -5111,7 +5159,7 @@ def _audit_document_statement_research(
                 )
                 if row is None:
                     return (_source_gap_text(spec, bank, wanted_channel), None, "SOURCE_GAP")
-                return ("Bankamatik:\nÜcretsiz / 0 TRY", row, "NUMERIC")
+                return ("Bankamatik (Mobil değil):\nÜcretsiz / 0 TRY", row, "NUMERIC")
 
             row = exact(
                 "Ekstre - TP/YP",
@@ -5372,6 +5420,353 @@ def _audit_document_statement_research(
     return published_gap()
 
 
+_RESEARCH_SECURITIES_SERVICES = {
+    "DOC_DEPOSIT_RESEARCH",
+    "SEC_DOMESTIC_STOCK_TRADE",
+    "SEC_DOMESTIC_STOCK_TRANSFER",
+    "SEC_DOMESTIC_BOND_TRANSFER",
+    "SEC_DOMESTIC_CUSTODY",
+    "SEC_FOREIGN_STOCK_TRADE",
+    "SEC_FOREIGN_STOCK_CUSTODY",
+    "SEC_EUROBOND_TRANSFER",
+    "SEC_EUROBOND_CUSTODY",
+}
+
+
+def _audit_research_and_securities(
+    rows: Sequence[FeeRow], bank: str, spec: RowSpec, wanted_channel: str,
+) -> Optional[Tuple[str, Optional[FeeRow], str]]:
+    """Mevduat araştırma ve menkul kıymet ailelerini tam adla çözer.
+
+    Menkul kıymetlerde bankaların ürün ve dönem kırılımları aynı değildir.
+    Bu nedenle tek bir genel oran seçilmez; karşılaştırılabilir alt hizmetler
+    ayrı satırlarda, kaynağın kendi kapsam etiketiyle gösterilir.
+    """
+    service = spec.service
+    if service not in _RESEARCH_SECURITIES_SERVICES:
+        return None
+
+    def found(predicate, *, numeric_only: bool = False) -> List[FeeRow]:
+        return _primary_first(_audit_rows(
+            rows,
+            bank,
+            predicate,
+            numeric_only=numeric_only,
+        ))
+
+    def exact(masraf: str, *, kategori: str = "", numeric_only: bool = False) -> Optional[FeeRow]:
+        target_fee = _norm(masraf)
+        target_cat = _norm(kategori)
+        matches = found(
+            lambda row: (
+                _norm(row.masraf) == target_fee
+                and (not target_cat or target_cat in _norm(row.kategori))
+            ),
+            numeric_only=numeric_only,
+        )
+        return matches[0] if matches else None
+
+    def published_gap() -> Tuple[str, Optional[FeeRow], str]:
+        return (
+            "Karşılaştırılabilir ayrı tarife yayımlanmıyor",
+            None,
+            "PUBLICATION_STATUS",
+        )
+
+    def number_text(value: float, decimals: int = 6) -> str:
+        raw = f"{value:.{decimals}f}".rstrip("0").rstrip(".")
+        return raw.replace(".", ",")
+
+    def numeric_rate(value: str) -> Optional[float]:
+        raw = _clean(value)
+        if not raw or raw in {"-", "0", "0.0", "0.00", "0%", "0 %"}:
+            return None
+        match = re.search(r"-?[0-9]+(?:[.,][0-9]+)?", raw)
+        if not match:
+            return None
+        try:
+            # Oran alanındaki nokta binlik ayırıcı değil ondalıktır
+            # (örn. ``0.185 %`` = yüzde 0,185).
+            number = float(match.group(0).replace(",", "."))
+        except ValueError:
+            return None
+        if "%" not in raw and 0 < abs(number) < 0.1:
+            number *= 100
+        return number
+
+    def rate_text(value: str) -> str:
+        number = numeric_rate(value)
+        return f"{number_text(number)}%" if number is not None else ""
+
+    def rate_range(items: Sequence[FeeRow]) -> str:
+        rates: List[float] = []
+        for row in items:
+            for attr in ("asgari_oran", "azami_oran"):
+                value = numeric_rate(getattr(row, attr, ""))
+                if value is not None:
+                    rates.append(value)
+        if not rates:
+            return ""
+        low, high = min(rates), max(rates)
+        if abs(low - high) < 1e-12:
+            return f"{number_text(low)}%"
+        return f"{number_text(low)}% - {number_text(high)}%"
+
+    # ------------------------------------------------------------------
+    # MEVDUAT ARAŞTIRMA
+    # ------------------------------------------------------------------
+    if service == "DOC_DEPOSIT_RESEARCH":
+        matches = found(
+            lambda row: "mevduat arastirma" in _norm(row.text),
+            numeric_only=False,
+        )
+        if not matches:
+            return published_gap()
+        row = matches[0]
+        value = _fee_text(row, spec) if _has_numeric_fee(row) else "Ücret tutarı belirtilmemiş"
+        return (value, row, "NUMERIC" if _has_numeric_fee(row) else "STATUS")
+
+    # ------------------------------------------------------------------
+    # YURTİÇİ HİSSE SENEDİ ALIM-SATIM
+    # ------------------------------------------------------------------
+    if service == "SEC_DOMESTIC_STOCK_TRADE":
+        if bank == "GARANTİ":
+            row = exact("Hisse Senedi Sabit Komisyon Oranı - Garanti BBVA Mobil")
+            if row:
+                rates = rate_range([row])
+                return (f"Mobil/İnternet: {rates}\nİşlem başına\nBSMV hariç", row, "NUMERIC")
+
+        elif bank == "İŞBANKASI":
+            matches = found(lambda row: (
+                "iscep sen. alis-satis" in _norm(row.kategori)
+                and "islem hacmine gore alim-satim komisyonu" in _norm(row.masraf)
+            ))
+            if matches:
+                return (
+                    f"İşCep/İnternet: {rate_range(matches)}\n"
+                    "Asgari 1 TRY\n3 aylık hacme göre\nBSMV hariç",
+                    matches[0],
+                    "NUMERIC",
+                )
+
+        elif bank == "AKBANK":
+            matches = found(lambda row: _norm(row.masraf).startswith(
+                "hisse senedi komisyonu aylik islem hacmi"
+            ))
+            if matches:
+                return (
+                    f"Dijital kanallar: {rate_range(matches)}\n"
+                    "Aylık işlem hacmine göre\nBSMV hariç",
+                    matches[0],
+                    "NUMERIC",
+                )
+
+        elif bank == "YAPIKREDI":
+            row = exact(
+                "Hisse Senedi İşlemleri - İşlem Komisyonları - İnternet Bankacılığı / Mobil Bankacılık"
+            )
+            if row:
+                match = re.search(r"%\s*([0-9]+(?:[.,][0-9]+)?)", _clean(row.aciklama))
+                if match:
+                    return (
+                        f"Mobil/İnternet: {number_text(_parse_number(match.group(1)) or 0)}%\n"
+                        "Alım-satım işlem tutarı üzerinden",
+                        row,
+                        "NUMERIC",
+                    )
+
+        return published_gap()
+
+    # ------------------------------------------------------------------
+    # YURTİÇİ HİSSE SENEDİ VİRMANI
+    # ------------------------------------------------------------------
+    if service == "SEC_DOMESTIC_STOCK_TRANSFER":
+        if bank == "İŞBANKASI":
+            outgoing = exact("Virman İşlemi", kategori="Hisse Senedi - Varant Virman İşlemleri")
+            incoming = exact("Virman İşlemi", kategori="Yatırım Kuruluşlarından Bankamıza Hisse Senedi")
+            if outgoing and incoming:
+                return (
+                    f"Dışarı/hesaplar arası: {_display_amount(outgoing.asgari_tutar)}\n"
+                    f"Kuruma gelen: {_display_amount(incoming.asgari_tutar) or '0 TRY'}\n"
+                    "BSMV hariç",
+                    outgoing,
+                    "NUMERIC",
+                )
+
+        elif bank == "AKBANK":
+            outside = exact("Kurum dışı hisse senedi virmanı")
+            inside = exact("Kurum içi hisse senedi virmanı")
+            if outside and inside:
+                return (
+                    f"Kurum dışı: {_fee_value_compact(outside)} (BSMV hariç)\n"
+                    f"Kurum içi: {_fee_value_compact(inside)} (BSMV dahil)",
+                    outside,
+                    "NUMERIC",
+                )
+
+        elif bank == "YAPIKREDI":
+            row = exact("Hisse Senedi İşlemleri - Kıymet Transferi - Virman")
+            if row:
+                return (
+                    "Transfer tutarı üzerinden\nMKK/Takasbank oranının 5 katı",
+                    row,
+                    "STATUS",
+                )
+
+        return published_gap()
+
+    # ------------------------------------------------------------------
+    # YURTİÇİ BONO/TAHVİL VİRMANI
+    # ------------------------------------------------------------------
+    if service == "SEC_DOMESTIC_BOND_TRANSFER":
+        if bank == "İŞBANKASI":
+            matches = found(lambda row: (
+                "sb.get.men.kiym.oz.sektor tah.virmani" in _norm(row.kategori)
+                and _norm(row.masraf) == "virman islemi"
+            ))
+            if matches:
+                row = matches[0]
+                amount = _display_amount(row.asgari_tutar) or _display_amount(row.azami_tutar)
+                rate = rate_text(row.asgari_oran or row.azami_oran)
+                value = " / ".join(part for part in (amount, rate) if part)
+                return (f"{value}\nBSMV hariç", row, "NUMERIC")
+
+        elif bank == "AKBANK":
+            row = exact("Hazine Bonosu / Devlet Tahvili Virmanı")
+            if row:
+                return (f"{_fee_value_compact(row)}\nBSMV hariç", row, "NUMERIC")
+
+        elif bank == "YAPIKREDI":
+            row = exact("Sabit Getirili Menkul Kıymet İşlem Ücretleri - Başka Kuruma Bono/Tahvil Virmanı")
+            if row:
+                return (f"{_fee_value_compact(row)}\nKıymet başına\nBSMV hariç", row, "NUMERIC")
+
+        return published_gap()
+
+    # ------------------------------------------------------------------
+    # YURTİÇİ YATIRIM HESABI / SAKLAMA
+    # ------------------------------------------------------------------
+    if service == "SEC_DOMESTIC_CUSTODY":
+        if bank == "GARANTİ":
+            row = exact("Hisse Senedi Sabit Komisyon Oranı - Hisse Senedi Hesap Bakım Ücreti")
+            if row:
+                return (
+                    f"{_fee_value_compact(row)} / 6 ay\n500 TRY / yıl\nBSMV dahil",
+                    row,
+                    "NUMERIC",
+                )
+
+        elif bank == "İŞBANKASI":
+            matches = found(lambda row: (
+                "yatirim hesabi saklama" in _norm(row.kategori)
+                and "altin" not in _norm(row.kategori)
+            ), numeric_only=False)
+            amounts = [
+                _parse_number(_clean(row.asgari_tutar).replace("TL", ""))
+                for row in matches
+            ]
+            amounts = [value for value in amounts if value is not None]
+            if matches and amounts:
+                low = _display_amount(f"{min(amounts)} TL")
+                high = _display_amount(f"{max(amounts)} TL")
+                return (
+                    f"{low} - {high} / 3 ay\n"
+                    "Bakiye kademesine göre\nBSMV hariç",
+                    matches[0],
+                    "NUMERIC",
+                )
+
+        elif bank == "AKBANK":
+            row = exact("MKK Hesap Bakım Ücreti (günlük)")
+            if row:
+                match = re.search(r"gunluk\s*([0-9]+(?:[.,][0-9]+)?)\s*tl", _norm(row.aciklama))
+                if match:
+                    exact_amount = match.group(1).replace(".", ",") + " TRY"
+                    return (
+                        f"{exact_amount} / gün\n"
+                        "Saklama bakiyesi 1.000 TRY ve üzeri\nBSMV hariç",
+                        row,
+                        "NUMERIC",
+                    )
+
+        elif bank == "YAPIKREDI":
+            row = exact(
+                "Merkezi Kayıt Kuruluşu Ücretleri - Yatırımcı Hesabı Açma ve Bakım Hizmetleri - Hesap Bakım"
+            )
+            if row:
+                return (
+                    f"{_display_amount(row.asgari_tutar)} / gün\n"
+                    "Saklama bakiyesi 1.000 TRY ve üzeri",
+                    row,
+                    "NUMERIC",
+                )
+
+        return published_gap()
+
+    # ------------------------------------------------------------------
+    # YURTDIŞI PAY ALIM-SATIM / SAKLAMA
+    # ------------------------------------------------------------------
+    if service == "SEC_FOREIGN_STOCK_TRADE":
+        if bank == "İŞBANKASI":
+            row = exact("Alım Satım Aracılık Hizmeti", kategori="Yurt Dışı Piyasalar - Pay İşlemleri")
+            if row:
+                return (
+                    f"Azami {rate_text(row.azami_oran)}\n"
+                    "Asgari komisyon ülke/borsaya göre\nÖrn. NYSE/NASDAQ: 1 USD",
+                    row,
+                    "NUMERIC",
+                )
+        return published_gap()
+
+    if service == "SEC_FOREIGN_STOCK_CUSTODY":
+        if bank == "İŞBANKASI":
+            common = exact(
+                "Pay (Saklama - Yurt Dışı) (ABD, İngiltere, İtalya, Fransa, Almanya, Avusturya)"
+            )
+            other = exact("Pay (Saklama - Yurt Dışı) (Diğer Ülkeler)")
+            adr = exact("Pay (ADR-GDR Depo Saklama Masrafı)")
+            if common and other and adr:
+                return (
+                    f"Belirtilen ülkeler: {rate_text(common.azami_oran)} / ay\n"
+                    f"Diğer ülkeler: {rate_text(other.azami_oran)} / ay\n"
+                    "ADR/GDR: 0,03 USD/pay, 6 ayda bir",
+                    common,
+                    "NUMERIC",
+                )
+        return published_gap()
+
+    # ------------------------------------------------------------------
+    # EUROBOND VİRMAN / SAKLAMA
+    # ------------------------------------------------------------------
+    if service == "SEC_EUROBOND_TRANSFER":
+        if bank == "İŞBANKASI":
+            row = exact("SWIFT - Eurobond virmanı")
+            if row:
+                return (
+                    "20 USD/EUR\nEk SWIFT: 10 USD/EUR\nBSMV hariç",
+                    row,
+                    "NUMERIC",
+                )
+        elif bank == "AKBANK":
+            matches = found(lambda row: _norm(row.masraf) == "eurobond virmani")
+            if matches:
+                return ("20 USD veya 20 EUR\nBSMV hariç", matches[0], "NUMERIC")
+        elif bank == "YAPIKREDI":
+            row = exact("Sabit Getirili Menkul Kıymet İşlem Ücretleri - Başka Kuruma Eurobond Virmanı")
+            if row:
+                return (f"{_fee_value_compact(row)}\nKıymet başına\nBSMV hariç", row, "NUMERIC")
+        return published_gap()
+
+    if service == "SEC_EUROBOND_CUSTODY":
+        if bank == "İŞBANKASI":
+            row = exact("Eurobond saklama masrafı")
+            if row:
+                return ("Ücretsiz / 0 USD-EUR\nBSMV hariç", row, "NUMERIC")
+        return published_gap()
+
+    return None
+
+
 def _user_audit_override(
     rows: Sequence[FeeRow], bank: str, spec: RowSpec, wanted_channel: str,
 ) -> Optional[Tuple[str, Optional[FeeRow], str]]:
@@ -5387,6 +5782,7 @@ def _user_audit_override(
         _audit_phone,
         _audit_vergi,
         _audit_document_statement_research,
+        _audit_research_and_securities,
     ):
         result = resolver(rows, bank, spec, wanted_channel)
         if result is not None:
@@ -5805,6 +6201,8 @@ def _resolve_cell(
     if row is not None and _has_numeric_fee(row):
         _assert_safe_source(row, spec)
         value = _fee_text(row, spec)
+        if spec.service == "FAST" and spec.band_key == "TRANSFER_2":
+            value += "\nFAST işlemleri 100.000 TRY'ye kadar yapılmaktadır."
         if spec.service == "KASA":
             annual_tax = _bsmv_label(row)
             annual_fee = _fee_value_compact(row)
@@ -6314,6 +6712,8 @@ def _write_comparison(ws, rows: Sequence[FeeRow], notes: Mapping[Tuple[str, str]
             ws.row_dimensions[current_row].height = 92
         elif spec.service in _DOCUMENT_STATEMENT_SERVICES:
             ws.row_dimensions[current_row].height = 72
+        elif spec.service in _RESEARCH_SECURITIES_SERVICES:
+            ws.row_dimensions[current_row].height = 88
         elif spec.service in {
             "SWIFT_GELEN",
             "SWIFT_GIDEN",
@@ -6322,6 +6722,7 @@ def _write_comparison(ws, rows: Sequence[FeeRow], notes: Mapping[Tuple[str, str]
             "HGS_ETIKET",
             "HGS_KART",
             "SANS_OYUNU",
+            "BAKIYE_ATM_YURTDISI",
         }:
             ws.row_dimensions[current_row].height = 66
         else:
@@ -6391,6 +6792,7 @@ def _print_transfer_audit(rows: Sequence[FeeRow]) -> None:
                 "CEK_DUZELTME_HAKKI",
             }
             or spec.service in _DOCUMENT_STATEMENT_SERVICES
+            or spec.service in _RESEARCH_SECURITIES_SERVICES
         )
     ]
 
@@ -6563,6 +6965,72 @@ def _assert_document_statement_sources(rows: Sequence[FeeRow]) -> None:
     )
 
 
+def _assert_research_securities_sources(rows: Sequence[FeeRow]) -> None:
+    """Yeni araştırma, yurtdışı ATM ve menkul kıymet satırlarını fail-closed doğrular."""
+    specs = {
+        spec.service: spec
+        for kind, spec in LAYOUT
+        if kind == "ROW" and (
+            spec.service in _RESEARCH_SECURITIES_SERVICES
+            or spec.service == "BAKIYE_ATM_YURTDISI"
+        )
+    }
+    expected_services = _RESEARCH_SECURITIES_SERVICES | {"BAKIYE_ATM_YURTDISI"}
+    if set(specs) != expected_services:
+        raise RuntimeError(
+            "Araştırma/menkul kıymet sözlüğü eksik veya mükerrer: "
+            f"beklenen={sorted(expected_services)}, gelen={sorted(specs)}"
+        )
+
+    numeric_required = (
+        ("BAKIYE_ATM_YURTDISI", "İŞBANKASI"),
+        ("SEC_DOMESTIC_STOCK_TRADE", "GARANTİ"),
+        ("SEC_DOMESTIC_STOCK_TRADE", "İŞBANKASI"),
+        ("SEC_DOMESTIC_STOCK_TRADE", "AKBANK"),
+        ("SEC_DOMESTIC_STOCK_TRADE", "YAPIKREDI"),
+        ("SEC_DOMESTIC_STOCK_TRANSFER", "İŞBANKASI"),
+        ("SEC_DOMESTIC_STOCK_TRANSFER", "AKBANK"),
+        ("SEC_DOMESTIC_STOCK_TRANSFER", "YAPIKREDI"),
+        ("SEC_DOMESTIC_BOND_TRANSFER", "İŞBANKASI"),
+        ("SEC_DOMESTIC_BOND_TRANSFER", "AKBANK"),
+        ("SEC_DOMESTIC_BOND_TRANSFER", "YAPIKREDI"),
+        ("SEC_DOMESTIC_CUSTODY", "GARANTİ"),
+        ("SEC_DOMESTIC_CUSTODY", "İŞBANKASI"),
+        ("SEC_DOMESTIC_CUSTODY", "AKBANK"),
+        ("SEC_DOMESTIC_CUSTODY", "YAPIKREDI"),
+        ("SEC_FOREIGN_STOCK_TRADE", "İŞBANKASI"),
+        ("SEC_FOREIGN_STOCK_CUSTODY", "İŞBANKASI"),
+        ("SEC_EUROBOND_TRANSFER", "İŞBANKASI"),
+        ("SEC_EUROBOND_TRANSFER", "AKBANK"),
+        ("SEC_EUROBOND_TRANSFER", "YAPIKREDI"),
+        ("SEC_EUROBOND_CUSTODY", "İŞBANKASI"),
+    )
+
+    failures: List[str] = []
+    for service, bank in numeric_required:
+        value, row, resolution = _resolve_cell(rows, bank, specs[service], "GENEL")
+        if row is None or resolution not in {"NUMERIC", "STATUS"}:
+            failures.append(f"{service}/{bank}: {resolution} ({value!r})")
+
+    deposit = specs["DOC_DEPOSIT_RESEARCH"]
+    for bank in BANKS:
+        value, _, resolution = _resolve_cell(rows, bank, deposit, "GENEL")
+        if resolution not in {"NUMERIC", "STATUS", "PUBLICATION_STATUS"}:
+            failures.append(f"DOC_DEPOSIT_RESEARCH/{bank}: {resolution} ({value!r})")
+
+    if failures:
+        raise RuntimeError(
+            "Araştırma/menkul kıymet kritik kaynak kontrolü başarısız: "
+            + "; ".join(failures)
+        )
+
+    print(
+        "[comparison] ARAŞTIRMA/MENKUL KIYMET: "
+        f"{len(expected_services)} satır ailesi ve {len(numeric_required)} "
+        "kritik kaynak eşleşmesi doğrulandı."
+    )
+
+
 def update_comparison_sheet(excel_path: str = "komisyonlar_guncel.xlsx") -> Dict[str, int]:
     path = Path(excel_path)
     if not path.exists():
@@ -6582,6 +7050,7 @@ def update_comparison_sheet(excel_path: str = "komisyonlar_guncel.xlsx") -> Dict
         raise RuntimeError("Karşılaştırma için uygun banka verisi bulunamadı.")
 
     _assert_document_statement_sources(rows)
+    _assert_research_securities_sources(rows)
 
     old_ws = wb[COMPARISON_SHEET] if COMPARISON_SHEET in wb.sheetnames else None
     notes = _preserve_notes(old_ws)
