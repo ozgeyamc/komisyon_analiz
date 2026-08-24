@@ -62,9 +62,9 @@ from update_excel import (
 )
 
 
-MAIN_VERSION = "2026-08-24-v26-document-statement-research"
+MAIN_VERSION = "2026-08-24-v27-fast-research-securities"
 EXPECTED_SUPPLEMENTAL_VERSION = "2026-08-24-v15-isbank-versioned-pdf-fallback"
-EXPECTED_COMPARISON_VERSION = "2026-08-24-v28-document-statement-research"
+EXPECTED_COMPARISON_VERSION = "2026-08-24-v29-fast-research-securities"
 EXPECTED_EXCEL_WRITER_VERSION = "2026-08-21-v2-clean-supplemental-display"
 
 # Primary scraper güvenlik retry ayarları.
@@ -96,7 +96,7 @@ EXPECTED_VERSIONS = {
     "HALKBANK":  "2026-08-19-v3-halkbank-card-commercial-fix",
     "VAKIFBANK": "2026-08-19-v3-vakifbank-channel-currency-fix",
     "TEB":       "2026-08-19-v5-teb-category-normalization",
-    "ZİRAAT":    "2026-08-19-v4-ziraat-section-boundary-fix",
+    "ZİRAAT":    "2026-08-24-v5-ziraat-full-descriptions",
 }
 
 
