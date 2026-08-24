@@ -62,10 +62,10 @@ from update_excel import (
 )
 
 
-MAIN_VERSION = "2026-08-24-v25-isbank-versioned-pdf-fallback"
+MAIN_VERSION = "2026-08-24-v30-ziraat-description-filter-audit"
 EXPECTED_SUPPLEMENTAL_VERSION = "2026-08-24-v15-isbank-versioned-pdf-fallback"
-EXPECTED_COMPARISON_VERSION = "2026-08-24-v27-final-source-priority"
-EXPECTED_EXCEL_WRITER_VERSION = "2026-08-21-v2-clean-supplemental-display"
+EXPECTED_COMPARISON_VERSION = "2026-08-24-v29-fast-research-securities"
+EXPECTED_EXCEL_WRITER_VERSION = "2026-08-24-v4-filter-data-quality-report"
 
 # Primary scraper güvenlik retry ayarları.
 # İlk deneme + 2 tekrar = toplam 3 deneme.
@@ -96,7 +96,7 @@ EXPECTED_VERSIONS = {
     "HALKBANK":  "2026-08-19-v3-halkbank-card-commercial-fix",
     "VAKIFBANK": "2026-08-19-v3-vakifbank-channel-currency-fix",
     "TEB":       "2026-08-19-v5-teb-category-normalization",
-    "ZİRAAT":    "2026-08-19-v4-ziraat-section-boundary-fix",
+    "ZİRAAT":    "2026-08-24-v5-ziraat-full-descriptions",
 }
 
 
@@ -490,6 +490,13 @@ def main() -> int:
             "[main] Final görünüm temizlendi: "
             f"açıklama={display_cleanup.get('temizlenen_aciklama', 0)} | "
             f"kaynak_linki={display_cleanup.get('kaynak_linki', 0)}"
+        )
+        print(
+            "[main] Veri kalite özeti: "
+            f"kaynak_tarihi_yayımlanmayan/alınamayan="
+            f"{ozet.get('kaynak_tarihi_bos', 0)} | "
+            f"ayrı_sayısal_ücret_yayımlanmayan="
+            f"{ozet.get('ucret_alani_bos', 0)}"
         )
 
         _verify_comparison_file(temp_path, comparison)
