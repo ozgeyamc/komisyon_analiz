@@ -17,7 +17,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 ISBANK_URL = "https://www.isbank.com.tr/urun-ve-hizmet-ucretleri"
 
-SCRAPER_VERSION = "2026-08-19-v3-isbank-transfer-boundaries"
+SCRAPER_VERSION = "2026-08-24-v4-isbank-zero-date-cleanup"
 
 HEADERS = {
     "User-Agent": (
@@ -80,6 +80,14 @@ def _normalize_key(val) -> str:
 
     text = re.sub(r"\s+", " ", text)
     return text.strip()
+
+
+def _clean_site_date(val) -> str:
+    """Excel/HTML seri-tarih artefaktını gerçek güncelleme tarihi sayma."""
+    text = _normalize(val).replace("/", ".")
+    if re.fullmatch(r"30\.12\.1899(?:\s+00:00(?::00)?)?", text):
+        return ""
+    return text
 
 
 def _meta(el, cls="UHU_icerik_meta") -> str:
@@ -311,10 +319,8 @@ def _parse_block(
     asgari_oran = _meta(icerik2)
     azami_tutar = _meta(icerik3)
     azami_oran = _meta(icerik4)
-    tarih = _meta(icerik5, cls="UHU_icerik_meta2")
+    tarih = _clean_site_date(_meta(icerik5, cls="UHU_icerik_meta2"))
     aciklama = _text_of(aciklama_el)
-
-    tarih = tarih.replace("/", ".")
 
     kategori = _join_category(
         [ana_kategori, alt_kategori, sub_kategori]
