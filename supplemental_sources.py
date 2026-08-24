@@ -41,7 +41,7 @@ import requests
 from bs4 import BeautifulSoup
 
 
-SUPPLEMENTAL_VERSION = "2026-08-24-v12-billing-methods-cleanup"
+SUPPLEMENTAL_VERSION = "2026-08-24-v13-isbank-bhs-10leaf-fix"
 
 HEADERS = {
     "User-Agent": (
@@ -1597,6 +1597,37 @@ def _extract_isbank_bhs_rows(pdf_bytes: bytes, url: str, date: str) -> List[Supp
     ):
         add_amount("Çek Defteri", label, pattern, "Değerli Kâğıt Bedeli ayrıca tahsil edilir.")
 
+    # pdfplumber bazı BHS tablolarında rowspan nedeniyle "10 Yapraklı" satırını
+    # bölüm başlığından ÖNCE çıkarıyor. Yukarıdaki normal pattern bu durumda
+    # 10'lu satırı kaçırır. Değeri hard-code etmeden, tablonun gerçek metin
+    # sırasından dinamik fallback ile yakala.
+    ten_fallbacks = (
+        (
+            "Karekodlu Çek Defteri - 10 Yapraklı (Yurtiçi Şubeler)",
+            r"10 Yapraklı \(Yurtiçi Şubeler\)\s*([0-9][0-9.,]*)\s*TL\s*Karekodlu Çek Defteri Ücreti",
+        ),
+        (
+            "Karekodlu ve Logolu Çek Defteri - 10 Yapraklı (Yurtiçi Şubeler)",
+            r"10 Yapraklı \(Yurtiçi Şubeler\)\s*([0-9][0-9.,]*)\s*TL\s*Karekodlu ve Logolu Çek Defteri",
+        ),
+    )
+    existing_names = {_norm(r.masraf) for r in rows}
+    for label, pattern in ten_fallbacks:
+        if _norm(label) in existing_names:
+            continue
+        m = re.search(pattern, flat, flags=re.I | re.S)
+        if not m:
+            continue
+        value = _num_token(m.group(1)) + " TL"
+        rows.append(SupplementalRow(
+            kategori="EK KAYNAK - İş Bankası BHS - Çek Defteri",
+            masraf=label,
+            asgari_tutar=value,
+            azami_tutar=value,
+            aciklama=note("Değerli Kâğıt Bedeli ayrıca tahsil edilir."),
+            site_guncelleme_tarihi=date,
+        ))
+
     # Yaprak başı 50-350 ve 351+ değerlerini ayrı yakala.
     for kind in ("Karekodlu Çek Defteri", "Karekodlu ve Logolu Çek Defteri"):
         kind_re = re.escape(kind)
@@ -1640,6 +1671,14 @@ def _extract_isbank_bhs_rows(pdf_bytes: bytes, url: str, date: str) -> List[Supp
         "çek düzeltme": any("cek duzeltme ucreti" in _norm(r.masraf) and r.asgari_tutar for r in rows),
         "çek iade": any("cek muamelesiz iade" in _norm(r.masraf) and r.asgari_tutar for r in rows),
         "senet iade": any("senet iade" in _norm(r.masraf) and r.asgari_tutar for r in rows),
+        "karekodlu 10 yaprak": any(
+            "karekodlu cek defteri - 10 yaprakli" in _norm(r.masraf) and r.asgari_tutar
+            for r in rows
+        ),
+        "karekodlu+logolu 10 yaprak": any(
+            "karekodlu ve logolu cek defteri - 10 yaprakli" in _norm(r.masraf) and r.asgari_tutar
+            for r in rows
+        ),
     }
     missing = [name for name, ok in critical_checks.items() if not ok]
     if missing:
