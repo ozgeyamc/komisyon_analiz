@@ -20,11 +20,10 @@ Kaynaklar
 - Garanti BBVA: Özel Okul Ödemeleri
   (özel okul hizmetinin varlığı)
 
-Bu modül ücret uydurmaz. Ek kaynak yalnız hizmet/kanal varlığını doğruluyorsa ve aynı
-bankanın ana resmî ücret tablosunda güvenli biçimde eşleşen bir tarife varsa, o tarifenin
-tutar/oranları ek kaynak satırına da taşınır. Eşleşme yoksa ücret kolonları boş kalır.
-NOT_APPLICABLE / PUBLISHED_EMPTY gibi resmen ücret bulunmadığını anlatan satırlar hiçbir
-zaman yapay bir tutarla doldurulmaz.
+Bu modül ücret uydurmaz. Resmî tabloda ücret alanı boşsa ücret kolonları boş kalır ve
+AÇIKLAMA içine [PUBLISHED_EMPTY] durumu yazılır. Yalnız hizmet varlığı doğrulanmışsa
+[AVAILABLE_NO_SEPARATE_FEE] yazılır. Karşılaştırma modülü bu durumları kullanıcıya
+anlaşılır metinle gösterir.
 """
 
 from __future__ import annotations
@@ -34,14 +33,14 @@ import re
 import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Set, Tuple
+from typing import Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Tuple
 from urllib.parse import urljoin
 
 import requests
 from bs4 import BeautifulSoup
 
 
-SUPPLEMENTAL_VERSION = "2026-08-24-v13-isbank-bhs-10leaf-fix"
+SUPPLEMENTAL_VERSION = "2026-08-21-v8-resilient-official-sources"
 
 HEADERS = {
     "User-Agent": (
@@ -59,7 +58,6 @@ ISBANK_SITE_AIDAT_URL = "https://www.isbank.com.tr/apartman-yonetim-ve-site-tahs
 ISBANK_TAX_URL = "https://www.isbank.com.tr/vergi-odeme"
 ISBANK_FINDEKS_URL = "https://www.isbank.com.tr/is-ticari/findeks-hizmetleri"
 ISBANK_BILL_URL = "https://www.isbank.com.tr/fatura-odemeleri"
-ISBANK_FAQ_URL = "https://www.isbank.com.tr/sss"
 
 ISBANK_FAST_URL = "https://www.isbank.com.tr/fast-anlik-para-transferi"
 ISBANK_SGK_URL = "https://www.isbank.com.tr/sgk-odemeleri"
@@ -78,7 +76,6 @@ YAPIKREDI_REGULAR_URL = "https://www.yapikredi.com.tr/bireysel-bankacilik/odemel
 YAPIKREDI_BILL_URL = "https://www.yapikredi.com.tr/odemeler-ve-hizmetler/otomatik-fatura-odeme-talimati"
 YAPIKREDI_MIM_URL = "https://www.yapikredi.com.tr/kendim-icin/sinirsiz-bankacilik/iletisim-ve-yardim/musteri-iletisim-merkezi/"
 YAPIKREDI_FAST_URL = "https://www.yapikredi.com.tr/bireysel-bankacilik/odemeler-ve-hizmetler/fonlarin-anlik-transferi"
-YAPIKREDI_FEE_URL = "https://www.yapikredi.com.tr/bireysel-bankacilik/hesaplama-araclari/bireysel-urun-ve-hizmet-ucretleri"
 GARANTI_SCHOOL_URL = "https://www.garantibbva.com.tr/odemeler-ve-hizmetler/ozel-okul-odemeleri"
 GARANTI_FAST_URL = "https://www.garantibbva.com.tr/odemeler-ve-hizmetler/fast-kolay-adres"
 GARANTI_BILL_URL = "https://www.garantibbva.com.tr/odemeler-ve-hizmetler/fatura-odeme"
@@ -397,468 +394,6 @@ def _add_service_status(
     return result
 
 
-# ---------------------------------------------------------------------------
-# HİZMET DURUMU SATIRLARINA PRIMARY RESMÎ TARİFE BACKFILL
-# ---------------------------------------------------------------------------
-# Ek kaynakların bir bölümü yalnız "bu hizmet bu kanalda var" bilgisini doğrular.
-# Kullanıcı ana KOMİSYONLAR sayfasında bu satırların tutar/oranını da görmek istediği
-# için, aynı bankanın ORIGINAL primary scraper sonucundaki güvenli tarifeyi bu satıra
-# taşıyoruz. Burada yeni ücret hesaplanmaz / tahmin edilmez.
-
-
-def _has_published_fee(row) -> bool:
-    """Satırda yayımlanmış bir tutar/oran var mı? 0 / 0,00 da geçerli tarifedir."""
-    return any(
-        _clean(getattr(row, attr, "")) not in ("", "-", "–", "—")
-        for attr in ("asgari_tutar", "asgari_oran", "azami_tutar", "azami_oran")
-    )
-
-
-def _status_meta_value(row: SupplementalRow, key: str) -> str:
-    match = re.search(
-        rf"(?:^|[;|]\s*){key}\s*=\s*([^;|]+)",
-        _clean(getattr(row, "aciklama", "")),
-        flags=re.I,
-    )
-    return _clean(match.group(1)).upper() if match else ""
-
-
-def _primary_row_text(row) -> Tuple[str, str, str]:
-    kategori = _norm(getattr(row, "kategori", ""))
-    masraf = _norm(getattr(row, "masraf", ""))
-    aciklama = _norm(getattr(row, "aciklama", ""))
-    return kategori, masraf, f"{kategori} | {masraf} | {aciklama}"
-
-
-def _primary_service_tags(row) -> Set[str]:
-    """Supplemental kaynaklarda kullanılan kanonik hizmetleri primary satırlarda bulur."""
-    kategori, masraf, full = _primary_row_text(row)
-    short = f"{kategori} | {masraf}"
-    tags: Set[str] = set()
-
-    explicit = re.search(r"service\s*=\s*([a-z0-9_]+)", full, flags=re.I)
-    if explicit:
-        tags.add(explicit.group(1).upper())
-
-    international = any(x in full for x in (
-        "swift", "uluslararasi fon transfer", "yurt disi fast", "yurtdisi fast",
-        "global fast", "western union", "fast uluslararasi",
-    ))
-
-    if any(x in full for x in ("fast", "fonlarin anlik ve surekli transferi")) and not international:
-        tags.add("FAST")
-    if any(x in full for x in ("yurt disi fast", "yurtdisi fast", "global fast", "fast uluslararasi")):
-        tags.add("YURT_DISI_FAST")
-    if any(x in full for x in (
-        "visa ile yurt disi para transferi", "visa ile yurtdisi para transferi",
-        "visa direct", "visa yp direct",
-    )):
-        tags.add("VISA_YP_DIRECT")
-    if "duzenli" in full and any(x in full for x in ("eft", "elektronik fon transfer")):
-        tags.add("DUZENLI_EFT")
-    if "duzenli" in full and "havale" in full:
-        tags.add("DUZENLI_HAVALE")
-
-    if (
-        any(x in masraf for x in (
-            "altin transfer", "ats ile altin gonderimi",
-            "kiymetli maden transferi ucreti - altin", "kiymetli maden transfer - altin",
-        ))
-        and not any(x in masraf for x in (
-            "fiziki", "teslim", "kulce altin cekme", "western union", "eft", "havale", "fast",
-        ))
-    ):
-        tags.add("ALTIN_TRANSFER")
-
-    if any(x in full for x in ("kiralik kasa", "kasa kiralama", "kasa ucreti")):
-        tags.add("KASA")
-
-    combined_risk = any(x in full for x in (
-        "kkb cek / risk raporu", "kkb cek/risk raporu", "cek / risk raporu",
-    ))
-    if combined_risk or any(x in full for x in (
-        "cek risk raporu", "cek bilgileri raporu", "kkb cek", "findeks cek raporu",
-        "cek sorgu raporu",
-    )):
-        tags.add("CEK_RISK")
-
-    if (
-        ("fatura" in short or "fatura / kurum" in short or "fatura/kurum" in short
-         or "fatura tahsil" in short or "kurum tahsil" in short or "kurum odeme" in short)
-        and "e-fatura" not in short
-    ):
-        tags.add("FATURA")
-
-    if "sgk" in short or "sosyal guvenlik" in full:
-        tags.add("SGK")
-
-    if "sans oyun" in full or any(x in full for x in (
-        "bilyoner", "nesine", "tuttur", "oley", "misli", "sisal sans", "tjk",
-    )):
-        tags.add("SANS_OYUNU")
-
-    has_aidat = bool(re.search(r"\baidat\b", short)) or (
-        bool(re.search(r"\baidat\b", full))
-        and any(x in full for x in ("fatura", "tahsilat", "odeme", "site", "apartman"))
-    )
-    if has_aidat and not any(x in full for x in (
-        "aidatsiz kart", "kart aidati", "yillik kart ucreti", "uyelik ucreti - kart",
-    )):
-        tags.add("AIDAT")
-
-    if (
-        any(x in full for x in (
-            "ozel okul", "okul odeme", "okul taksiti", "egitim odeme", "egitim kurumu odeme",
-        ))
-        and not any(x in full for x in (
-            "mektup", "vize", "konsolosluk", "referans yazisi", "referans mektubu",
-        ))
-    ):
-        tags.add("OZEL_OKUL")
-
-    telefon_candidate = (
-        any(x in short for x in (
-            "telefon odeme", "telefon fatur", "cep telefonu fatur",
-            "telefon operatorleri odemelerine aracilik", "gsm odeme", "telekom odeme",
-            "turkcell", "vodafone",
-        ))
-        or (
-            any(x in full for x in ("turkcell", "vodafone", "superonline", "tellcom", "turk telekom"))
-            and any(x in short for x in ("fatura", "kurum odeme", "tahsilat"))
-        )
-    )
-    if (
-        telefon_candidate
-        and "tl/paket yukleme" not in masraf
-        and "paket yukleme" not in masraf
-        and "otomatik fatura odeme faizi" not in masraf
-        and "alisveris faiz" not in masraf
-    ):
-        tags.add("TELEFON")
-
-    if (
-        "vergi" in short
-        and any(x in short for x in (
-            "vergi tahsil", "vergi odeme", "vergi / devlet", "fatura/vergi/sgk",
-            "fatura / vergi / sgk", "mtv", "harc",
-        ))
-        and not any(x in short for x in ("vergi numarasi", "vergi yazisi", "kredi"))
-    ):
-        tags.add("VERGI")
-
-    return tags
-
-
-def _primary_channels(row) -> Set[str]:
-    """Primary satırın kanal kümesini çıkarır."""
-    _, masraf, full = _primary_row_text(row)
-    explicit = re.search(r"channel\s*=\s*([a-z0-9_]+)", full, flags=re.I)
-    if explicit:
-        channel = explicit.group(1).upper()
-        return {"GENEL"} if channel == "GENEL" else {channel}
-
-    if "tum kanal" in full:
-        return {"MOBIL", "SUBE", "ATM"}
-
-    channels: Set[str] = set()
-    mas2 = masraf.replace("internet subesi", "internet").replace("internet sube", "internet")
-
-    if any(x in mas2 for x in (
-        "mobil", "internet", "dijital", "cepteteb", "iscep", "web",
-    )):
-        channels.add("MOBIL")
-    if any(x in mas2 for x in (
-        "sube", "subeden", "musteri iletisim merkezi", "cozum merkezi", "telefon subesi",
-        "gise", "kasadan",
-    )):
-        channels.add("SUBE")
-    if any(x in mas2 for x in ("atm", "btm", "kiosk", "bankamatik")):
-        channels.add("ATM")
-
-    if not channels:
-        full2 = full.replace("internet subesi", "internet").replace("internet sube", "internet")
-        if any(x in full2 for x in ("mobil", "internet", "dijital", "iscep", "web")):
-            channels.add("MOBIL")
-        if any(x in full2 for x in (
-            "sube", "musteri iletisim merkezi", "cozum merkezi", "telefon subesi", "gise", "kasadan",
-        )):
-            channels.add("SUBE")
-        if any(x in full2 for x in ("atm", "bankamatik", "btm")):
-            channels.add("ATM")
-
-    return channels or {"GENEL"}
-
-
-def _generic_institution_score(row, bank: str, wanted_channel: str) -> int:
-    """Aidat / okul / telefon için bankanın gerçek genel Fatura/Kurum tarifesini seçer."""
-    if not _has_published_fee(row):
-        return -10_000
-
-    kategori, masraf, full = _primary_row_text(row)
-
-    # İş Bankası kanal isimleri özel dikkat ister: "İnternet Şube" fiziksel
-    # şube değildir. Supplemental backfill doğrudan ilk sayfadaki üç gerçek
-    # Fatura Ödemeleri kategorisinden doğru olanı seçer.
-    if bank == "İŞBANKASI" and masraf == "fatura odemeleri":
-        if wanted_channel == "MOBIL":
-            if ("internet sube" in kategori or "iscep" in kategori) and "bankamatik" not in kategori:
-                return 1000
-            return -10_000
-        if wanted_channel == "SUBE":
-            if (
-                "fatura odemeleri - sube" in kategori
-                and "internet sube" not in kategori
-                and "iscep" not in kategori
-                and "bankamatik" not in kategori
-            ):
-                return 1000
-            return -10_000
-        if wanted_channel == "ATM":
-            return 1000 if "bankamatik" in kategori else -10_000
-
-    tags = _primary_service_tags(row)
-    if "FATURA" not in tags:
-        return -10_000
-
-    if not any(x in full for x in (
-        "fatura/kurum", "fatura / kurum", "fatura ve anlasmali kurum",
-        "fatura odemeleri", "kurum tahsilat", "kurum odeme",
-    )):
-        return -10_000
-
-    if any(x in masraf for x in (
-        "faiz", "otomatik fatura odeme faizi", "talimatli fatura odeme islem faizi",
-        "alisveris faiz", "sgk", "sans oyun", "vergi", "tl/paket yukleme",
-        "paket yukleme", "nakit avans", "konsolosluk", "vize randevu",
-    )):
-        return -10_000
-
-    channels = _primary_channels(row)
-    score = 100
-    if wanted_channel in channels:
-        score += 80
-    elif "GENEL" in channels:
-        # Banka yalnız tek genel tarife yayımlıyorsa mobil/şube hizmet satırına
-        # aynı resmî tarife taşınabilir.
-        score += 30
-    else:
-        return -10_000
-
-    # Banka bazında bilinen ana kurum tarifesini öne çıkar.
-    if bank == "YAPIKREDI" and "fatura ve anlasmali kurum odemeleri" in masraf:
-        score += 220
-    elif bank == "AKBANK" and "fatura / kurum tahsil" in masraf:
-        score += 190
-    elif bank == "GARANTİ" and "fatura/kurum odemesi" in masraf:
-        score += 190
-    elif bank == "İŞBANKASI" and masraf == "fatura odemeleri":
-        score += 190
-
-    # Kaynak türü belirtilmeyen supplemental satırlarda mümkünse hesaptan tarifeyi
-    # kredi kartı tarifesine tercih et.
-    if "hesaptan" in masraf:
-        score += 35
-    if "kredi kart" in masraf:
-        score -= 20
-
-    # Aynı satır hem dijital hem Çözüm Merkezi gibi ifadeler taşıyorsa,
-    # Şube hedefinde gerçek gişe/şube tarifesini; Mobil hedefinde gerçek
-    # İnternet/İşCep tarifesini öne çıkar.
-    if wanted_channel == "SUBE":
-        if (
-            " - sube" in kategori
-            or kategori.endswith("sube")
-            or any(x in masraf for x in ("giseden", "subeden", "sube/", "sube "))
-        ):
-            score += 65
-        elif "cozum merkezi" in kategori or "musteri iletisim merkezi" in kategori:
-            score += 15
-    elif wanted_channel == "MOBIL":
-        if any(x in kategori for x in ("internet", "iscep", "mobil")):
-            score += 55
-        if any(x in masraf for x in ("mobil", "internet")):
-            score += 35
-    elif wanted_channel == "ATM":
-        if any(x in kategori for x in ("bankamatik", "atm")) or any(x in masraf for x in ("bankamatik", "atm")):
-            score += 55
-
-    if "kredi karti faiz" in kategori:
-        score -= 200
-    if "paket" in masraf or "ticari" in kategori:
-        score -= 90
-
-    return score
-
-
-def _exact_service_score(row, service: str, wanted_channel: str, target_masraf: str) -> int:
-    if not _has_published_fee(row):
-        return -10_000
-
-    tags = _primary_service_tags(row)
-    if service not in tags:
-        return -10_000
-
-    _, masraf, full = _primary_row_text(row)
-    channels = _primary_channels(row)
-
-    # "Özel/Süper kasa" statüsüne Büyük/Orta/Küçük kasa ücreti taşınmasın.
-    target_norm = _norm(target_masraf)
-    if service == "KASA" and any(x in target_norm for x in ("ozel", "super", "xl", "extra buyuk")):
-        if not any(x in full for x in ("ozel", "super", "xl", "extra buyuk")):
-            return -10_000
-
-    score = 140
-    if wanted_channel in channels:
-        score += 80
-    elif wanted_channel == "GENEL" and "GENEL" in channels:
-        score += 55
-    else:
-        # Genel bir satırı özel kanal tarifesi diye kullanma. Bu fallback yalnız
-        # Aidat/Okul/Telefon için aşağıdaki generic Fatura/Kurum kuralında yapılır.
-        return -10_000
-
-    # Doğrudan MASRAF adındaki hizmet ifadesi açıklamadaki tesadüfi eşleşmeden güçlüdür.
-    direct_tokens = {
-        "TELEFON": ("telefon", "gsm", "turkcell", "vodafone"),
-        "AIDAT": ("aidat", "site", "apartman"),
-        "OZEL_OKUL": ("ozel okul", "okul odeme", "egitim odeme"),
-        "VERGI": ("vergi", "mtv", "harc"),
-        "SGK": ("sgk", "sosyal guvenlik"),
-        "SANS_OYUNU": ("sans oyun", "bilyoner", "nesine", "misli", "tjk"),
-        "CEK_RISK": ("cek risk", "cek raporu", "kkb cek", "findeks cek"),
-        "FAST": ("fast",),
-        "YURT_DISI_FAST": ("yurt disi fast", "global fast"),
-        "VISA_YP_DIRECT": ("visa direct", "visa ile yurt disi", "visa ile yurtdisi"),
-        "DUZENLI_EFT": ("duzenli eft",),
-        "DUZENLI_HAVALE": ("duzenli havale",),
-        "ALTIN_TRANSFER": ("altin transfer", "ats ile altin", "kiymetli maden transfer"),
-        "KASA": ("kiralik kasa", "kasa kiralama", "kasa ucreti"),
-    }
-    if any(x in masraf for x in direct_tokens.get(service, ())):
-        score += 30
-
-    return score
-
-
-def _fee_signature(row) -> Tuple[str, str, str, str]:
-    return tuple(
-        _clean(getattr(row, attr, ""))
-        for attr in ("asgari_tutar", "asgari_oran", "azami_tutar", "azami_oran")
-    )
-
-
-def _copy_primary_fee(source, target: SupplementalRow, *, generic: bool) -> None:
-    for attr in ("asgari_tutar", "asgari_oran", "azami_tutar", "azami_oran"):
-        setattr(target, attr, _clean(getattr(source, attr, "")))
-
-    source_date = _clean(
-        getattr(source, "site_guncelleme_tarihi", "")
-        or getattr(source, "guncelleme_tarihi", "")
-        or getattr(source, "komisyon_guncelleme_tarihi", "")
-    )
-    if source_date and not target.site_guncelleme_tarihi:
-        target.site_guncelleme_tarihi = source_date
-
-    # Artık satırda gerçekten resmî bir numeric tarife var. Böylece
-    # update_comparison.py DISPLAY_TEXT yerine numeric tutarı gösterir.
-    if STATUS_AVAILABLE in target.aciklama:
-        target.aciklama = target.aciklama.replace(STATUS_AVAILABLE, STATUS_NUMERIC, 1)
-
-    source_name = _clean(getattr(source, "masraf", ""))
-    source_type = "genel Fatura/Kurum tarifesi" if generic else "aynı hizmet tarifesi"
-    target.aciklama += (
-        " | [SUPPLEMENTAL][FEE_BACKFILLED_FROM_PRIMARY] "
-        f"Tutar/oran bankanın ana resmî ücret tablosundaki '{source_name}' satırından "
-        f"({source_type}) taşındı; yeni ücret hesaplanmadı."
-    )
-
-
-def _fill_supplemental_fees(
-    bank: str,
-    additions: Sequence[SupplementalRow],
-    primary_rows: Sequence,
-) -> Tuple[int, int]:
-    """Hizmet-durumu ek satırlarına güvenli primary numeric tarife taşır."""
-    filled = 0
-    unresolved = 0
-
-    for target in additions:
-        if _norm(getattr(target, "kategori", "")) != _norm("EK KAYNAK - Hizmet Durumu"):
-            continue
-        if _has_published_fee(target):
-            continue
-
-        note = _clean(getattr(target, "aciklama", ""))
-        if STATUS_NOT_APPLICABLE in note or STATUS_EMPTY in note:
-            continue
-        if STATUS_AVAILABLE not in note:
-            continue
-
-        service = _status_meta_value(target, "SERVICE")
-        channel = _status_meta_value(target, "CHANNEL")
-        band = _status_meta_value(target, "BAND")
-        if not service or not channel:
-            unresolved += 1
-            continue
-
-        # Aidat / özel okul / telefon satırları yalnız hizmet-kanal kanıtıdır.
-        # Genel Fatura/Kurum tarifesini bu supplemental satırlara numeric ücret
-        # gibi taşımıyoruz. Karşılaştırma katmanı gerekiyorsa genel tarifeyi
-        # açıkça "genel tarife" etiketiyle ayrıca gösterir.
-        if service in {"AIDAT", "OZEL_OKUL", "TELEFON", "FATURA_KREDI_KARTI", "FATURA_HESAPTAN"}:
-            continue
-
-        # Band statüsü varsa ve uygulanabilir bir satırsa yalnız aynı banda ait
-        # primary tarife kullanılmalı. Şu an TRANSFER_3 statüleri NOT_APPLICABLE
-        # olduğu için yukarıda zaten atlanıyor; bu guard gelecekteki değişiklikler için.
-        target_band_text = _norm(getattr(target, "masraf", ""))
-
-        candidates = []
-        for row in primary_rows:
-            exact_score = _exact_service_score(row, service, channel, getattr(target, "masraf", ""))
-            if exact_score > -10_000:
-                if band and band == "TRANSFER_3":
-                    row_text = _primary_row_text(row)[2]
-                    if not (
-                        any(x in row_text for x in ("399.000,01", "399000,01", "399000.01"))
-                        and any(x in row_text for x in ("uzeri", "ustu"))
-                    ):
-                        exact_score = -10_000
-                if exact_score > -10_000:
-                    candidates.append((exact_score, False, row))
-
-
-        if not candidates:
-            unresolved += 1
-            continue
-
-        candidates.sort(
-            key=lambda item: (
-                item[0],
-                0 if item[1] else 1,  # eşit puanda exact hizmet generic'ten önce
-                -len(_norm(getattr(item[2], "masraf", ""))),
-            ),
-            reverse=True,
-        )
-
-        best_score, best_generic, best = candidates[0]
-        best_fee = _fee_signature(best)
-
-        # Aynı güçlü puanda birden fazla farklı ücret varsa rastgele seçim yapma.
-        conflict = any(
-            score == best_score and _fee_signature(row) != best_fee
-            for score, _, row in candidates[1:]
-        )
-        if conflict:
-            unresolved += 1
-            continue
-
-        _copy_primary_fee(best, target, generic=best_generic)
-        filled += 1
-
-    return filled, unresolved
-
-
 def _akbank_service_rows() -> List[SupplementalRow]:
     center = _fetch_html(AKBANK_PAYMENT_CENTER_URL, must_contain=("Site Aidat Ödemeleri",))
     regular = _fetch_html(AKBANK_REGULAR_URL, must_contain=("okul taksiti", "apartman aidatı"))
@@ -965,14 +500,6 @@ def _yk_phone_tax_fast_rows() -> List[SupplementalRow]:
     bill_text = _norm(BeautifulSoup(bill, "html.parser").get_text(" ", strip=True))
     if "cep telefonu" not in bill_text:
         raise SupplementalSourceError("Yapı Kredi fatura/telefon sayfası doğrulanamadı.")
-    if not (
-        "vadesiz hesap" in bill_text
-        and "fatura odem" in bill_text
-        and "herhangi bir ucret alinmaz" in bill_text
-    ):
-        raise SupplementalSourceError(
-            "Yapı Kredi Mobil/İnternet vadesiz hesaptan fatura ödemesinin ücretsiz olduğu doğrulanamadı."
-        )
 
     mim = _fetch_html(YAPIKREDI_MIM_URL, must_contain=("Vergi / Devlet", "SGK Ödemeleri"))
     mim_text = _norm(BeautifulSoup(mim, "html.parser").get_text(" ", strip=True))
@@ -985,16 +512,6 @@ def _yk_phone_tax_fast_rows() -> List[SupplementalRow]:
         raise SupplementalSourceError("Yapı Kredi FAST 100.000 TL limiti doğrulanamadı.")
 
     rows: List[SupplementalRow] = []
-    rows += _add_service_status(
-        "YAPIKREDI",
-        "FATURA_HESAPTAN",
-        "Hesaptan Fatura / Kurum Ödemesi",
-        ("MOBIL",),
-        YAPIKREDI_BILL_URL,
-        "Resmî fatura sayfası Yapı Kredi Mobil ve Bireysel İnternet Şubesi'nden "
-        "vadesiz hesap kullanılarak yapılan fatura ödemelerinde ücret alınmadığını belirtiyor.",
-        display_text="Ücretsiz / 0 TRY\\nVadesiz hesaptan",
-    )
     rows += _add_service_status(
         "YAPIKREDI", "TELEFON", "Telefon / Cep Telefonu Faturası Ödemeleri",
         ("MOBIL", "SUBE"), YAPIKREDI_BILL_URL,
@@ -1033,63 +550,32 @@ def _garanti_fast_rows() -> List[SupplementalRow]:
 
 
 def _isbank_tax_findeks_rows() -> List[SupplementalRow]:
-    tax = _fetch_html(
-        ISBANK_TAX_URL,
-        must_contain=("İşCep", "İnternet Şubesi", "Çözüm Merkezi"),
-    )
+    tax = _fetch_html(ISBANK_TAX_URL, must_contain=("İşCep", "İnternet Şubesi", "Çözüm Merkezi"))
     tax_text = _norm(BeautifulSoup(tax, "html.parser").get_text(" ", strip=True))
     if "vergi" not in tax_text:
         raise SupplementalSourceError("İş Bankası Vergi Ödeme sayfası doğrulanamadı.")
 
-    findeks = _fetch_html(
-        ISBANK_FINDEKS_URL,
-        must_contain=("Çek Raporu", "Yılda 50 Çek Raporu", "Yılda 250 Çek Raporu"),
-    )
+    findeks = _fetch_html(ISBANK_FINDEKS_URL, must_contain=("Çek Raporu", "Yılda 50 Çek Raporu"))
     findeks_text = _clean(BeautifulSoup(findeks, "html.parser").get_text(" ", strip=True))
-
-    def package_amount(count: int, fallback: str) -> str:
-        match = re.search(
-            rf"Yılda\s*{count}\s*Çek\s*Raporu.{{0,140}}?([0-9][0-9.]*,[0-9]{{2}})\s*TL",
-            findeks_text,
-            flags=re.I | re.S,
-        )
-        return match.group(1) if match else fallback
-
-    package_50 = package_amount(50, "3.660,00")
-    package_250 = package_amount(250, "15.240,00")
+    m = re.search(r"Yılda\s*50\s*Çek\s*Raporu.{0,100}?([0-9][0-9.]*,[0-9]{2})\s*TL", findeks_text, flags=re.I | re.S)
+    package = m.group(1) if m else "3.660,00"
 
     rows: List[SupplementalRow] = []
-
-    # Vergi sayfası kanalları doğruluyor; ayrı bir numeric "Vergi Tahsilat
-    # Komisyonu" ürünü uydurulmuyor. Karşılaştırma bu statüyü kullanır.
     rows += _add_service_status(
-        "İŞBANKASI",
-        "VERGI",
-        "Vergi / Harç Ödemeleri",
-        ("MOBIL", "SUBE"),
-        ISBANK_TAX_URL,
+        "İŞBANKASI", "VERGI", "Vergi / Harç Ödemeleri",
+        ("MOBIL", "SUBE"), ISBANK_TAX_URL,
         "Vergi sayfası İşCep, İnternet Şubesi ve Çözüm Merkezi kanallarını doğruluyor.",
-        display_text="Hizmet var\nAyrı vergi aracılık ücreti yayımlanmıyor",
+        display_text="Hizmet var\\nAyrı vergi aracılık ücreti yayımlanmıyor",
     )
-
-    # İş Bankası Çek Raporu tek-rapor fiyatı yerine yıllık paket olarak
-    # yayımlanıyor. Kredi Risk Raporu'nun 95 TL tarifesi buraya taşınmaz.
-    # Karekodlu Çek Raporu da farklı bir üründür ve bu satıra karıştırılmaz.
     rows += _add_service_status(
-        "İŞBANKASI",
-        "CEK_RISK",
-        "Findeks Çek Raporu",
-        ("MOBIL", "SUBE"),
-        ISBANK_FINDEKS_URL,
-        "Findeks sayfası Çek Raporu için tek rapor yerine yıllık paket tarifeleri yayımlıyor.",
-        display_text=(
-            "Çek Raporu paketleri\n"
-            f"50 rapor/yıl: {package_50} TRY\n"
-            f"250 rapor/yıl: {package_250} TRY\n"
-            "KDV dahil"
-        ),
+        "İŞBANKASI", "CEK_RISK", "Findeks Çek Raporu",
+        ("MOBIL", "SUBE"), ISBANK_FINDEKS_URL,
+        "Findeks sayfası tek rapor tarifesi yerine yıllık Çek Raporu paketleri yayımlıyor.",
+        display_text=f"Tek rapor ücreti ayrı yayımlanmıyor\\n50 rapor/yıl: {package} TRY (KDV dahil)",
     )
     return rows
+
+
 
 def _garanti_phone_tax_rows() -> List[SupplementalRow]:
     """Garanti telefon ve vergi hizmetinin resmî kanal varlığını doğrular.
@@ -1131,58 +617,6 @@ def _garanti_phone_tax_rows() -> List[SupplementalRow]:
         "Ürün ve Hizmet Ücretleri sayfasındaki genel Fatura/Kurum açıklaması site/vakıf/aidat tahsilatını kapsıyor. Ayrı aidat tarifesi yoksa genel Fatura/Kurum tarifesi açıkça genel tarife etiketiyle kullanılır.",
     )
     return rows
-
-
-
-def _isbank_fatura_faq_rows() -> List[SupplementalRow]:
-    """
-    İş Bankası'nın resmî SSS sayfasındaki kredi kartından anında fatura ödeme
-    ücretini doğrular.
-
-    Kullanıcı denetiminde esas alınan kural:
-      0-150 TL       -> 5 TL
-      150 TL üzeri   -> işlem tutarının %3,5'i + BSMV
-
-    SSS metni bu üç kritik unsuru içermiyorsa status üretmeyiz; kritik kaynak
-    kontrolü başarısız olur ve final Excel korunur.
-    """
-    html = _fetch_html(
-        ISBANK_FAQ_URL,
-        must_contain=(
-            "Kredi kartlarından Fatura Ödemelerinde ücret alınıyor mu",
-            "0-150 TL",
-            "150 TL üzeri",
-        ),
-    )
-    text = _norm(BeautifulSoup(html, "html.parser").get_text(" ", strip=True))
-
-    has_question = "kredi kartlarindan fatura odemelerinde ucret aliniyor mu" in text
-    has_low = "0-150 tl" in text and "5 tl" in text
-    has_high = (
-        "150 tl uzeri" in text
-        and ("3,5" in text or "3.5" in text)
-        and "bsmv" in text
-    )
-    if not (has_question and has_low and has_high):
-        raise SupplementalSourceError(
-            "İş Bankası SSS kredi kartından fatura ödeme ücret kuralı doğrulanamadı."
-        )
-
-    return _add_service_status(
-        "İŞBANKASI",
-        "FATURA_KREDI_KARTI",
-        "Kredi Kartından Fatura / Kurum Ödemesi",
-        ("GENEL",),
-        ISBANK_FAQ_URL,
-        "Resmî SSS, kredi kartıyla anında fatura ödemelerinde 0-150 TL için 5 TL; "
-        "150 TL üzeri için işlem tutarının %3,5'i kadar ücret + BSMV uygulandığını belirtiyor.",
-        display_text=(
-            "Genel kredi kartı tarifesi:\\n"
-            "0-150 TRY: 5 TRY\\n"
-            "150 TRY üzeri: %3,50 + BSMV\\n"
-            "Kanal ayrımı yayımlanmıyor"
-        ),
-    )
 
 
 def _isbank_phone_rows() -> List[SupplementalRow]:
@@ -1597,37 +1031,6 @@ def _extract_isbank_bhs_rows(pdf_bytes: bytes, url: str, date: str) -> List[Supp
     ):
         add_amount("Çek Defteri", label, pattern, "Değerli Kâğıt Bedeli ayrıca tahsil edilir.")
 
-    # pdfplumber bazı BHS tablolarında rowspan nedeniyle "10 Yapraklı" satırını
-    # bölüm başlığından ÖNCE çıkarıyor. Yukarıdaki normal pattern bu durumda
-    # 10'lu satırı kaçırır. Değeri hard-code etmeden, tablonun gerçek metin
-    # sırasından dinamik fallback ile yakala.
-    ten_fallbacks = (
-        (
-            "Karekodlu Çek Defteri - 10 Yapraklı (Yurtiçi Şubeler)",
-            r"10 Yapraklı \(Yurtiçi Şubeler\)\s*([0-9][0-9.,]*)\s*TL\s*Karekodlu Çek Defteri Ücreti",
-        ),
-        (
-            "Karekodlu ve Logolu Çek Defteri - 10 Yapraklı (Yurtiçi Şubeler)",
-            r"10 Yapraklı \(Yurtiçi Şubeler\)\s*([0-9][0-9.,]*)\s*TL\s*Karekodlu ve Logolu Çek Defteri",
-        ),
-    )
-    existing_names = {_norm(r.masraf) for r in rows}
-    for label, pattern in ten_fallbacks:
-        if _norm(label) in existing_names:
-            continue
-        m = re.search(pattern, flat, flags=re.I | re.S)
-        if not m:
-            continue
-        value = _num_token(m.group(1)) + " TL"
-        rows.append(SupplementalRow(
-            kategori="EK KAYNAK - İş Bankası BHS - Çek Defteri",
-            masraf=label,
-            asgari_tutar=value,
-            azami_tutar=value,
-            aciklama=note("Değerli Kâğıt Bedeli ayrıca tahsil edilir."),
-            site_guncelleme_tarihi=date,
-        ))
-
     # Yaprak başı 50-350 ve 351+ değerlerini ayrı yakala.
     for kind in ("Karekodlu Çek Defteri", "Karekodlu ve Logolu Çek Defteri"):
         kind_re = re.escape(kind)
@@ -1671,14 +1074,6 @@ def _extract_isbank_bhs_rows(pdf_bytes: bytes, url: str, date: str) -> List[Supp
         "çek düzeltme": any("cek duzeltme ucreti" in _norm(r.masraf) and r.asgari_tutar for r in rows),
         "çek iade": any("cek muamelesiz iade" in _norm(r.masraf) and r.asgari_tutar for r in rows),
         "senet iade": any("senet iade" in _norm(r.masraf) and r.asgari_tutar for r in rows),
-        "karekodlu 10 yaprak": any(
-            "karekodlu cek defteri - 10 yaprakli" in _norm(r.masraf) and r.asgari_tutar
-            for r in rows
-        ),
-        "karekodlu+logolu 10 yaprak": any(
-            "karekodlu ve logolu cek defteri - 10 yaprakli" in _norm(r.masraf) and r.asgari_tutar
-            for r in rows
-        ),
     }
     missing = [name for name, ok in critical_checks.items() if not ok]
     if missing:
@@ -1708,17 +1103,7 @@ def enrich_all(banka_verileri: Mapping[str, Sequence]) -> Tuple[Dict[str, List],
     mevcut doğru Excel'i korumalıdır.
     """
     report = SupplementalReport()
-
-    # ORIGINAL primary snapshot ayrı tutulur. Supplemental satırların ücreti başka
-    # supplemental satırlardan değil, yalnız ana resmî scraper sonucundan tamamlanır.
-    primary_only: Dict[str, List] = {
-        bank: list(rows)
-        for bank, rows in banka_verileri.items()
-    }
-    result: Dict[str, List] = {
-        bank: list(rows)
-        for bank, rows in banka_verileri.items()
-    }
+    result: Dict[str, List] = {bank: list(rows) for bank, rows in banka_verileri.items()}
 
     def apply(bank: str, source_name: str, url: str, producer, *, required: bool = True):
         print(
@@ -1731,23 +1116,6 @@ def enrich_all(banka_verileri: Mapping[str, Sequence]) -> Tuple[Dict[str, List],
             return
         try:
             additions = producer()
-
-            filled, unresolved = _fill_supplemental_fees(
-                bank,
-                additions,
-                primary_only.get(bank, ()),
-            )
-            if filled:
-                print(
-                    f"[supplemental] {source_name}: {filled} hizmet satırına "
-                    "primary resmî tarifeden tutar/oran yazıldı."
-                )
-            if unresolved:
-                print(
-                    f"[supplemental] {source_name}: {unresolved} hizmet satırında "
-                    "güvenli numeric tarife eşleşmesi yok; ücret uydurulmadı."
-                )
-
             added = _append_unique(result[bank], additions)
             report.added_by_bank[bank] = report.added_by_bank.get(bank, 0) + added
             report.source_counts[source_name] = len(additions)
@@ -1810,7 +1178,6 @@ def enrich_all(banka_verileri: Mapping[str, Sequence]) -> Tuple[Dict[str, List],
     apply("İŞBANKASI", "ISBANK_VERGI_FINDEKS", ISBANK_TAX_URL, _isbank_tax_findeks_rows)
     apply("GARANTİ", "GARANTI_TELEFON_VERGI", GARANTI_BILL_URL, _garanti_phone_tax_rows)
     apply("İŞBANKASI", "ISBANK_TELEFON", ISBANK_BILL_URL, _isbank_phone_rows)
-    apply("İŞBANKASI", "ISBANK_FATURA_KART_SSS", ISBANK_FAQ_URL, _isbank_fatura_faq_rows)
 
     # Özel okul / aidat hizmet kanıtları da karşılaştırma mantığının parçasıdır.
     apply("GARANTİ", "GARANTI_OZEL_OKUL", GARANTI_SCHOOL_URL, _garanti_service_rows)
@@ -1822,7 +1189,7 @@ def enrich_all(banka_verileri: Mapping[str, Sequence]) -> Tuple[Dict[str, List],
     apply("İŞBANKASI", "ISBANK_FAST_SGK_POLICY", ISBANK_FAST_URL, _isbank_fast_sgk_policy_rows)
     apply("YAPIKREDI", "YAPIKREDI_COMPARISON_POLICY", YAPIKREDI_FAST_URL, _yk_comparison_policy_rows)
     def yk_altin_status_from_primary():
-        primary_rows = primary_only.get("YAPIKREDI", [])
+        primary_rows = result.get("YAPIKREDI", [])
         primary_text = " | ".join(
             _norm(
                 f"{getattr(row, 'kategori', '')} "
