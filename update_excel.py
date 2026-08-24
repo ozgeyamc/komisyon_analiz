@@ -21,7 +21,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 from scraper import UcretSatiri
 
 
-EXCEL_WRITER_VERSION = "2026-08-21-v2-clean-supplemental-display"
+EXCEL_WRITER_VERSION = "2026-08-24-v4-filter-data-quality-report"
 EXCEL_DOSYA_ADI = "komisyonlar_guncel.xlsx"
 SHEET_ADI = "KOMISYONLAR"
 
@@ -187,7 +187,39 @@ def excel_guncelle_coklu(
     calisma_tarihi = _bugun_tarih_str()
 
     toplam = 0
+    kaynak_tarihi_bos = 0
+    ucret_alani_bos = 0
+
     for banka_adi, satirlar in banka_verileri.items():
+        # Kaynak bir güncelleme tarihi yayımlamıyorsa çalıştırılma tarihini
+        # onun yerine yazıp tarih uydurma. Boşluk sayısını raporla ki durum
+        # sessizce kaybolmasın.
+        kaynak_tarihi_bos += sum(
+            1
+            for satir in satirlar
+            if not str(
+                satir.site_guncelleme_tarihi
+                or ""
+            ).strip()
+        )
+
+        # Resmî kaynakta hizmet/durum yayımlanıp ayrı sayısal ücret
+        # belirtilmeyebilir. Bu satırları silme veya 0'a çevirme; boş ücret
+        # alanlarını açıklama/status metniyle birlikte koru ve yalnız raporla.
+        ucret_alani_bos += sum(
+            1
+            for satir in satirlar
+            if not any(
+                str(value or "").strip()
+                for value in (
+                    satir.asgari_tutar,
+                    satir.asgari_oran,
+                    satir.azami_tutar,
+                    satir.azami_oran,
+                )
+            )
+        )
+
         toplam += _satirlari_yaz(
             ws,
             satirlar,
@@ -195,12 +227,18 @@ def excel_guncelle_coklu(
             calisma_tarihi,
         )
 
+    # AutoFilter yalnız başlık hücrelerine değil, bütün veri alanına bağlı
+    # olmalı. Böylece yeni satırlar da Excel'de filtre kapsamına girer.
+    ws.auto_filter.ref = f"A1:J{ws.max_row}"
+
     wb.save(dosya_yolu)
 
     return {
         "eklendi": toplam,
         "guncellendi": 0,
         "degismedi": 0,
+        "kaynak_tarihi_bos": kaynak_tarihi_bos,
+        "ucret_alani_bos": ucret_alani_bos,
     }
 
 
