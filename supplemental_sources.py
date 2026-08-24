@@ -41,7 +41,7 @@ import requests
 from bs4 import BeautifulSoup
 
 
-SUPPLEMENTAL_VERSION = "2026-08-24-v13-primary-source-priority"
+SUPPLEMENTAL_VERSION = "2026-08-24-v14-isbank-bhs-table-layout"
 
 HEADERS = {
     "User-Agent": (
@@ -1327,21 +1327,19 @@ def _isbank_card_contract_rows() -> List[SupplementalRow]:
     norm = _norm(flat)
     rows: List[SupplementalRow] = []
 
-    # ORTAK ATM - Cari Hesaba Para Yatırma
-    m = re.search(
-        r"Cari\s+Hesaba\s+Para\s+Yat[ıi]rma.{0,300}?%?\s*1[,\.]15\s*"
-        r"\+?\s*1[,\.]05\s*TL",
-        flat,
-        flags=re.I | re.S,
-    )
-    if not m:
-        m = re.search(
-            r"cari hesaba para yatirma.{0,300}?1[,\.]15.{0,100}?1[,\.]05\s*tl",
-            norm,
-            flags=re.I | re.S,
-        )
+    # ORTAK ATM - Cari Hesaba Para Yatırma. PDF'nin iki sütunlu Ek-1 tablosu
+    # bazı pdfplumber sürümlerinde işlem adlarını ve ücret sütunlarını blok blok
+    # çıkarıyor; bu nedenle ücretin işlem adından hemen sonra gelmesini bekleme.
+    atm_start = norm.rfind("e. ortak atm ucretleri")
+    atm_section = norm[atm_start:atm_start + 1800] if atm_start >= 0 else ""
+    atm_verified = all(token in atm_section for token in (
+        "cari hesaba para yatirma",
+        "1,15",
+        "1,05 tl",
+        "1,58",
+    ))
 
-    if m:
+    if atm_verified:
         rows.append(
             SupplementalRow(
                 kategori="EK KAYNAK - İş Bankası Kart Sözleşmesi 03.02.2026",
@@ -1359,8 +1357,16 @@ def _isbank_card_contract_rows() -> List[SupplementalRow]:
             )
         )
 
-    # VISA Direct - sözleşmedeki açık yayın durumu
-    if "visa direct hizmeti henuz uygulamada olmayip" in norm:
+    # VISA Direct - sözleşmedeki açık yayın durumu. Footnote numarası ve PDF
+    # sütun sırası araya girebildiği için tam cümle eşitliği kullanılmaz.
+    visa_note_start = norm.rfind("visa direct hizmeti")
+    visa_note = norm[visa_note_start:visa_note_start + 500] if visa_note_start >= 0 else ""
+    visa_not_live = (
+        "henuz uygulamada" in visa_note
+        and "devreye alindiginda" in visa_note
+        and "internet sitesinden" in visa_note
+    )
+    if visa_not_live:
         rows += _add_service_status(
             "İŞBANKASI",
             "VISA_YP_DIRECT",
@@ -1489,6 +1495,58 @@ def _first_rate_minmax(pattern: str, text: str) -> Tuple[str, str, str, str]:
     return _num_token(min_amt) + " TL", _num_token(rate), _num_token(max_amt) + " TL", _num_token(rate)
 
 
+def _isbank_yurtici_chequebook_tiers(text: str) -> Dict[str, Tuple[str, str]]:
+    """BHS çek defteri tablosunu başlık/satır kırılımlarından bağımsız okur.
+
+    PDF metin çıkarımı ürün başlığını ve 10 yapraklı tarife satırını ayrı
+    satırlara bölebiliyor. Bu nedenle ürün başlığı ile tutarı aynı regex içinde
+    aramak yerine, yalnız yurtiçi çek defteri bölümündeki her kademenin iki
+    değerini tablo sırasıyla (Karekodlu, Karekodlu + Logolu) alırız.
+    """
+    start = re.search(r"Karekodlu\s+Çek\s+Defteri\s+Ücreti", text, flags=re.I)
+    if not start:
+        return {}
+
+    # Yurtiçi iki ürün bittikten sonra KKTC tablosu başlar. Böylece aynı
+    # "10 Yapraklı" ifadelerinin KKTC tutarlarıyla karışması engellenir.
+    end = re.search(
+        r"10\s+Yapraklı\s*\(\s*K\.?K\.?T\.?C\.?(?:\s+Şubeler)?\s*\)",
+        text[start.end():],
+        flags=re.I,
+    )
+    section_end = start.end() + end.start() if end else len(text)
+    section = text[start.start():section_end]
+
+    tier_patterns = {
+        "10 yaprak": (
+            r"10\s+Yapraklı\s*\(\s*Yurtiçi\s+Şubeler\s*\)"
+            r"[^0-9]{0,40}([0-9][0-9.,]*)\s*TL"
+        ),
+        "25 yaprak": (
+            r"25\s+Yapraklı\s*\(\s*Yurtiçi\s+Şubeler\s*\)"
+            r"[^0-9]{0,40}([0-9][0-9.,]*)\s*TL"
+        ),
+        "50 – 350": (
+            r"50\s*[–—-]\s*350\s+Yapraklı\s*\(\s*Yurtiçi\s+Şubeler\s*\)"
+            r"\s*Yaprak\s+Başı[^0-9]{0,40}([0-9][0-9.,]*)\s*TL"
+        ),
+        "351 Yaprak ve üzeri": (
+            r"351\s+Yaprak\s+ve\s+[Üü]zeri\s*\(\s*Yurtiçi\s+Şubeler\s*\)"
+            r"\s*Yaprak\s+Başı[^0-9]{0,40}([0-9][0-9.,]*)\s*TL"
+        ),
+    }
+
+    result: Dict[str, Tuple[str, str]] = {}
+    for tier, pattern in tier_patterns.items():
+        values = re.findall(pattern, section, flags=re.I | re.S)
+        if len(values) >= 2:
+            result[tier] = (
+                _num_token(values[0]) + " TL",
+                _num_token(values[1]) + " TL",
+            )
+    return result
+
+
 def _extract_isbank_bhs_rows(pdf_bytes: bytes, url: str, date: str) -> List[SupplementalRow]:
     try:
         import pdfplumber
@@ -1588,36 +1646,26 @@ def _extract_isbank_bhs_rows(pdf_bytes: bytes, url: str, date: str) -> List[Supp
     ):
         add_rate("Çek İşlemleri", label, pattern)
 
-    # Çek defteri - yurtiçi tarifeler.
-    for label, pattern in (
-        ("Karekodlu Çek Defteri - 10 Yapraklı (Yurtiçi Şubeler)", r"Karekodlu Çek Defteri Ücreti\*?\s+10 Yapraklı \(Yurtiçi Şubeler\)"),
-        ("Karekodlu Çek Defteri - 25 Yapraklı (Yurtiçi Şubeler)", r"Karekodlu Çek Defteri Ücreti\*?.{0,120}?25 Yapraklı \(Yurtiçi Şubeler\)"),
-        ("Karekodlu ve Logolu Çek Defteri - 10 Yapraklı (Yurtiçi Şubeler)", r"Karekodlu ve Logolu Çek Defteri(?: Ücreti)?\*?.{0,120}?10 Yapraklı \(Yurtiçi Şubeler\)"),
-        ("Karekodlu ve Logolu Çek Defteri - 25 Yapraklı (Yurtiçi Şubeler)", r"Karekodlu ve Logolu Çek Defteri(?: Ücreti)?\*?.{0,120}?25 Yapraklı \(Yurtiçi Şubeler\)"),
-    ):
-        add_amount("Çek Defteri", label, pattern, "Değerli Kâğıt Bedeli ayrıca tahsil edilir.")
-
-    # Yaprak başı 50-350 ve 351+ değerlerini ayrı yakala.
-    for kind in ("Karekodlu Çek Defteri", "Karekodlu ve Logolu Çek Defteri"):
-        kind_re = re.escape(kind)
-        block_match = re.search(kind_re + r".{0,550}", flat, flags=re.I | re.S)
-        if block_match:
-            block = block_match.group(0)
-            for range_label in ("50 – 350", "351 Yaprak ve üzeri"):
-                if range_label.startswith("50"):
-                    m = re.search(r"50\s*[–-]\s*350 Yapraklı \(Yurtiçi Şubeler\) Yaprak Başı\s*([0-9][0-9.,]*)\s*TL", block, flags=re.I)
-                else:
-                    m = re.search(r"351 Yaprak ve (?:üzeri|Üzeri) \(Yurtiçi Şubeler\) Yaprak Başı\s*([0-9][0-9.,]*)\s*TL", block, flags=re.I)
-                if m:
-                    value = _num_token(m.group(1)) + " TL"
-                    rows.append(SupplementalRow(
-                        kategori="EK KAYNAK - İş Bankası BHS - Çek Defteri",
-                        masraf=f"{kind} - {range_label} (Yurtiçi Şubeler) - Yaprak Başı",
-                        asgari_tutar=value,
-                        azami_tutar=value,
-                        aciklama=note("Değerli Kâğıt Bedeli ayrıca tahsil edilir."),
-                        site_guncelleme_tarihi=date,
-                    ))
+    # Çek defteri - yurtiçi tarifeler. PDF metnindeki satır kırılımlarına göre
+    # başlık ve tutarı bitişik varsaymadan iki ürünün dört kademesini çıkar.
+    chequebook_tiers = _isbank_yurtici_chequebook_tiers(flat)
+    for tier, (qr_value, logo_value) in chequebook_tiers.items():
+        for kind, value in (
+            ("Karekodlu Çek Defteri", qr_value),
+            ("Karekodlu ve Logolu Çek Defteri", logo_value),
+        ):
+            per_leaf = tier in {"50 – 350", "351 Yaprak ve üzeri"}
+            label = f"{kind} - {tier} (Yurtiçi Şubeler)"
+            if per_leaf:
+                label += " - Yaprak Başı"
+            rows.append(SupplementalRow(
+                kategori="EK KAYNAK - İş Bankası BHS - Çek Defteri",
+                masraf=label,
+                asgari_tutar=value,
+                azami_tutar=value,
+                aciklama=note("Değerli Kâğıt Bedeli ayrıca tahsil edilir."),
+                site_guncelleme_tarihi=date,
+            ))
 
     add_amount("Çek İade", "Çek Muamelesiz İade Ücreti - Çek Başına", r"Çek Muamelesiz İade Ücreti\s+Çek Başına")
     add_amount("Çek Belgelendirme ve Düzeltme", "Çek Düzeltme Ücreti - Çek Başına", r"Çek Düzeltme Ücreti\s+Çek Başına")
@@ -1651,6 +1699,16 @@ def _extract_isbank_bhs_rows(pdf_bytes: bytes, url: str, date: str) -> List[Supp
             and _clean(r.asgari_tutar).startswith("900")
             for r in rows
         ),
+        "karekodlu çek defteri tüm kademeler": sum(
+            1 for r in rows
+            if "ek kaynak - is bankasi bhs - cek defteri" in _norm(r.kategori)
+            and "logolu" not in _norm(r.masraf)
+        ) >= 4,
+        "logolu çek defteri tüm kademeler": sum(
+            1 for r in rows
+            if "ek kaynak - is bankasi bhs - cek defteri" in _norm(r.kategori)
+            and "logolu" in _norm(r.masraf)
+        ) >= 4,
     }
     missing = [name for name, ok in critical_checks.items() if not ok]
     if missing:
