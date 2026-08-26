@@ -28,7 +28,6 @@ import sys
 import threading
 import time
 import unicodedata
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Set, Tuple
 from urllib.parse import urljoin, urlparse
@@ -37,7 +36,7 @@ import requests
 from bs4 import BeautifulSoup
 
 
-SCRAPER_VERSION = "2026-08-25-v7-halkbank-empty-mkk-sequential-api"
+SCRAPER_VERSION = "2026-08-26-v8-halkbank-targeted-api-recovery"
 
 HALKBANK_ANA_URL = "https://www.halkbank.com.tr/tr/urun-ve-hizmet-ucretleri"
 HALKBANK_API_URL = "https://webapi.halkbank.com.tr/api/productservicefee/{table_id}"
@@ -59,10 +58,9 @@ ALLOWED_EMPTY_API_TABLE_IDS = {
     "150",  # MKK Menkul Kıymet Transferi Ücretleri
     "152",  # MKK Saklama Ücretleri
 }
-API_MAX_WORKERS = 1
 API_MAX_ATTEMPTS = 4
 API_TIMEOUT_SECONDS = 35
-API_SUCCESS_DELAY_SECONDS = 0.08
+API_SUCCESS_DELAY_SECONDS = 0.20
 
 # 24.08.2026 tarihli güncel resmî ticari PDF envanteri. PDF dört sayfada
 # 199 numaralı satır ve en az 116 ücret/açıklama içeren gerçek hizmet satırı
@@ -260,6 +258,43 @@ def _same_text(a: str, b: str) -> bool:
     return _normalize_key(a) == _normalize_key(b)
 
 
+def _requests_get_with_retry(
+    requester,
+    url: str,
+    *,
+    headers: Optional[dict] = None,
+    timeout: int = 40,
+    label: str,
+):
+    """HTML/PDF isteklerinde geçici GitHub-runner ağ hatalarını tolere eder."""
+    last_error: Optional[Exception] = None
+
+    for attempt in range(1, API_MAX_ATTEMPTS + 1):
+        try:
+            response = requester.get(
+                url,
+                headers=headers,
+                timeout=timeout,
+            )
+            response.raise_for_status()
+            return response
+        except Exception as exc:
+            last_error = exc
+            if attempt < API_MAX_ATTEMPTS:
+                wait_seconds = 2 ** (attempt - 1)
+                print(
+                    f"[halkbank][retry] {label} | "
+                    f"deneme={attempt}/{API_MAX_ATTEMPTS} | "
+                    f"bekleme={wait_seconds}s | hata={exc}",
+                    file=sys.stderr,
+                )
+                time.sleep(wait_seconds)
+
+    raise ScraperError(
+        f"Halkbank {label} alınamadı: {url} | hata={last_error}"
+    )
+
+
 def _parse_aciklama(raw_aciklama: str) -> Tuple[str, str]:
     raw = _normalize(raw_aciklama)
 
@@ -365,12 +400,13 @@ def _discover_pages_requests(
     ana_url: str,
     session: requests.Session,
 ) -> List[Tuple[str, str]]:
-    response = session.get(
+    response = _requests_get_with_retry(
+        session,
         ana_url,
         headers=HEADERS,
         timeout=40,
+        label="ana ücret sayfası",
     )
-    response.raise_for_status()
 
     soup = BeautifulSoup(
         response.text,
@@ -943,12 +979,13 @@ def _scrape_commercial_pdf(
         else requests
     )
 
-    response = requester.get(
+    response = _requests_get_with_retry(
+        requester,
         pdf_url,
         headers=HEADERS,
         timeout=60,
+        label="ticari ücret PDF'i",
     )
-    response.raise_for_status()
 
     print(
         f"[halkbank] Ticari PDF bulundu: "
@@ -2036,8 +2073,13 @@ def _discover_official_inventory(
     commercial_pages: List[Tuple[str, str, str]] = []
 
     for page_category, page_url in pages:
-        response = session.get(page_url, headers=HEADERS, timeout=40)
-        response.raise_for_status()
+        response = _requests_get_with_retry(
+            session,
+            page_url,
+            headers=HEADERS,
+            timeout=40,
+            label=f"alt ücret sayfası ({page_category})",
+        )
 
         if page_category == "Ticari Ücret ve Komisyonları":
             commercial_pages.append((page_category, page_url, response.text))
@@ -2191,57 +2233,10 @@ def _assemble_official_result(
     return all_rows, stats
 
 
-def _scrape_all_official_api(
-    pages: List[Tuple[str, str]],
-    session: requests.Session,
-) -> Tuple[List[UcretSatiri], Dict[str, int]]:
-    """
-    Halkbank'ın dinamik ücret bileşenlerini doğrudan bankanın kullandığı resmî
-    API'den çeker. DOM'un geç/yarım yüklenmesine bağlı veri kaybını ortadan
-    kaldırır. Ticari tarife, resmî PDF kaynağından mevcut parser ile alınır.
-    """
-    api_specs, commercial_pages = _discover_official_inventory(pages, session)
-    api_results: Dict[str, Tuple[str, List[dict]]] = {}
-
-    with ThreadPoolExecutor(
-        max_workers=API_MAX_WORKERS
-    ) as executor:
-        futures = {
-            executor.submit(
-                _fetch_official_api_table,
-                spec,
-            ): spec
-            for spec in api_specs
-        }
-
-        for future in as_completed(futures):
-            spec, table_name, fee_items = future.result()
-            api_results[spec[2]] = (
-                table_name,
-                fee_items,
-            )
-
-    return _assemble_official_result(
-        pages,
-        api_specs,
-        api_results,
-        commercial_pages,
-        session,
-        "official-api-sequential",
-    )
-
-
-def _scrape_all_playwright_request_api(
-    pages: List[Tuple[str, str]],
-    session: requests.Session,
-) -> Tuple[List[UcretSatiri], Dict[str, int]]:
-    """
-    Requests/TLS yolu GitHub runner'da tamamlanamazsa aynı resmî JSON
-    envanterini Playwright'ın APIRequestContext motoruyla sıralı çeker.
-
-    Chromium sayfası açılmaz; bankanın 148 isteği aynı anda gönderen sayfa
-    JavaScript'i çalıştırılmadığı için DOM bekleme/zaman aşımı oluşmaz.
-    """
+def _fetch_api_specs_playwright(
+    api_specs: List[Tuple[str, str, str, str]],
+) -> Dict[str, Tuple[str, List[dict]]]:
+    """Yalnız verilen API tablolarını Playwright HTTP motoruyla kurtarır."""
     try:
         from playwright.sync_api import sync_playwright
     except ImportError as exc:
@@ -2249,7 +2244,6 @@ def _scrape_all_playwright_request_api(
             "Halkbank Playwright HTTP fallback için playwright gerekli."
         ) from exc
 
-    api_specs, commercial_pages = _discover_official_inventory(pages, session)
     api_results: Dict[str, Tuple[str, List[dict]]] = {}
 
     with sync_playwright() as playwright:
@@ -2317,12 +2311,125 @@ def _scrape_all_playwright_request_api(
 
                 if index % 25 == 0 or index == total:
                     print(
-                        "[halkbank][playwright-http] "
+                        "[halkbank][playwright-http-recovery] "
                         f"tablo={index}/{total}",
                         file=sys.stderr,
                     )
         finally:
             request_context.dispose()
+
+    return api_results
+
+
+def _scrape_all_official_api(
+    pages: List[Tuple[str, str]],
+    session: requests.Session,
+) -> Tuple[List[UcretSatiri], Dict[str, int]]:
+    """
+    Resmî API tablolarını requests ile sıralı çeker. Tekil/geçici bir tablo
+    hatası olursa başarılı 147 tabloyu atmak yerine yalnız başarısız tablo(lar)
+    Playwright HTTP motoruyla yeniden alınır.
+    """
+    api_specs, commercial_pages = _discover_official_inventory(pages, session)
+    api_results: Dict[str, Tuple[str, List[dict]]] = {}
+    failed_specs: List[Tuple[str, str, str, str]] = []
+    failed_errors: Dict[str, str] = {}
+
+    total = len(api_specs)
+    for index, spec in enumerate(api_specs, start=1):
+        try:
+            loaded_spec, table_name, fee_items = _fetch_official_api_table(spec)
+            api_results[loaded_spec[2]] = (table_name, fee_items)
+        except Exception as exc:
+            failed_specs.append(spec)
+            failed_errors[spec[2]] = str(exc)
+            print(
+                "[halkbank][UYARI] requests API tablosu kurtarmaya ayrıldı: "
+                f"table_id={spec[2]} | hata={exc}",
+                file=sys.stderr,
+            )
+
+        if index % 25 == 0 or index == total:
+            print(
+                "[halkbank][requests-api] "
+                f"tablo={index}/{total} | "
+                f"başarılı={len(api_results)} | "
+                f"kurtarılacak={len(failed_specs)}",
+                file=sys.stderr,
+            )
+
+    source_label = "official-api-sequential"
+    if failed_specs:
+        # İlk dört deneme aynı bağlantı havuzunu kullanır. GitHub runner'da
+        # geçici DNS/TLS bozulması oturuma yapışabildiği için yalnız başarısız
+        # tabloları kısa bekleme sonrası yepyeni Session ile bir tur daha dene.
+        old_session = getattr(_API_THREAD_LOCAL, "session", None)
+        if old_session is not None:
+            try:
+                old_session.close()
+            except Exception:
+                pass
+        _API_THREAD_LOCAL.session = None
+        time.sleep(3)
+
+        still_failed: List[Tuple[str, str, str, str]] = []
+        for spec in failed_specs:
+            try:
+                loaded_spec, table_name, fee_items = _fetch_official_api_table(spec)
+                api_results[loaded_spec[2]] = (table_name, fee_items)
+                print(
+                    "[halkbank][requests-fresh-session] "
+                    f"table_id={loaded_spec[2]} kurtarıldı.",
+                    file=sys.stderr,
+                )
+            except Exception as exc:
+                still_failed.append(spec)
+                failed_errors[spec[2]] = (
+                    f"ilk={failed_errors.get(spec[2], '-')} | "
+                    f"yeni_oturum={exc}"
+                )
+        failed_specs = still_failed
+        if not failed_specs:
+            source_label = "requests + fresh-session-recovery"
+
+    if failed_specs:
+        print(
+            "[halkbank][UYARI] Yalnız başarısız API tabloları "
+            "Playwright HTTP motoruyla yeniden çekilecek: "
+            + ", ".join(spec[2] for spec in failed_specs),
+            file=sys.stderr,
+        )
+        try:
+            recovered = _fetch_api_specs_playwright(failed_specs)
+        except Exception as exc:
+            details = " | ".join(
+                f"{table_id}: {error}"
+                for table_id, error in failed_errors.items()
+            )
+            raise ScraperError(
+                "Halkbank başarısız API tabloları kurtarılamadı. "
+                f"Requests={details} | Playwright={exc}"
+            ) from exc
+        api_results.update(recovered)
+        source_label = "requests + targeted-playwright-recovery"
+
+    return _assemble_official_result(
+        pages,
+        api_specs,
+        api_results,
+        commercial_pages,
+        session,
+        source_label,
+    )
+
+
+def _scrape_all_playwright_request_api(
+    pages: List[Tuple[str, str]],
+    session: requests.Session,
+) -> Tuple[List[UcretSatiri], Dict[str, int]]:
+    """Son çare olarak 148 tablonun tamamını Playwright HTTP ile çeker."""
+    api_specs, commercial_pages = _discover_official_inventory(pages, session)
+    api_results = _fetch_api_specs_playwright(api_specs)
 
     return _assemble_official_result(
         pages,
