@@ -62,7 +62,7 @@ from update_excel import (
 )
 
 
-MAIN_VERSION = "2026-08-25-v35-halkbank-empty-mkk-api"
+MAIN_VERSION = "2026-08-24-v33-halkbank-full-pdf-isbank-date"
 EXPECTED_SUPPLEMENTAL_VERSION = "2026-08-24-v15-isbank-versioned-pdf-fallback"
 EXPECTED_COMPARISON_VERSION = "2026-08-24-v29-fast-research-securities"
 EXPECTED_EXCEL_WRITER_VERSION = "2026-08-24-v4-filter-data-quality-report"
@@ -93,7 +93,7 @@ EXPECTED_VERSIONS = {
     "AKBANK":    "2026-08-19-v4-akbank-context-fix",
     "QNB":       "2026-08-19-v5-qnb-category-fix",
     "DENİZBANK": "2026-08-19-v2-denizbank-integrity",
-    "HALKBANK":  "2026-08-25-v7-halkbank-empty-mkk-sequential-api",
+    "HALKBANK":  "2026-08-24-v6-halkbank-full-commercial-pdf",
     "VAKIFBANK": "2026-08-19-v3-vakifbank-channel-currency-fix",
     "TEB":       "2026-08-19-v5-teb-category-normalization",
     "ZİRAAT":    "2026-08-24-v5-ziraat-full-descriptions",
