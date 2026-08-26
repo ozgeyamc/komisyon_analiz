@@ -41,7 +41,7 @@ import requests
 from bs4 import BeautifulSoup
 
 
-SUPPLEMENTAL_VERSION = "2026-08-24-v15-isbank-versioned-pdf-fallback"
+SUPPLEMENTAL_VERSION = "2026-08-26-v16-garanti-fast-dynamic-limit"
 
 HEADERS = {
     "User-Agent": (
@@ -395,6 +395,41 @@ def _add_service_status(
             aciklama=_source_note(marker, url, extra),
         ))
     return result
+
+
+def _garanti_fast_limit(html: str) -> str:
+    """Garanti'nin resmî FAST sayfasındaki güncel TL limitini doğrular.
+
+    Limit geçmişte 100.000 TL idi. Sayfa değiştiğinde eski rakamı
+    ``must_contain`` ile aramak bütün supplemental çalışmasını gereksiz yere
+    durduruyordu. Rakamı yalnız FAST limitini açıkça tarif eden iki resmî cümle
+    kalıbından okuruz; birbiriyle çelişen değer görürsek fail-closed davranırız.
+    """
+    page = _clean(BeautifulSoup(html, "html.parser").get_text(" ", strip=True))
+    patterns = (
+        r"FAST\s+gönderim\s+limiti.{0,180}?maksimum\s+([0-9][0-9.\s]*)\s*TL",
+        r"Günlük\s+FAST\s+limiti\s+([0-9][0-9.\s]*)\s*TL",
+    )
+
+    limits: Set[int] = set()
+    for pattern in patterns:
+        for match in re.finditer(pattern, page, flags=re.I):
+            digits = re.sub(r"\D", "", match.group(1))
+            if digits:
+                limits.add(int(digits))
+
+    if not limits:
+        raise SupplementalSourceError(
+            "Garanti BBVA FAST işlem limiti resmî sayfadan parse edilemedi."
+        )
+    if len(limits) != 1:
+        values = ", ".join(f"{value:,}".replace(",", ".") for value in sorted(limits))
+        raise SupplementalSourceError(
+            f"Garanti BBVA FAST sayfasında çelişkili işlem limitleri bulundu: {values} TL"
+        )
+
+    limit = next(iter(limits))
+    return f"{limit:,}".replace(",", ".")
 
 
 # ---------------------------------------------------------------------------
@@ -1018,16 +1053,14 @@ def _yk_phone_tax_fast_rows() -> List[SupplementalRow]:
 
 
 def _garanti_fast_rows() -> List[SupplementalRow]:
-    html = _fetch_html(GARANTI_FAST_URL, must_contain=("100.000", "FAST"))
-    page = _norm(BeautifulSoup(html, "html.parser").get_text(" ", strip=True))
-    if "100.000" not in page and "100000" not in page:
-        raise SupplementalSourceError("Garanti BBVA FAST 100.000 TL limiti doğrulanamadı.")
+    html = _fetch_html(GARANTI_FAST_URL, must_contain=("FAST", "limiti"))
+    limit = _garanti_fast_limit(html)
     return _add_service_status(
         "GARANTİ", "FAST", "FAST - 399.000,01 TL ve üzeri",
         ("MOBIL", "SUBE"), GARANTI_FAST_URL,
-        "FAST işlem üst limiti 100.000 TL; FAST gönderimi Mobil/İnternet üzerinden yayımlanıyor.",
+        f"FAST işlem üst limiti {limit} TL; FAST gönderimi Mobil/İnternet üzerinden yayımlanıyor.",
         marker=STATUS_NOT_APPLICABLE,
-        display_text="Uygulanmıyor\\nFAST limiti 100.000 TRY",
+        display_text=f"Uygulanmıyor\\nFAST limiti {limit} TRY",
         band="TRANSFER_3",
     )
 
