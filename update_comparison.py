@@ -38,9 +38,9 @@ from openpyxl.comments import Comment
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
 
-COMPARISON_VERSION = "2026-08-24-v29-fast-research-securities"
+COMPARISON_VERSION = "2026-08-26-v30-fast-source-limit-note"
 COMPARISON_SHEET = "KARŞILAŞTIRMA"
-PREVIEW_LAYOUT_SIGNATURE = "4BANKS|A:I_FILTERED|J:L_EMPTY|M_GLOSSARY_LIST|FAIL_CLOSED_V29|PRIMARY_FIRST|CHANNEL_LABELS|CHEQUE_CURRENT|FAST_OFFICIAL_BANDS|RESEARCH_SECURITIES"
+PREVIEW_LAYOUT_SIGNATURE = "4BANKS|A:I_FILTERED|J:L_EMPTY|M_GLOSSARY_LIST|FAIL_CLOSED_V30|PRIMARY_FIRST|CHANNEL_LABELS|CHEQUE_CURRENT|FAST_SOURCE_LIMITS|RESEARCH_SECURITIES"
 
 STATUS_AVAILABLE = "[SUPPLEMENTAL][AVAILABLE_NO_SEPARATE_FEE]"
 STATUS_EMPTY = "[SUPPLEMENTAL][PUBLISHED_EMPTY]"
@@ -2147,6 +2147,32 @@ def _service_status_row(
         candidates.append((score, row))
 
     return max(candidates, key=lambda x: x[0])[1] if candidates else None
+
+
+def _fast_limit_note(
+    rows: Sequence[FeeRow], bank: str, wanted_channel: str,
+) -> str:
+    """FAST limit notunu bankanın resmî supplemental statüsünden üretir."""
+    upper_band = RowSpec(
+        label="FAST üst limit durumu",
+        service="FAST",
+        band_key="TRANSFER_3",
+    )
+    status_row = _service_status_row(
+        rows,
+        bank,
+        upper_band,
+        wanted_channel,
+        kinds={"NOT_APPLICABLE"},
+    )
+    if status_row is None:
+        return ""
+
+    display_text = _status_meta(status_row).get("DISPLAY_TEXT", "")
+    match = re.search(r"FAST\s+limiti\s+([^\n]+)", display_text, flags=re.I)
+    if not match:
+        return ""
+    return f"FAST işlemleri {match.group(1).strip()}'ye kadar yapılmaktadır."
 
 
 
@@ -6202,7 +6228,9 @@ def _resolve_cell(
         _assert_safe_source(row, spec)
         value = _fee_text(row, spec)
         if spec.service == "FAST" and spec.band_key == "TRANSFER_2":
-            value += "\nFAST işlemleri 100.000 TRY'ye kadar yapılmaktadır."
+            limit_note = _fast_limit_note(rows, bank, wanted_channel)
+            if limit_note:
+                value += f"\n{limit_note}"
         if spec.service == "KASA":
             annual_tax = _bsmv_label(row)
             annual_fee = _fee_value_compact(row)
