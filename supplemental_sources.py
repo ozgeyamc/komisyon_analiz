@@ -34,6 +34,7 @@ import re
 import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime
+from functools import lru_cache
 from typing import Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Set, Tuple
 from urllib.parse import urljoin
 
@@ -41,7 +42,7 @@ import requests
 from bs4 import BeautifulSoup
 
 
-SUPPLEMENTAL_VERSION = "2026-08-27-v17-all-bank-fast-dynamic-limits"
+SUPPLEMENTAL_VERSION = "2026-08-27-v18-tcmb-fast-system-limit"
 
 HEADERS = {
     "User-Agent": (
@@ -84,6 +85,7 @@ GARANTI_FAST_URL = "https://www.garantibbva.com.tr/odemeler-ve-hizmetler/fast-ko
 GARANTI_BILL_URL = "https://www.garantibbva.com.tr/odemeler-ve-hizmetler/fatura-odeme"
 GARANTI_TAX_URL = "https://www.garantibbva.com.tr/odemeler-ve-hizmetler/vergi-odemeleri"
 GARANTI_FEE_URL = "https://www.garantibbva.com.tr/urun-ve-hizmet-ucretleri"
+TCMB_FAST_URL = "https://www.tcmb.gov.tr/wps/wcm/connect/TR/TCMB%2BTR/Main%2BMenu/Duyurular/Basin/2026/DUY2026-36"
 
 STATUS_AVAILABLE = "[SUPPLEMENTAL][AVAILABLE_NO_SEPARATE_FEE]"
 STATUS_EMPTY = "[SUPPLEMENTAL][PUBLISHED_EMPTY]"
@@ -465,6 +467,35 @@ def _akbank_fast_limit(html: str) -> str:
             r"FAST\s*\([^)]*\).{0,300}?\bile\s+([0-9][0-9.\s]*)\s*TL[’']?ye\s+kadar",
         ),
     )
+
+
+@lru_cache(maxsize=1)
+def _tcmb_fast_system_limit() -> str:
+    """Yürürlükteki FAST sistem limitini belirleyici resmî TCMB duyurusundan okur."""
+    html = _fetch_html(
+        TCMB_FAST_URL,
+        must_contain=("FAST işlem tutar limitleri", "26 Ağustos 2026", "300.000 TL"),
+    )
+    page = _clean(BeautifulSoup(html, "html.parser").get_text(" ", strip=True))
+    matches = re.findall(
+        r"FAST\s+işlem\s+tutar\s+limitleri.{0,180}?([0-9][0-9.\s]*)\s*TL[’']?ye\s+yükselt",
+        page,
+        flags=re.I,
+    )
+    limits = {
+        int(re.sub(r"\D", "", value))
+        for value in matches
+        if re.sub(r"\D", "", value)
+    }
+    if limits != {300000}:
+        values = (
+            ", ".join(f"{value:,}".replace(",", ".") for value in sorted(limits))
+            or "bulunamadı"
+        )
+        raise SupplementalSourceError(
+            f"TCMB FAST sistem limiti güvenli biçimde doğrulanamadı: {values}"
+        )
+    return "300.000"
 
 
 # ---------------------------------------------------------------------------
@@ -1305,15 +1336,22 @@ def _akbank_comparison_policy_rows() -> List[SupplementalRow]:
     game_html = _fetch_html(AKBANK_GAME_URL, must_contain=("Akbank Mobil", "ATM"))
     fee_html = _fetch_html(AKBANK_FEE_URL, must_contain=("Kiralık Kasa", "Şans Oyunu"))
     game_text = _norm(BeautifulSoup(game_html, "html.parser").get_text(" ", strip=True))
-    fast_limit = _akbank_fast_limit(fast_html)
+    akbank_page_limit = _akbank_fast_limit(fast_html)
+    fast_limit = _tcmb_fast_system_limit()
+    if akbank_page_limit not in {"100.000", fast_limit}:
+        raise SupplementalSourceError(
+            "Akbank FAST sayfası ile TCMB sistem limiti arasında beklenmeyen çelişki var: "
+            f"Akbank={akbank_page_limit} TL, TCMB={fast_limit} TL"
+        )
     if "atm" not in game_text or "mobil" not in game_text:
         raise SupplementalSourceError("Akbank şans oyunu kanalları doğrulanamadı.")
 
     rows: List[SupplementalRow] = []
     rows += _add_service_status(
         "AKBANK", "FAST", "FAST - 399.000,01 TL ve üzeri",
-        ("MOBIL", "SUBE"), AKBANK_FAST_URL,
-        f"FAST işlem üst limiti {fast_limit} TL olarak yayımlanıyor.",
+        ("MOBIL", "SUBE"), TCMB_FAST_URL,
+        f"TCMB'nin 26 Ağustos 2026 tarihinden itibaren geçerli FAST sistem limiti {fast_limit} TL'dir. "
+        f"Akbank hizmet sayfasındaki {akbank_page_limit} TL metni güncellenmemiştir.",
         marker=STATUS_NOT_APPLICABLE,
         display_text=f"Uygulanmıyor\\nFAST limiti {fast_limit} TRY",
         band="TRANSFER_3",
