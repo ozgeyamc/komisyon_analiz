@@ -62,8 +62,8 @@ from update_excel import (
 )
 
 
-MAIN_VERSION = "2026-08-27-v38-all-bank-fast-dynamic-limits"
-EXPECTED_SUPPLEMENTAL_VERSION = "2026-08-27-v17-all-bank-fast-dynamic-limits"
+MAIN_VERSION = "2026-08-27-v39-tcmb-fast-system-limit"
+EXPECTED_SUPPLEMENTAL_VERSION = "2026-08-27-v18-tcmb-fast-system-limit"
 EXPECTED_COMPARISON_VERSION = "2026-08-26-v30-fast-source-limit-note"
 EXPECTED_EXCEL_WRITER_VERSION = "2026-08-24-v4-filter-data-quality-report"
 
