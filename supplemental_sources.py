@@ -41,7 +41,7 @@ import requests
 from bs4 import BeautifulSoup
 
 
-SUPPLEMENTAL_VERSION = "2026-08-26-v16-garanti-fast-dynamic-limit"
+SUPPLEMENTAL_VERSION = "2026-08-27-v17-all-bank-fast-dynamic-limits"
 
 HEADERS = {
     "User-Agent": (
@@ -397,19 +397,13 @@ def _add_service_status(
     return result
 
 
-def _garanti_fast_limit(html: str) -> str:
-    """Garanti'nin resmî FAST sayfasındaki güncel TL limitini doğrular.
-
-    Limit geçmişte 100.000 TL idi. Sayfa değiştiğinde eski rakamı
-    ``must_contain`` ile aramak bütün supplemental çalışmasını gereksiz yere
-    durduruyordu. Rakamı yalnız FAST limitini açıkça tarif eden iki resmî cümle
-    kalıbından okuruz; birbiriyle çelişen değer görürsek fail-closed davranırız.
-    """
+def _fast_limit_from_html(
+    html: str,
+    bank: str,
+    patterns: Sequence[str],
+) -> str:
+    """Bir bankanın FAST limitini yalnız resmî, hizmete özgü cümleden okur."""
     page = _clean(BeautifulSoup(html, "html.parser").get_text(" ", strip=True))
-    patterns = (
-        r"FAST\s+gönderim\s+limiti.{0,180}?maksimum\s+([0-9][0-9.\s]*)\s*TL",
-        r"Günlük\s+FAST\s+limiti\s+([0-9][0-9.\s]*)\s*TL",
-    )
 
     limits: Set[int] = set()
     for pattern in patterns:
@@ -420,16 +414,57 @@ def _garanti_fast_limit(html: str) -> str:
 
     if not limits:
         raise SupplementalSourceError(
-            "Garanti BBVA FAST işlem limiti resmî sayfadan parse edilemedi."
+            f"{bank} FAST işlem limiti resmî sayfadan parse edilemedi."
         )
     if len(limits) != 1:
         values = ", ".join(f"{value:,}".replace(",", ".") for value in sorted(limits))
         raise SupplementalSourceError(
-            f"Garanti BBVA FAST sayfasında çelişkili işlem limitleri bulundu: {values} TL"
+            f"{bank} FAST sayfasında çelişkili işlem limitleri bulundu: {values} TL"
         )
 
     limit = next(iter(limits))
     return f"{limit:,}".replace(",", ".")
+
+
+def _garanti_fast_limit(html: str) -> str:
+    return _fast_limit_from_html(
+        html,
+        "Garanti BBVA",
+        (
+            r"FAST\s+gönderim\s+limiti.{0,180}?maksimum\s+([0-9][0-9.\s]*)\s*TL",
+            r"Günlük\s+FAST\s+limiti\s+([0-9][0-9.\s]*)\s*TL",
+        ),
+    )
+
+
+def _yapikredi_fast_limit(html: str) -> str:
+    return _fast_limit_from_html(
+        html,
+        "Yapı Kredi",
+        (
+            r"FAST\s+işlemlerinde\s+işlem\s+özelinde\s+limit\s+([0-9][0-9.\s]*)\s*TL",
+        ),
+    )
+
+
+def _isbank_fast_limit(html: str) -> str:
+    return _fast_limit_from_html(
+        html,
+        "İş Bankası",
+        (
+            r"FAST\s+ile\s+([0-9][0-9.\s]*)\s*TL[’']?ye\s+kadar",
+        ),
+    )
+
+
+def _akbank_fast_limit(html: str) -> str:
+    return _fast_limit_from_html(
+        html,
+        "Akbank",
+        (
+            r"FAST\s*\([^)]*\).{0,300}?\bile\s+([0-9][0-9.\s]*)\s*TL[’']?ye\s+kadar",
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1014,10 +1049,8 @@ def _yk_phone_tax_fast_rows() -> List[SupplementalRow]:
     if "vergi / devlet" not in mim_text:
         raise SupplementalSourceError("Yapı Kredi Müşteri İletişim Merkezi vergi hizmeti doğrulanamadı.")
 
-    fast = _fetch_html(YAPIKREDI_FAST_URL, must_contain=("100.000", "FAST"))
-    fast_text = _norm(BeautifulSoup(fast, "html.parser").get_text(" ", strip=True))
-    if "100.000" not in fast_text and "100000" not in fast_text:
-        raise SupplementalSourceError("Yapı Kredi FAST 100.000 TL limiti doğrulanamadı.")
+    fast = _fetch_html(YAPIKREDI_FAST_URL, must_contain=("FAST", "işlem özelinde limit"))
+    fast_limit = _yapikredi_fast_limit(fast)
 
     rows: List[SupplementalRow] = []
     rows += _add_service_status(
@@ -1044,9 +1077,9 @@ def _yk_phone_tax_fast_rows() -> List[SupplementalRow]:
     rows += _add_service_status(
         "YAPIKREDI", "FAST", "FAST - 399.000,01 TL ve üzeri",
         ("MOBIL", "SUBE"), YAPIKREDI_FAST_URL,
-        "FAST işlem üst limiti 100.000 TL olarak yayımlanıyor.",
+        f"FAST işlem üst limiti {fast_limit} TL olarak yayımlanıyor.",
         marker=STATUS_NOT_APPLICABLE,
-        display_text="Uygulanmıyor\\nFAST limiti 100.000 TRY",
+        display_text=f"Uygulanmıyor\\nFAST limiti {fast_limit} TRY",
         band="TRANSFER_3",
     )
     return rows
@@ -1268,13 +1301,11 @@ def _garanti_comparison_policy_rows() -> List[SupplementalRow]:
 
 
 def _akbank_comparison_policy_rows() -> List[SupplementalRow]:
-    fast_html = _fetch_html(AKBANK_FAST_URL, must_contain=("100.000", "FAST"))
+    fast_html = _fetch_html(AKBANK_FAST_URL, must_contain=("FAST", "para transfer"))
     game_html = _fetch_html(AKBANK_GAME_URL, must_contain=("Akbank Mobil", "ATM"))
     fee_html = _fetch_html(AKBANK_FEE_URL, must_contain=("Kiralık Kasa", "Şans Oyunu"))
-    fast_text = _norm(BeautifulSoup(fast_html, "html.parser").get_text(" ", strip=True))
     game_text = _norm(BeautifulSoup(game_html, "html.parser").get_text(" ", strip=True))
-    if "100.000" not in fast_text and "100000" not in fast_text:
-        raise SupplementalSourceError("Akbank FAST 100.000 TL limiti doğrulanamadı.")
+    fast_limit = _akbank_fast_limit(fast_html)
     if "atm" not in game_text or "mobil" not in game_text:
         raise SupplementalSourceError("Akbank şans oyunu kanalları doğrulanamadı.")
 
@@ -1282,9 +1313,9 @@ def _akbank_comparison_policy_rows() -> List[SupplementalRow]:
     rows += _add_service_status(
         "AKBANK", "FAST", "FAST - 399.000,01 TL ve üzeri",
         ("MOBIL", "SUBE"), AKBANK_FAST_URL,
-        "FAST işlem üst limiti 100.000 TL olarak yayımlanıyor.",
+        f"FAST işlem üst limiti {fast_limit} TL olarak yayımlanıyor.",
         marker=STATUS_NOT_APPLICABLE,
-        display_text="Uygulanmıyor\\nFAST limiti 100.000 TRY",
+        display_text=f"Uygulanmıyor\\nFAST limiti {fast_limit} TRY",
         band="TRANSFER_3",
     )
     rows += _add_service_status(
@@ -1303,11 +1334,9 @@ def _akbank_comparison_policy_rows() -> List[SupplementalRow]:
 
 
 def _isbank_fast_sgk_policy_rows() -> List[SupplementalRow]:
-    fast_html = _fetch_html(ISBANK_FAST_URL, must_contain=("100.000", "İşCep", "İnternet Şubesi"))
+    fast_html = _fetch_html(ISBANK_FAST_URL, must_contain=("FAST", "İşCep", "İnternet Şubesi"))
     sgk_html = _fetch_html(ISBANK_SGK_URL, must_contain=("İşCep", "İnternet Şubesi"))
-    fast_text = _norm(BeautifulSoup(fast_html, "html.parser").get_text(" ", strip=True))
-    if "100.000" not in fast_text and "100000" not in fast_text:
-        raise SupplementalSourceError("İş Bankası FAST 100.000 TL limiti doğrulanamadı.")
+    fast_limit = _isbank_fast_limit(fast_html)
 
     rows: List[SupplementalRow] = []
     # İş Bankası FAST yalnız İşCep/İnternet Şubesi üzerinden yayımlanıyor.
@@ -1321,9 +1350,9 @@ def _isbank_fast_sgk_policy_rows() -> List[SupplementalRow]:
     rows += _add_service_status(
         "İŞBANKASI", "FAST", "FAST - 399.000,01 TL ve üzeri",
         ("MOBIL", "SUBE"), ISBANK_FAST_URL,
-        "FAST işlem üst limiti 100.000 TL.",
+        f"FAST işlem üst limiti {fast_limit} TL.",
         marker=STATUS_NOT_APPLICABLE,
-        display_text="Uygulanmıyor\\nFAST limiti 100.000 TRY",
+        display_text=f"Uygulanmıyor\\nFAST limiti {fast_limit} TRY",
         band="TRANSFER_3",
     )
     rows += _add_service_status(
@@ -1427,10 +1456,8 @@ def _isbank_card_contract_rows() -> List[SupplementalRow]:
 
 
 def _yk_comparison_policy_rows() -> List[SupplementalRow]:
-    fast_html = _fetch_html(YAPIKREDI_FAST_URL, must_contain=("100.000", "Yapı Kredi Mobil", "İnternet Şubesi"))
-    text = _norm(BeautifulSoup(fast_html, "html.parser").get_text(" ", strip=True))
-    if "100.000" not in text and "100000" not in text:
-        raise SupplementalSourceError("Yapı Kredi FAST limit/kanal doğrulaması başarısız.")
+    fast_html = _fetch_html(YAPIKREDI_FAST_URL, must_contain=("FAST", "Yapı Kredi Mobil", "İnternet Şubesi"))
+    _yapikredi_fast_limit(fast_html)
 
     rows: List[SupplementalRow] = []
     rows += _add_service_status(
