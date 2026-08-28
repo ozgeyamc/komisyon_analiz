@@ -2,7 +2,10 @@ name: Günlük Komisyon Güncelleme
 
 on:
   schedule:
-    - cron: "00 05 * * *"
+    # Her gün Türkiye saatiyle 08:17
+    # Saat başı GitHub Actions yoğunluğundan kaçınmak için :17 seçildi.
+    - cron: "17 8 * * *"
+      timezone: "Europe/Istanbul"
 
   workflow_dispatch:
     inputs:
@@ -106,7 +109,6 @@ jobs:
           TEST_MODE="${{ github.event.inputs.test_mail }}"
 
           if [ "$TEST_MODE" = "true" ]; then
-
             python - <<'PY'
           from notify import check_and_notify
 
@@ -118,7 +120,6 @@ jobs:
           PY
 
           elif [ -f komisyonlar_guncel_eski.xlsx ]; then
-
             python - <<'PY'
           from notify import check_and_notify
 
