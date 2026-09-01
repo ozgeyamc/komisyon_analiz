@@ -5106,53 +5106,20 @@ def _audit_document_statement_research(
     Garanti BBVA için önemli not:
     Web sayfasında "TL Hesaplar" ve "YP Hesaplar" birer alt başlıktır;
     MASRAF alanının parçası değildir.
-
-    Örneğin gerçek MASRAF değerleri:
-      - KMH Ekstresi
-      - Vadesiz TL Hesap Ekstresi- Gerçek Kişiler
-      - Vadesiz YP Hesap Ekstresi - Gerçek Kişiler
-
-    Bu nedenle eski sürümde kullanılan:
-      "TL Hesaplar - KMH Ekstresi"
-    gibi birleşik isimler eşleşmiyordu.
     """
 
     if spec.service not in _DOCUMENT_STATEMENT_SERVICES:
         return None
 
-    # ------------------------------------------------------------------
-    # YARDIMCI FONKSİYONLAR
-    # ------------------------------------------------------------------
-
     def clean_amount(value: str) -> str:
-        """
-        Yapı Kredi gibi kaynaklardaki:
-            45 TL -
-            - -
-        benzeri gösterimleri temizler.
-        """
-        parts = [
-            part
-            for part in _clean(value).split()
-            if part != "-"
-        ]
-
+        parts = [part for part in _clean(value).split() if part != "-"]
         return _display_amount(" ".join(parts)) if parts else ""
 
     def compact(row: FeeRow) -> str:
-        """
-        Bir FeeRow içindeki asgari/azami tutarı tek satırlık güvenli
-        gösterime çevirir.
-        """
         low = clean_amount(row.asgari_tutar)
         high = clean_amount(row.azami_tutar)
-
         if low and high:
-            if _norm(low) == _norm(high):
-                return low
-
-            return f"{low} - {high}"
-
+            return low if _norm(low) == _norm(high) else f"{low} - {high}"
         return high or low
 
     def exact_rows(
@@ -5161,25 +5128,15 @@ def _audit_document_statement_research(
         kategori: str = "",
         numeric_only: bool = True,
     ) -> List[FeeRow]:
-        """
-        Tam MASRAF adına göre eşleşme.
-
-        Kategori verilmişse kategori içinde de ilgili başlığın geçmesini
-        zorunlu tutar.
-        """
         wanted_fee = _norm(masraf)
         wanted_category = _norm(kategori)
-
         return _primary_first(
             _audit_rows(
                 rows,
                 bank,
                 lambda row: (
                     _norm(row.masraf) == wanted_fee
-                    and (
-                        not wanted_category
-                        or wanted_category in _norm(row.kategori)
-                    )
+                    and (not wanted_category or wanted_category in _norm(row.kategori))
                 ),
                 numeric_only=numeric_only,
             )
@@ -5191,29 +5148,10 @@ def _audit_document_statement_research(
         kategori: str = "",
         numeric_only: bool = True,
     ) -> Optional[FeeRow]:
-        found_rows = exact_rows(
-            masraf,
-            kategori=kategori,
-            numeric_only=numeric_only,
-        )
-
+        found_rows = exact_rows(masraf, kategori=kategori, numeric_only=numeric_only)
         return found_rows[0] if found_rows else None
 
-    def safe_candidates(
-        predicate,
-        *,
-        numeric_only: bool = True,
-    ) -> List[FeeRow]:
-        """
-        Exact eşleşmenin kaynak biçimi nedeniyle başarısız olduğu yerlerde
-        kontrollü semantic fallback.
-
-        Burada yine:
-        - aynı banka,
-        - doğru ürün ailesi,
-        - gerekiyorsa numeric ücret
-        koşulları korunur.
-        """
+    def safe_candidates(predicate, *, numeric_only: bool = True) -> List[FeeRow]:
         return _primary_first(
             _audit_rows(
                 rows,
@@ -5223,120 +5161,54 @@ def _audit_document_statement_research(
             )
         )
 
-    def first_safe(
-        predicate,
-        *,
-        numeric_only: bool = True,
-    ) -> Optional[FeeRow]:
-        candidates = safe_candidates(
-            predicate,
-            numeric_only=numeric_only,
-        )
-
+    def first_safe(predicate, *, numeric_only: bool = True) -> Optional[FeeRow]:
+        candidates = safe_candidates(predicate, numeric_only=numeric_only)
         return candidates[0] if candidates else None
 
-    def published_gap(
-        text: str = "Karşılaştırılabilir ayrı tarife yayımlanmıyor",
-    ):
-        return (
-            text,
-            None,
-            "PUBLICATION_STATUS",
-        )
+    def published_gap(text: str = "Karşılaştırılabilir ayrı tarife yayımlanmıyor"):
+        return (text, None, "PUBLICATION_STATUS")
 
     service = spec.service
 
     # ==================================================================
     # VADESİZ MEVDUAT EKSTRESİ
     # ==================================================================
-    #
-    # Garanti'de:
-    #
-    #     Ekstre Ücreti
-    #       TL Hesaplar
-    #         KMH Ekstresi
-    #         Vadesiz TL Hesap Ekstresi- Gerçek Kişiler
-    #
-    #       YP Hesaplar
-    #         Vadesiz YP Hesap Ekstresi - Gerçek Kişiler
-    #
-    # "TL Hesaplar" / "YP Hesaplar" MASRAF'ın parçası DEĞİLDİR.
-    #
-    # Eski hata burada oluşuyordu.
-    # ==================================================================
-
-    if service in {
-        "DOC_VADESIZ_TL",
-        "DOC_VADESIZ_YP",
-    }:
-
-        # --------------------------------------------------------------
-        # GARANTİ BBVA
-        # --------------------------------------------------------------
+    if service in {"DOC_VADESIZ_TL", "DOC_VADESIZ_YP"}:
         if bank == "GARANTİ":
-
             if service == "DOC_VADESIZ_TL":
                 row = exact(
                     "Vadesiz TL Hesap Ekstresi- Gerçek Kişiler",
                     kategori="Ekstre Ücreti",
                 )
-
-                # Tire/boşluk veya scraper kategori formatında küçük değişiklik
-                # olursa güvenli fallback.
                 if row is None:
                     row = first_safe(
                         lambda r: (
-                            "vadesiz tl hesap ekstresi"
-                            in _norm(r.masraf)
-                            and "gercek kisi"
-                            in _norm(r.masraf)
-                            and "yp hesap"
-                            not in _norm(r.masraf)
-                            and "ticari"
-                            not in _norm(r.text)
-                            and "firma kullanim"
-                            not in _norm(r.text)
+                            "vadesiz tl hesap ekstresi" in _norm(r.masraf)
+                            and "gercek kisi" in _norm(r.masraf)
+                            and "yp hesap" not in _norm(r.masraf)
+                            and "ticari" not in _norm(r.text)
+                            and "firma kullanim" not in _norm(r.text)
                         )
                     )
-
             else:
                 row = exact(
                     "Vadesiz YP Hesap Ekstresi - Gerçek Kişiler",
                     kategori="Ekstre Ücreti",
                 )
-
                 if row is None:
                     row = first_safe(
                         lambda r: (
-                            "vadesiz yp hesap ekstresi"
-                            in _norm(r.masraf)
-                            and "gercek kisi"
-                            in _norm(r.masraf)
-                            and "ticari"
-                            not in _norm(r.text)
-                            and "firma kullanim"
-                            not in _norm(r.text)
+                            "vadesiz yp hesap ekstresi" in _norm(r.masraf)
+                            and "gercek kisi" in _norm(r.masraf)
+                            and "ticari" not in _norm(r.text)
+                            and "firma kullanim" not in _norm(r.text)
                         )
                     )
 
-            # Garanti kaynağı bu ücreti Mobil/Şube diye ayırmıyor.
-            # Karşılaştırma tasarımında ilk hücrede "Genel" açıklaması
-            # gösteriliyor; Şube hücresine aynı rakam ikinci kez kopyalanmıyor.
             if wanted_channel == "SUBE":
-                return published_gap(
-                    "Şube için ayrı tarife yayımlanmıyor"
-                )
-
+                return published_gap("Şube için ayrı tarife yayımlanmıyor")
             if row is None:
-                return (
-                    _source_gap_text(
-                        spec,
-                        bank,
-                        wanted_channel,
-                    ),
-                    None,
-                    "SOURCE_GAP",
-                )
+                return (_source_gap_text(spec, bank, wanted_channel), None, "SOURCE_GAP")
 
             return (
                 "Genel / kanal belirtilmemiş:\n"
@@ -5347,129 +5219,54 @@ def _audit_document_statement_research(
                 "NUMERIC",
             )
 
-        # --------------------------------------------------------------
-        # İŞ BANKASI
-        # --------------------------------------------------------------
         if bank == "İŞBANKASI":
-
             if wanted_channel == "MOBIL":
                 row = exact(
                     "Ekstre - TP/YP",
-                    kategori=(
-                        "Mevduat Hesapları - "
-                        "Ekstre - Bankamatik"
-                    ),
+                    kategori="Mevduat Hesapları - Ekstre - Bankamatik",
                     numeric_only=False,
                 )
-
                 if row is None:
-                    return (
-                        _source_gap_text(
-                            spec,
-                            bank,
-                            wanted_channel,
-                        ),
-                        None,
-                        "SOURCE_GAP",
-                    )
-
-                return (
-                    "Bankamatik (Mobil değil):\n"
-                    "Ücretsiz / 0 TRY",
-                    row,
-                    "NUMERIC",
-                )
+                    return (_source_gap_text(spec, bank, wanted_channel), None, "SOURCE_GAP")
+                return ("Bankamatik (Mobil değil):\nÜcretsiz / 0 TRY", row, "NUMERIC")
 
             row = exact(
                 "Ekstre - TP/YP",
-                kategori=(
-                    "Mevduat Hesapları - "
-                    "Ekstre - Şube"
-                ),
+                kategori="Mevduat Hesapları - Ekstre - Şube",
             )
-
             if row is None:
-                return (
-                    _source_gap_text(
-                        spec,
-                        bank,
-                        wanted_channel,
-                    ),
-                    None,
-                    "SOURCE_GAP",
-                )
-
-            return (
-                f"Şube:\n"
-                f"{compact(row)}\n"
-                "Sayfa başına\n"
-                "BSMV hariç",
-                row,
-                "NUMERIC",
-            )
+                return (_source_gap_text(spec, bank, wanted_channel), None, "SOURCE_GAP")
+            return (f"Şube:\n{compact(row)}\nSayfa başına\nBSMV hariç", row, "NUMERIC")
 
         return published_gap()
 
     # ==================================================================
     # BİREYSEL KMH HESAP ÖZETİ
     # ==================================================================
-
     if service == "DOC_KMH_BIREYSEL":
-
-        # --------------------------------------------------------------
-        # GARANTİ BBVA
-        # --------------------------------------------------------------
         if bank == "GARANTİ":
-
-            # DÜZELTME:
-            # Eski:
-            #   TL Hesaplar - KMH Ekstresi
-            #
-            # Gerçek MASRAF:
-            #   KMH Ekstresi
-            row = exact(
-                "KMH Ekstresi",
-                kategori="Ekstre Ücreti",
-            )
-
+            row = exact("KMH Ekstresi", kategori="Ekstre Ücreti")
             if row is None:
                 row = first_safe(
                     lambda r: (
-                        "kmh ekstresi"
-                        in _norm(r.masraf)
-                        and "ticari"
-                        not in _norm(r.text)
-                        and "firma kullanim"
-                        not in _norm(r.text)
-                        and "basili ticari"
-                        not in _norm(r.text)
+                        "kmh ekstresi" in _norm(r.masraf)
+                        and "ticari" not in _norm(r.text)
+                        and "firma kullanim" not in _norm(r.text)
+                        and "basili ticari" not in _norm(r.text)
                     )
                 )
-
             if row:
                 return (
-                    f"{compact(row)}\n"
-                    "Kullanılan aylarda aylık\n"
-                    "BSMV dahil",
+                    f"{compact(row)}\nKullanılan aylarda aylık\nBSMV dahil",
                     row,
                     "NUMERIC",
                 )
 
-        # --------------------------------------------------------------
-        # YAPI KREDİ
-        # --------------------------------------------------------------
         elif bank == "YAPIKREDI":
-
-            row = exact(
-                "Ekstre Masrafı - KMH Hesap Özeti "
-                "(Esnek Hesap Özeti)"
-            )
-
+            row = exact("Ekstre Masrafı - KMH Hesap Özeti (Esnek Hesap Özeti)")
             if row:
                 return (
-                    f"{compact(row)} / hesap\n"
-                    "Borç devam eden aylarda\n"
-                    "BSMV alınmıyor",
+                    f"{compact(row)} / hesap\nBorç devam eden aylarda\nBSMV alınmıyor",
                     row,
                     "NUMERIC",
                 )
@@ -5479,637 +5276,220 @@ def _audit_document_statement_research(
     # ==================================================================
     # KREDİ KARTI GEÇMİŞ DÖNEM HESAP ÖZETİ
     # ==================================================================
-
     if service == "DOC_KK_GECMIS":
-
-        # --------------------------------------------------------------
-        # GARANTİ BBVA
-        # --------------------------------------------------------------
         if bank == "GARANTİ":
-
-            # 1) Önce resmî "Şubeden Hesap Ekstresi" tablosundaki tam isim.
             row = exact(
                 "Kredi Kartı Geçmiş Ekstre Ücreti",
                 kategori="Şubeden Hesap Ekstresi",
             )
-
-            # 2) Bazı scraper çıktılarında kategori yolu farklı gelebiliyor.
-            #    MASRAF tam adı aynıysa yine güvenlidir.
             if row is None:
-                row = exact(
-                    "Kredi Kartı Geçmiş Ekstre Ücreti",
-                )
-
-            # 3) Garanti'nin başka ücret tablosunda aynı hizmet:
-            #
-            #       Kredi Kartı Geçmiş Ekstre Üc.
-            #
-            #    olarak kısaltılmış biçimde yayımlanabiliyor.
+                row = exact("Kredi Kartı Geçmiş Ekstre Ücreti")
             if row is None:
-                row = exact(
-                    "Kredi Kartı Geçmiş Ekstre Üc.",
-                )
-
-            # 4) Son güvenli fallback:
-            #    yalnız bireysel kredi kartı + geçmiş + ekstre geçen satır.
+                row = exact("Kredi Kartı Geçmiş Ekstre Üc.")
             if row is None:
                 candidates = safe_candidates(
                     lambda r: (
-                        "kredi kart"
-                        in _norm(r.masraf)
-                        and "gecmis"
-                        in _norm(r.masraf)
-                        and "ekstre"
-                        in _norm(r.masraf)
-                        and "ticari"
-                        not in _norm(r.text)
-                        and "firma kullanim"
-                        not in _norm(r.text)
-                        and "business"
-                        not in _norm(r.text)
+                        "kredi kart" in _norm(r.masraf)
+                        and "gecmis" in _norm(r.masraf)
+                        and "ekstre" in _norm(r.masraf)
+                        and "ticari" not in _norm(r.text)
+                        and "firma kullanim" not in _norm(r.text)
+                        and "business" not in _norm(r.text)
                     )
                 )
-
                 if candidates:
-                    # Şubeden Hesap Ekstresi satırını diğer aynı isimli
-                    # kayıtlardan öncele.
                     candidates.sort(
                         key=lambda r: (
-                            0
-                            if (
-                                "subeden hesap ekstresi"
-                                in _norm(r.kategori)
-                            )
-                            else 1,
-                            0
-                            if (
-                                _norm(r.masraf)
-                                == _norm(
-                                    "Kredi Kartı "
-                                    "Geçmiş Ekstre Ücreti"
-                                )
-                            )
-                            else 1,
-                            0
-                            if "bsmv dahil"
-                            in _norm(r.aciklama)
-                            else 1,
-                            1
-                            if _is_supplemental_row(r)
-                            else 0,
+                            0 if "subeden hesap ekstresi" in _norm(r.kategori) else 1,
+                            0 if _norm(r.masraf) == _norm("Kredi Kartı Geçmiş Ekstre Ücreti") else 1,
+                            0 if "bsmv dahil" in _norm(r.aciklama) else 1,
+                            1 if _is_supplemental_row(r) else 0,
                         )
                     )
-
                     row = candidates[0]
 
             if row:
                 return (
-                    "1 yıldan eski: "
-                    f"azami {compact(row)}\n"
-                    "BSMV dahil",
+                    f"1 yıldan eski: azami {compact(row)}\nBSMV dahil",
                     row,
                     "NUMERIC",
                 )
 
-        # --------------------------------------------------------------
-        # İŞ BANKASI
-        # --------------------------------------------------------------
         elif bank == "İŞBANKASI":
-
-            row = exact(
-                "Geçmiş Dönem Kredi Kartı "
-                "Hesap Özeti Ücreti-Türkiye Kredi Kartları"
-            )
-
+            row = exact("Geçmiş Dönem Kredi Kartı Hesap Özeti Ücreti-Türkiye Kredi Kartları")
             if row:
                 return (
-                    "1 yıldan eski: "
-                    f"{compact(row)} / hesap özeti\n"
-                    "BSMV hariç",
+                    f"1 yıldan eski: {compact(row)} / hesap özeti\nBSMV hariç",
                     row,
                     "NUMERIC",
                 )
 
-        # --------------------------------------------------------------
-        # YAPI KREDİ
-        # --------------------------------------------------------------
         elif bank == "YAPIKREDI":
-
-            row = exact(
-                "Diğer Ücretler - Geçmiş Dönem Ekstre "
-                "Arşiv Araştırma Ücreti "
-                "(kart hamilinin talebinin olması halinde)"
-            )
-
+            row = exact("Diğer Ücretler - Geçmiş Dönem Ekstre Arşiv Araştırma Ücreti (kart hamilinin talebinin olması halinde)")
             if row:
-                return (
-                    f"azami {compact(row)}\n"
-                    "BSMV dahil",
-                    row,
-                    "NUMERIC",
-                )
+                return (f"azami {compact(row)}\nBSMV dahil", row, "NUMERIC")
 
         return published_gap()
 
-    # ==================================================================
-    # ARŞİV ARAŞTIRMA – GENEL BELGE
-    # ==================================================================
-
+    # Aşağıdaki servislerde mevcut davranışı koru
     if service == "DOC_ARSIV_GENEL":
-
-        # --------------------------------------------------------------
-        # GARANTİ BBVA
-        # --------------------------------------------------------------
         if bank == "GARANTİ":
-
-            row = exact(
-                "Belge ve Bilgilendirme Ücreti - "
-                "Arşiv Araştırma Ücreti",
-                kategori="Belge ve Bilgilendirme",
-            )
-
+            row = exact("Belge ve Bilgilendirme Ücreti - Arşiv Araştırma Ücreti", kategori="Belge ve Bilgilendirme")
             if row:
                 amounts = [
-                    _display_amount(
-                        f"{amount} TRY"
-                    )
-                    for amount in re.findall(
-                        r"([0-9]+(?:[.,][0-9]+)?)\s*tl",
-                        _norm(row.aciklama),
-                        flags=re.I,
-                    )
+                    _display_amount(f"{amount} TRY")
+                    for amount in re.findall(r"([0-9]+(?:[.,][0-9]+)?)\s*tl", _norm(row.aciklama), flags=re.I)
                 ]
-
                 if len(amounts) < 2:
-                    return (
-                        _source_gap_text(
-                            spec,
-                            bank,
-                            wanted_channel,
-                        ),
-                        None,
-                        "SOURCE_GAP",
-                    )
-
-                older = amounts[0]
-                oldest = amounts[1]
-
+                    return (_source_gap_text(spec, bank, wanted_channel), None, "SOURCE_GAP")
                 return (
                     "Son 1 yıl: Ücretsiz\n"
-                    f"1–3 yıl: {older}\n"
-                    f"3 yıldan eski: {oldest}\n"
+                    f"1–3 yıl: {amounts[0]}\n"
+                    f"3 yıldan eski: {amounts[1]}\n"
                     "BSMV hariç",
                     row,
                     "NUMERIC",
                 )
 
-        # --------------------------------------------------------------
-        # İŞ BANKASI
-        # --------------------------------------------------------------
         elif bank == "İŞBANKASI":
-
-            document = exact(
-                "Sözleşme, dekont vb. doküman talebi",
-                kategori=(
-                    "Mevduat Hesapları - "
-                    "Özel Rapor Ücretleri"
-                ),
-            )
-
-            notice = exact(
-                "Geçmiş Dönem Bankacılık "
-                "İşlemleri Bildirimi"
-            )
-
+            document = exact("Sözleşme, dekont vb. doküman talebi", kategori="Mevduat Hesapları - Özel Rapor Ücretleri")
+            notice = exact("Geçmiş Dönem Bankacılık İşlemleri Bildirimi")
             if document and notice:
                 return (
-                    "Belge talebi (>1 yıl): "
-                    f"{compact(document)}\n"
-                    "İşlem bildirimi (>1 yıl): "
-                    f"{compact(notice)}\n"
+                    f"Belge talebi (>1 yıl): {compact(document)}\n"
+                    f"İşlem bildirimi (>1 yıl): {compact(notice)}\n"
                     "BSMV hariç",
                     document,
                     "NUMERIC",
                 )
-
         return published_gap()
-
-    # ==================================================================
-    # 1 YILDAN ESKİ DEKONT / EKSTRE
-    # ==================================================================
 
     if service == "DOC_ESKI_DEKONT_EKSTRE":
-
-        # --------------------------------------------------------------
-        # AKBANK
-        # --------------------------------------------------------------
         if bank == "AKBANK":
-
-            row = exact(
-                "1 Yıldan Eski İşlemlere Ait "
-                "Geçmişe Yönelik Dekont-Ekstre Verilmesi"
-            )
-
+            row = exact("1 Yıldan Eski İşlemlere Ait Geçmişe Yönelik Dekont-Ekstre Verilmesi")
             if row:
-                per_page = re.search(
-                    r"sayfa basina\s*"
-                    r"([0-9]+(?:[.,][0-9]+)?)\s*tl",
-                    _norm(row.aciklama),
-                    flags=re.I,
-                )
-
-                page_text = (
-                    _display_amount(
-                        f"{per_page.group(1)} TRY"
-                    )
-                    if per_page
-                    else ""
-                )
-
+                per_page = re.search(r"sayfa basina\s*([0-9]+(?:[.,][0-9]+)?)\s*tl", _norm(row.aciklama), flags=re.I)
+                page_text = _display_amount(f"{per_page.group(1)} TRY") if per_page else ""
                 value = f">1 yıl: {compact(row)}"
-
                 if page_text:
-                    value += (
-                        f"\n{page_text} / sayfa"
-                    )
-
+                    value += f"\n{page_text} / sayfa"
                 value += "\nBSMV hariç"
+                return (value, row, "NUMERIC")
 
-                return (
-                    value,
-                    row,
-                    "NUMERIC",
-                )
-
-        # --------------------------------------------------------------
-        # YAPI KREDİ
-        # --------------------------------------------------------------
         elif bank == "YAPIKREDI":
-
-            receipt = exact(
-                "Dekont Masrafı - "
-                "Geçmişe Yönelik Olarak Basılan"
-            )
-
-            statements = exact_rows(
-                "Ekstre Masrafı"
-            )
-
+            receipt = exact("Dekont Masrafı - Geçmişe Yönelik Olarak Basılan")
+            statements = exact_rows("Ekstre Masrafı")
             if receipt and len(statements) >= 2:
-
                 statement_fees: List[str] = []
-
                 for statement_row in statements:
                     fee = compact(statement_row)
-
-                    if (
-                        fee
-                        and fee
-                        not in statement_fees
-                    ):
+                    if fee and fee not in statement_fees:
                         statement_fees.append(fee)
 
-                value = (
-                    "Dekont (>1 yıl): "
-                    f"{compact(receipt)}"
-                )
-
+                value = f"Dekont (>1 yıl): {compact(receipt)}"
                 if statement_fees:
-                    value += (
-                        "\nEkstre (>1 yıl), "
-                        "yayımlanan tarifeler: "
-                        + " | ".join(statement_fees)
-                    )
-
-                value += (
-                    "\nSayfa başına; "
-                    "en fazla 10 sayfa\n"
-                    "BSMV hariç"
-                )
-
-                return (
-                    value,
-                    receipt,
-                    "NUMERIC",
-                )
-
+                    value += "\nEkstre (>1 yıl), yayımlanan tarifeler: " + " | ".join(statement_fees)
+                value += "\nSayfa başına; en fazla 10 sayfa\nBSMV hariç"
+                return (value, receipt, "NUMERIC")
         return published_gap()
-
-    # ==================================================================
-    # AYLIK HESAP ÖZETİ – POSTA
-    # ==================================================================
 
     if service == "DOC_AYLIK_POSTA":
-
         if bank == "AKBANK":
-
-            row = exact(
-                "Posta İle Aylık Hesap Özeti Gönderimi"
-            )
-
+            row = exact("Posta İle Aylık Hesap Özeti Gönderimi")
             if row:
-                return (
-                    f"{compact(row)}\n"
-                    "BSMV muaf",
-                    row,
-                    "NUMERIC",
-                )
-
+                return (f"{compact(row)}\nBSMV muaf", row, "NUMERIC")
         return published_gap()
 
-    # ==================================================================
-    # ARŞİV / ARAŞTIRMA – ŞUBE / BANKA BAZINDA
-    # ==================================================================
-
-    if service in {
-        "DOC_ARSIV_SUBE",
-        "DOC_ARSIV_BANKA",
-    }:
-
+    if service in {"DOC_ARSIV_SUBE", "DOC_ARSIV_BANKA"}:
         if bank != "İŞBANKASI":
             return published_gap()
 
         masraf = (
-            "Merkezden / Şubeden "
-            "Şube Bazında Yapılan - TP/YP"
+            "Merkezden / Şubeden Şube Bazında Yapılan - TP/YP"
             if service == "DOC_ARSIV_SUBE"
-            else
-            "Merkezden Banka Bazında Yapılan - TP/YP"
+            else "Merkezden Banka Bazında Yapılan - TP/YP"
         )
-
         row = exact(masraf)
-
         if row:
-            label = (
-                "Şube bazında"
-                if service == "DOC_ARSIV_SUBE"
-                else "Banka bazında"
-            )
-
-            return (
-                f"{label}: "
-                f"{compact(row)}\n"
-                "BSMV hariç",
-                row,
-                "NUMERIC",
-            )
-
-        return (
-            _source_gap_text(
-                spec,
-                bank,
-                wanted_channel,
-            ),
-            None,
-            "SOURCE_GAP",
-        )
-
-    # ==================================================================
-    # TİCARİ KMH HESAP ÖZETİ
-    # ==================================================================
+            label = "Şube bazında" if service == "DOC_ARSIV_SUBE" else "Banka bazında"
+            return (f"{label}: {compact(row)}\nBSMV hariç", row, "NUMERIC")
+        return (_source_gap_text(spec, bank, wanted_channel), None, "SOURCE_GAP")
 
     if service == "DOC_KMH_TICARI":
-
-        # --------------------------------------------------------------
-        # GARANTİ BBVA
-        # --------------------------------------------------------------
         if bank == "GARANTİ":
-
             row = exact(
-                "Avans Hesap "
-                "(Kredili Mevduat Hesabı) - "
-                "Belge ve Bilgilendirme Ücreti "
-                "(Ekstre Ücreti)",
+                "Avans Hesap (Kredili Mevduat Hesabı) - Belge ve Bilgilendirme Ücreti (Ekstre Ücreti)",
                 kategori="Firma Kullanım Amaçlı",
                 numeric_only=False,
             )
-
             if row:
-                return (
-                    "Gönderim maliyeti kadar\n"
-                    "Tutar değişken; "
-                    "sabit ücret yayımlanmıyor",
-                    row,
-                    "STATUS",
-                )
-
-        # --------------------------------------------------------------
-        # YAPI KREDİ
-        # --------------------------------------------------------------
+                return ("Gönderim maliyeti kadar\nTutar değişken; sabit ücret yayımlanmıyor", row, "STATUS")
         elif bank == "YAPIKREDI":
-
-            row = exact(
-                "Esnek Ticari Hesap - Faiz Oranı - "
-                "Basılı Ticari KMH Hesap Özeti "
-                "(Esnek Ticari Hesap Özeti Ücreti)"
-            )
-
+            row = exact("Esnek Ticari Hesap - Faiz Oranı - Basılı Ticari KMH Hesap Özeti (Esnek Ticari Hesap Özeti Ücreti)")
             if row:
-                return (
-                    f"{compact(row)} / sayfa",
-                    row,
-                    "NUMERIC",
-                )
-
+                return (f"{compact(row)} / sayfa", row, "NUMERIC")
         return published_gap()
-
-    # ==================================================================
-    # TİCARİ KART GEÇMİŞ DÖNEM EKSTRESİ
-    # ==================================================================
 
     if service == "DOC_TICARI_KART_GECMIS":
-
         if bank == "YAPIKREDI":
-
-            row = exact(
-                "Diğer Ücretler - "
-                "Ticari Kart Geçmiş Dönem Ekstre Ücreti"
-            )
-
+            row = exact("Diğer Ücretler - Ticari Kart Geçmiş Dönem Ekstre Ücreti")
             if row:
-                return (
-                    f"{compact(row)} / sayfa\n"
-                    "BSMV hariç",
-                    row,
-                    "NUMERIC",
-                )
-
+                return (f"{compact(row)} / sayfa\nBSMV hariç", row, "NUMERIC")
         return published_gap()
-
-    # ==================================================================
-    # YATIRIM HESABI EKSTRESİ
-    # ==================================================================
 
     if service == "DOC_YATIRIM_EKSTRE":
-
         if bank == "İŞBANKASI":
-
-            row = exact(
-                "Ekstre - TP",
-                kategori=(
-                    "Mevduat Hesapları - "
-                    "Ekstre - Yatırım Hesabı Ekstre"
-                ),
-            )
-
+            row = exact("Ekstre - TP", kategori="Mevduat Hesapları - Ekstre - Yatırım Hesabı Ekstre")
             if row:
-                return (
-                    f"{compact(row)} / gönderi\n"
-                    "BSMV hariç",
-                    row,
-                    "NUMERIC",
-                )
-
+                return (f"{compact(row)} / gönderi\nBSMV hariç", row, "NUMERIC")
         return published_gap()
-
-    # ==================================================================
-    # TİCARİ MÜŞTERİ AYLIK HESAP ÖZETİ
-    # ==================================================================
 
     if service == "DOC_TICARI_AYLIK":
-
         if bank == "AKBANK":
-
-            row = exact(
-                "Aylık Hesap Özeti (Ticari Müşteri)"
-            )
-
+            row = exact("Aylık Hesap Özeti (Ticari Müşteri)")
             if row:
-                return (
-                    f"asgari {compact(row)} / hesap\n"
-                    "BSMV dahil",
-                    row,
-                    "NUMERIC",
-                )
-
+                return (f"asgari {compact(row)} / hesap\nBSMV dahil", row, "NUMERIC")
         return published_gap()
-
-    # ==================================================================
-    # TİCARİ KART BASILI EKSTRE
-    # ==================================================================
 
     if service == "DOC_TICARI_KART_BASILI":
-
         if bank == "GARANTİ":
-
-            row = exact(
-                "Basılı Ekstre Ücreti",
-                kategori="Firma Kullanım Amaçlı",
-            )
-
+            row = exact("Basılı Ekstre Ücreti", kategori="Firma Kullanım Amaçlı")
             if row:
-                return (
-                    f"azami {compact(row)} / sayfa\n"
-                    "BSMV hariç",
-                    row,
-                    "NUMERIC",
-                )
-
+                return (f"azami {compact(row)} / sayfa\nBSMV hariç", row, "NUMERIC")
         return published_gap()
-
-    # ==================================================================
-    # TİCARİ KART EKSTRE GÖNDERİM
-    # ==================================================================
 
     if service == "DOC_TICARI_KART_GONDERIM":
-
         if bank == "GARANTİ":
-
-            row = exact(
-                "Diğer Ücretler - Ekstre Gönderim Ücreti",
-                kategori="Firma Kullanım Amaçlı",
-            )
-
+            row = exact("Diğer Ücretler - Ekstre Gönderim Ücreti", kategori="Firma Kullanım Amaçlı")
             if row:
-                return (
-                    f"azami {compact(row)} / sayfa\n"
-                    "BSMV hariç",
-                    row,
-                    "NUMERIC",
-                )
-
+                return (f"azami {compact(row)} / sayfa\nBSMV hariç", row, "NUMERIC")
         return published_gap()
-
-    # ==================================================================
-    # TİCARİ HESAP BASILI EKSTRE
-    # ==================================================================
 
     if service == "DOC_TICARI_HESAP_BASILI":
-
         if bank == "AKBANK":
-
-            row = exact(
-                "4.6.1 Basılı Ekstre Gönderimi (2)",
-                kategori="EK KAYNAK - Akbank Ticari",
-            )
-
+            row = exact("4.6.1 Basılı Ekstre Gönderimi (2)", kategori="EK KAYNAK - Akbank Ticari")
             if row:
-                return (
-                    f"{compact(row)} / sayfa\n"
-                    "Posta/kurye maliyeti ilave\n"
-                    "BSMV hariç",
-                    row,
-                    "NUMERIC",
-                )
-
+                return (f"{compact(row)} / sayfa\nPosta/kurye maliyeti ilave\nBSMV hariç", row, "NUMERIC")
         return published_gap()
 
-    # ==================================================================
-    # ÜYE İŞYERİ / POS – EKSTRE GÖNDERİMİ
-    # ==================================================================
-
     if service == "DOC_POS_EKSTRE":
-
         if bank == "GARANTİ":
-
-            row = exact(
-                "Ekstre Gönderim Ücreti",
-                kategori="Üye İşyeri Ücretleri",
-            )
-
+            row = exact("Ekstre Gönderim Ücreti", kategori="Üye İşyeri Ücretleri")
             if row:
                 amounts = [
-                    _display_amount(
-                        f"{amount} TRY"
-                    )
-                    for amount in re.findall(
-                        r"([0-9]+(?:[.,][0-9]+)?)\s*tl",
-                        _norm(row.aciklama),
-                        flags=re.I,
-                    )
+                    _display_amount(f"{amount} TRY")
+                    for amount in re.findall(r"([0-9]+(?:[.,][0-9]+)?)\s*tl", _norm(row.aciklama), flags=re.I)
                 ]
-
                 if len(amounts) < 2:
-                    return (
-                        _source_gap_text(
-                            spec,
-                            bank,
-                            wanted_channel,
-                        ),
-                        None,
-                        "SOURCE_GAP",
-                    )
-
-                first = amounts[0]
-                second = amounts[1]
-
-                value = (
-                    f"0–20 g: {first}"
-                    f"\n20–50 g: {second}"
-                    "\nBSMV dahil"
-                )
-
+                    return (_source_gap_text(spec, bank, wanted_channel), None, "SOURCE_GAP")
                 return (
-                    value,
+                    f"0–20 g: {amounts[0]}\n20–50 g: {amounts[1]}\nBSMV dahil",
                     row,
                     "NUMERIC",
                 )
-
         return published_gap()
 
     return published_gap()
-
- 
 """
 komisyonlar_guncel.xlsx içindeki banka ücretlerini ortak bir masraf sözlüğüne
 çevirip KARŞILAŞTIRMA sayfasını otomatik üretir.
