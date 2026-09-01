@@ -5089,8 +5089,7 @@ _DOCUMENT_STATEMENT_SERVICES = {
     "DOC_TICARI_HESAP_BASILI",
     "DOC_POS_EKSTRE",
 }
-
-    def _audit_document_statement_research(
+def _audit_document_statement_research(
     rows: Sequence[FeeRow],
     bank: str,
     spec: RowSpec,
