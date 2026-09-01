@@ -6112,10 +6112,6 @@ def _audit_document_statement_research(
 
     return published_gap()
 
-
-Ozge Yamac (Kitle Musteri Ve Urun) <OzgeYam@garantibbva.com.tr> şunları yazdı (1 Eyl 2026 08:39):
-Sınıflandırma: Açık / Kişisel Veri İçermez
- 
  
 """
 komisyonlar_guncel.xlsx içindeki banka ücretlerini ortak bir masraf sözlüğüne
