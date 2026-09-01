@@ -15014,6 +15014,3 @@ def update_comparison_sheet(excel_path: str = "komisyonlar_guncel.xlsx") -> Dict
         "possible_cells": possible_cells,
     }
 
-
-if __name__ == "__main__":
-    print(update_comparison_sheet())
