@@ -1,6 +1,6 @@
 """
-Komisyon değişikliklerini tespit edip mail atan modül.
-Microsoft 365 / Outlook SMTP uyumlu.
+Komisyon değişikliklerini tespit edip
+Microsoft 365 / Outlook üzerinden mail atan modül.
 """
 
 import os
@@ -69,7 +69,6 @@ def detect_changes(
     ]
 
     if not key_cols:
-        print("[notify] Karşılaştırma için ortak anahtar kolon bulunamadı.")
         return pd.DataFrame()
 
     old_indexed = (
@@ -88,9 +87,9 @@ def detect_changes(
 
     for idx in new_indexed.index:
 
-        # -------------------------------------------------
+        # =================================================
         # YENİ SATIR
-        # -------------------------------------------------
+        # =================================================
 
         if idx not in old_indexed.index:
 
@@ -111,9 +110,9 @@ def detect_changes(
 
             degisiklikler.append(row)
 
-        # -------------------------------------------------
-        # MEVCUT SATIRDA DEĞİŞİKLİK
-        # -------------------------------------------------
+        # =================================================
+        # MEVCUT SATIR
+        # =================================================
 
         else:
 
@@ -164,9 +163,13 @@ def detect_changes(
         for item in degisiklikler:
 
             if isinstance(item, pd.Series):
-                frames.append(item.to_frame().T)
+                frames.append(
+                    item.to_frame().T
+                )
             else:
-                frames.append(pd.DataFrame([item]))
+                frames.append(
+                    pd.DataFrame([item])
+                )
 
         result = pd.concat(
             frames,
@@ -177,9 +180,11 @@ def detect_changes(
 
         front_cols = [
             c
-            for c in key_cols
-            + value_cols
-            + ["DEĞİŞİKLİK"]
+            for c in (
+                key_cols
+                + value_cols
+                + ["DEĞİŞİKLİK"]
+            )
             if c in all_cols
         ]
 
@@ -206,7 +211,9 @@ def detect_changes(
 # HTML TABLO
 # =========================================================
 
-def build_html_table(df: pd.DataFrame) -> str:
+def build_html_table(
+    df: pd.DataFrame
+) -> str:
 
     rows_html = ""
 
@@ -224,48 +231,35 @@ def build_html_table(df: pd.DataFrame) -> str:
         )
 
         cells = "".join(
-            f"""
-            <td style="
-                padding:6px 10px;
-                border:1px solid #ddd
-            ">
-                {row.get(c, '')}
-            </td>
-            """
+            f"<td style='padding:6px 10px;"
+            f"border:1px solid #ddd'>"
+            f"{row.get(c, '')}</td>"
             for c in df.columns
         )
 
         rows_html += (
             f"<tr style='background:{renk}'>"
-            f"{cells}"
-            f"</tr>"
+            f"{cells}</tr>"
         )
 
     headers = "".join(
-        f"""
-        <th style="
-            padding:8px 10px;
-            background:#1a3c5e;
-            color:white;
-            border:1px solid #ddd
-        ">
-            {c}
-        </th>
-        """
+        f"<th style='padding:8px 10px;"
+        f"background:#1a3c5e;"
+        f"color:white;"
+        f"border:1px solid #ddd'>"
+        f"{c}</th>"
         for c in df.columns
     )
 
     return f"""
-    <table style="
+    <table style='
         border-collapse:collapse;
         font-family:Arial,sans-serif;
         font-size:13px;
         width:100%
-    ">
+    '>
         <thead>
-            <tr>
-                {headers}
-            </tr>
+            <tr>{headers}</tr>
         </thead>
 
         <tbody>
@@ -285,10 +279,6 @@ def send_mail(
     test_mode: bool = False
 ):
 
-    # -----------------------------------------------------
-    # GitHub Secrets
-    # -----------------------------------------------------
-
     mail_user = os.environ["MAIL_USER"].strip()
     mail_pass = os.environ["MAIL_PASS"].strip()
 
@@ -297,24 +287,6 @@ def send_mail(
         for adres in os.environ["MAIL_TO"].split(",")
         if adres.strip()
     ]
-
-    # Outlook / Microsoft 365
-    smtp_host = os.getenv(
-        "SMTP_HOST",
-        "smtp.office365.com"
-    )
-
-    smtp_port = int(
-        os.getenv(
-            "SMTP_PORT",
-            "587"
-        )
-    )
-
-    if not mail_to:
-        raise ValueError(
-            "MAIL_TO boş. En az bir alıcı tanımlanmalı."
-        )
 
     # =====================================================
     # TEST MAILİ
@@ -328,12 +300,9 @@ def send_mail(
 
         html_body = """
         <html>
-        <body style="
-            font-family:Arial,sans-serif;
-            color:#333
-        ">
+        <body style='font-family:Arial,sans-serif;color:#333'>
 
-            <h2 style="color:#1a3c5e">
+            <h2 style='color:#1a3c5e'>
                 ✅ Test Bildirimi
             </h2>
 
@@ -344,16 +313,13 @@ def send_mail(
 
             <p>
                 Bu mail Microsoft 365 / Outlook
-                üzerinden gönderilmiştir.
+                hesabı üzerinden gönderilmiştir.
             </p>
 
-            <p style="
-                color:#888;
-                font-size:12px
-            ">
+            <p style='color:#888;font-size:12px'>
                 Bu bir test mailidir.
-                Gerçek değişiklik olduğunda otomatik
-                bildirim gelecektir.
+                Gerçek değişiklik olduğunda
+                otomatik bildirim gelecektir.
             </p>
 
         </body>
@@ -379,12 +345,9 @@ def send_mail(
 
         html_body = f"""
         <html>
-        <body style="
-            font-family:Arial,sans-serif;
-            color:#333
-        ">
+        <body style='font-family:Arial,sans-serif;color:#333'>
 
-            <h2 style="color:#1a3c5e">
+            <h2 style='color:#1a3c5e'>
                 Komisyon Değişiklik Bildirimi
             </h2>
 
@@ -398,10 +361,7 @@ def send_mail(
 
             <br>
 
-            <p style="
-                color:#888;
-                font-size:12px
-            ">
+            <p style='color:#888;font-size:12px'>
                 Güncel Excel dosyası ekte
                 yer almaktadır.
             </p>
@@ -411,7 +371,7 @@ def send_mail(
         """
 
     # =====================================================
-    # MAIL MESAJI
+    # MESAJ
     # =====================================================
 
     msg = MIMEMultipart("mixed")
@@ -434,7 +394,10 @@ def send_mail(
 
     if os.path.exists(new_excel_path):
 
-        with open(new_excel_path, "rb") as f:
+        with open(
+            new_excel_path,
+            "rb"
+        ) as f:
 
             part = MIMEBase(
                 "application",
@@ -454,19 +417,10 @@ def send_mail(
             'attachment; filename="komisyonlar_guncel.xlsx"'
         )
 
-        msg.attach(
-            part
-        )
-
-    else:
-
-        print(
-            "[notify] UYARI: "
-            f"Ek dosya bulunamadı: {new_excel_path}"
-        )
+        msg.attach(part)
 
     # =====================================================
-    # OUTLOOK / MICROSOFT 365 SMTP
+    # MICROSOFT 365 / OUTLOOK SMTP
     # =====================================================
 
     try:
@@ -476,7 +430,7 @@ def send_mail(
         )
 
         print(
-            f"[notify] SMTP: {smtp_host}:{smtp_port}"
+            "[notify] SMTP sunucusu: smtp.office365.com:587"
         )
 
         print(
@@ -486,12 +440,16 @@ def send_mail(
         context = ssl.create_default_context()
 
         with smtplib.SMTP(
-            smtp_host,
-            smtp_port,
+            "smtp.office365.com",
+            587,
             timeout=60
         ) as server:
 
             server.ehlo()
+
+            print(
+                "[notify] STARTTLS başlatılıyor..."
+            )
 
             server.starttls(
                 context=context
@@ -500,7 +458,7 @@ def send_mail(
             server.ehlo()
 
             print(
-                "[notify] SMTP TLS bağlantısı kuruldu."
+                "[notify] TLS bağlantısı başarılı."
             )
 
             print(
@@ -513,7 +471,7 @@ def send_mail(
             )
 
             print(
-                "[notify] SMTP girişi başarılı."
+                "[notify] Microsoft hesabına giriş başarılı."
             )
 
             server.sendmail(
@@ -530,16 +488,16 @@ def send_mail(
     except smtplib.SMTPAuthenticationError as exc:
 
         print(
-            "[notify] MICROSOFT 365 GİRİŞ HATASI."
+            "[notify] MICROSOFT SMTP GİRİŞİ REDDEDİLDİ."
         )
 
         print(
-            "[notify] Kullanıcı adı/parola yanlış olabilir "
-            "veya kurum SMTP AUTH kullanımını engelliyor olabilir."
+            "[notify] Şifre yanlış olabilir veya "
+            "kurum SMTP AUTH kullanımını engelliyor olabilir."
         )
 
         print(
-            f"[notify] SMTP cevabı: {exc}"
+            f"[notify] Microsoft cevabı: {exc}"
         )
 
         raise
