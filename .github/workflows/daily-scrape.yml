@@ -3,9 +3,8 @@ name: Günlük Komisyon Güncelleme
 on:
   schedule:
     # Her gün Türkiye saatiyle 08:17
-    # Saat başı GitHub Actions yoğunluğundan kaçınmak için :17 seçildi.
-    - cron: "17 8 * * *"
-      timezone: "Europe/Istanbul"
+    # Türkiye UTC+3 olduğu için GitHub cron: 05:17 UTC
+    - cron: "17 5 * * *"
 
   workflow_dispatch:
     inputs:
