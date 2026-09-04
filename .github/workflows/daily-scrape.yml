@@ -3,8 +3,8 @@ name: Günlük Komisyon Güncelleme
 on:
   schedule:
     # Her gün Türkiye saatiyle 08:17
-    # Türkiye UTC+3 olduğu için GitHub cron: 05:17 UTC
-    - cron: "17 4 * * *"
+    # Türkiye UTC+3 -> 05:17 UTC
+    - cron: "17 5 * * *"
 
   workflow_dispatch:
     inputs:
@@ -24,7 +24,11 @@ jobs:
   scrape-and-update:
     runs-on: ubuntu-latest
 
+    # Workflow herhangi bir yerde sonsuza kadar beklemesin.
+    timeout-minutes: 45
+
     steps:
+
       # =====================================================
       # REPO
       # =====================================================
@@ -33,6 +37,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
 
       # =====================================================
       # PYTHON
@@ -43,14 +48,109 @@ jobs:
         with:
           python-version: "3.11"
 
+
+      # =====================================================
+      # PYTHON PAKETLERİ
+      # =====================================================
+
       - name: Bağımlılıkları yükle
+        timeout-minutes: 10
         run: |
+          set -e
+
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+
+          pip install \
+            --retries 5 \
+            --timeout 60 \
+            -r requirements.txt
+
+
+      # =====================================================
+      # PLAYWRIGHT / CHROMIUM
+      # =====================================================
+
+      - name: APT indirme ayarlarını sağlamlaştır
+        run: |
+          echo 'Acquire::Retries "5";' | sudo tee /etc/apt/apt.conf.d/80-github-retries
+          echo 'Acquire::http::Timeout "30";' | sudo tee -a /etc/apt/apt.conf.d/80-github-retries
+          echo 'Acquire::https::Timeout "30";' | sudo tee -a /etc/apt/apt.conf.d/80-github-retries
+
+          echo "APT retry ve timeout ayarları uygulandı."
+
 
       - name: Playwright Chromium kur
+        timeout-minutes: 20
+        shell: bash
         run: |
-          playwright install --with-deps chromium
+          set -e
+
+          echo "Playwright Chromium kurulumu başlıyor..."
+
+          SUCCESS=false
+
+          for ATTEMPT in 1 2; do
+
+            echo ""
+            echo "======================================"
+            echo "Chromium kurulum denemesi: $ATTEMPT / 2"
+            echo "======================================"
+
+            if timeout 8m python -m playwright install --with-deps chromium; then
+
+              echo "Chromium başarıyla kuruldu."
+              SUCCESS=true
+              break
+
+            else
+
+              EXIT_CODE=$?
+
+              echo ""
+              echo "Chromium kurulumu başarısız veya zaman aşımına uğradı."
+              echo "Çıkış kodu: $EXIT_CODE"
+
+              if [ "$ATTEMPT" -lt 2 ]; then
+
+                echo "30 saniye bekleniyor ve tekrar denenecek..."
+                sleep 30
+
+              fi
+
+            fi
+
+          done
+
+          if [ "$SUCCESS" != "true" ]; then
+            echo ""
+            echo "HATA: Chromium 2 denemede de kurulamadı."
+            echo "GitHub/Azure Ubuntu paket sunucusunda geçici bağlantı problemi olabilir."
+            exit 1
+          fi
+
+
+      # =====================================================
+      # PLAYWRIGHT KONTROL
+      # =====================================================
+
+      - name: Chromium kurulumunu doğrula
+        run: |
+          python - <<'PY'
+          from playwright.sync_api import sync_playwright
+
+          print("[playwright] Chromium test ediliyor...")
+
+          with sync_playwright() as p:
+              browser = p.chromium.launch(headless=True)
+
+              page = browser.new_page()
+              page.set_content("<html><body>OK</body></html>")
+
+              print("[playwright] Chromium başarıyla açıldı.")
+
+              browser.close()
+          PY
+
 
       # =====================================================
       # ESKİ EXCEL YEDEĞİ
@@ -59,16 +159,28 @@ jobs:
       - name: Eski Excel'i yedekle
         run: |
           if [ -f komisyonlar_guncel.xlsx ]; then
-            cp komisyonlar_guncel.xlsx komisyonlar_guncel_eski.xlsx
+
+            cp \
+              komisyonlar_guncel.xlsx \
+              komisyonlar_guncel_eski.xlsx
+
+            echo "Eski Excel yedeklendi."
+
+          else
+
+            echo "Eski Excel bulunamadı. İlk çalışma olabilir."
+
           fi
 
+
       # =====================================================
-      # SCRAPER
+      # SCRAPER SÜRÜMLERİ
       # =====================================================
 
       - name: Scraper sürümlerini göster
         run: |
           python - <<'PY'
+
           modules = [
               ("YAPIKREDI", "scraper_yapikredi"),
               ("GARANTİ", "scraper"),
@@ -83,20 +195,66 @@ jobs:
           ]
 
           for banka, module_name in modules:
+
               try:
+
                   mod = __import__(module_name)
-                  version = getattr(mod, "SCRAPER_VERSION", "SÜRÜM YOK")
-                  print(f"{banka}: {version}")
+
+                  version = getattr(
+                      mod,
+                      "SCRAPER_VERSION",
+                      "SÜRÜM YOK"
+                  )
+
+                  print(
+                      f"{banka}: {version}"
+                  )
+
               except Exception as exc:
-                  print(f"{banka}: sürüm okunamadı -> {exc}")
+
+                  print(
+                      f"{banka}: "
+                      f"sürüm okunamadı -> {exc}"
+                  )
+
           PY
 
+
+      # =====================================================
+      # SCRAPER
+      # =====================================================
+
       - name: Scraper'ı çalıştır ve Excel'i güncelle
+        timeout-minutes: 20
         run: |
+          echo "Komisyon scraper başlatılıyor..."
+
           python main.py
+
+          echo "Scraper tamamlandı."
+
+
+      # =====================================================
+      # EXCEL KONTROL
+      # =====================================================
+
+      - name: Güncel Excel oluşmuş mu kontrol et
+        run: |
+          if [ ! -f komisyonlar_guncel.xlsx ]; then
+
+            echo "HATA: komisyonlar_guncel.xlsx oluşturulamadı."
+            exit 1
+
+          fi
+
+          echo "Excel dosyası mevcut."
+
+          ls -lh komisyonlar_guncel.xlsx
+
 
       # =====================================================
       # MAIL BİLDİRİMİ
+      # Gmail sistemi
       # =====================================================
 
       - name: Değişiklik kontrolü ve mail bildirimi
@@ -104,11 +262,20 @@ jobs:
           MAIL_USER: ${{ secrets.MAIL_USER }}
           MAIL_PASS: ${{ secrets.MAIL_PASS }}
           MAIL_TO: ${{ secrets.MAIL_TO }}
+
         run: |
           TEST_MODE="${{ github.event.inputs.test_mail }}"
 
+          if [ -z "$TEST_MODE" ]; then
+            TEST_MODE="false"
+          fi
+
+          echo "TEST_MODE=$TEST_MODE"
+
           if [ "$TEST_MODE" = "true" ]; then
+
             python - <<'PY'
+
           from notify import check_and_notify
 
           check_and_notify(
@@ -116,21 +283,29 @@ jobs:
               "komisyonlar_guncel.xlsx",
               test_mode=True
           )
+
           PY
 
           elif [ -f komisyonlar_guncel_eski.xlsx ]; then
+
             python - <<'PY'
+
           from notify import check_and_notify
 
           check_and_notify(
               "komisyonlar_guncel_eski.xlsx",
               "komisyonlar_guncel.xlsx"
           )
+
           PY
 
           else
-            echo "[notify] İlk çalışma, karşılaştırma yapılmadı."
+
+            echo "[notify] İlk çalışma."
+            echo "[notify] Eski Excel olmadığı için karşılaştırma yapılmadı."
+
           fi
+
 
       # =====================================================
       # ARTIFACT
@@ -141,7 +316,9 @@ jobs:
         with:
           name: komisyon-raporu
           path: komisyonlar_guncel.xlsx
+          if-no-files-found: error
           retention-days: 30
+
 
       # =====================================================
       # GIT DEĞİŞİKLİK KONTROLÜ
@@ -149,34 +326,66 @@ jobs:
 
       - name: Excel değişmiş mi kontrol et
         id: git_check
+        shell: bash
         run: |
           if [ -n "$(git status --porcelain komisyonlar_guncel.xlsx)" ]; then
+
             echo "changed=true" >> "$GITHUB_OUTPUT"
+
             echo "Excel dosyasında değişiklik var."
+
           else
+
             echo "changed=false" >> "$GITHUB_OUTPUT"
+
             echo "Excel dosyasında değişiklik yok."
+
           fi
 
+
       # =====================================================
-      # COMMIT + GÜVENLİ PUSH
+      # COMMIT + PUSH
       # =====================================================
 
       - name: Excel dosyasını commit et ve push et
         if: steps.git_check.outputs.changed == 'true'
+        shell: bash
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          set -e
 
-          git add komisyonlar_guncel.xlsx
+          git config \
+            user.name \
+            "github-actions[bot]"
 
-          git commit -m "Komisyon ücretleri güncellendi ($(TZ='Europe/Istanbul' date +'%d.%m.%Y %H:%M'))"
+          git config \
+            user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
 
+          git add \
+            komisyonlar_guncel.xlsx
+
+          git commit \
+            -m "Komisyon ücretleri güncellendi ($(TZ='Europe/Istanbul' date +'%d.%m.%Y %H:%M'))"
+
+          echo ""
           echo "Remote main güncelleniyor..."
-          git fetch origin main
 
+          git fetch \
+            origin \
+            main
+
+          echo ""
           echo "Güncel main üzerine rebase yapılıyor..."
-          git rebase origin/main
 
+          git rebase \
+            origin/main
+
+          echo ""
           echo "Excel değişikliği push ediliyor..."
-          git push origin HEAD:main
+
+          git push \
+            origin \
+            HEAD:main
+
+          echo ""
+          echo "Push başarıyla tamamlandı."
