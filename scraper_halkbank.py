@@ -5,7 +5,7 @@ Bu sürüm:
 - Ana ücret sayfasındaki güncel alt sayfaları otomatik bulur.
 - Statik sayfalardaki tüm productservicefee tablo kimliklerini keşfeder.
 - Dinamik tabloları Halkbank'ın kullandığı resmî web API'sinden eksiksiz çeker.
-- 148 tablo / 367 dinamik satır altına düşerse yarım veri yazmak yerine hata verir.
+- 148 tablo / 356 gerçek dinamik ücret satırı altına düşerse yarım veri yazmak yerine hata verir.
 - 148 API tablosunu bankayı eşzamanlı istekle yormadan sıralı ve kontrollü çeker.
 - Requests/TLS yolu tamamlanamazsa Chromium DOM'unu beklemek yerine Playwright'ın
   ayrı HTTP motoruyla aynı resmî API tablolarını sıralı çeken fallback kullanır.
@@ -41,16 +41,27 @@ SCRAPER_VERSION = "2026-08-26-v8-halkbank-targeted-api-recovery"
 HALKBANK_ANA_URL = "https://www.halkbank.com.tr/tr/urun-ve-hizmet-ucretleri"
 HALKBANK_API_URL = "https://webapi.halkbank.com.tr/api/productservicefee/{table_id}"
 
-# 25.08.2026 tarihli resmî sayfa envanteri. Bunlar ücret tutarı değil,
-# dinamik Halkbank tablolarının eksiksiz yüklenip yüklenmediğini anlamak için
-# kullanılan asgari bütünlük eşikleridir. Yeni tablo/satırlar engellenmez;
-# yalnız eksik yükleme Excel yazımını durdurur.
+# Resmî Halkbank dinamik tablo envanteri için bütünlük eşikleri.
+#
+# ÖNEMLİ (04.09.2026 düzeltmesi):
+# Önceki sürüm API çıktı satırını 361'e sabitliyordu. Bu sayı
+# "356 gerçek feeItem + mutlaka 5 boş MKK placeholder satırı" varsayımına
+# dayanıyordu. Halkbank izin verilen MKK tablolarından bazılarını yeniden
+# doldurduğunda/boşalttığında 148/148 tablo eksiksiz yüklenmesine rağmen
+# toplam API çıktı satırı 359 gibi farklı bir değere inebiliyor.
+#
+# Gerçek veri bütünlüğünü boş placeholder sayısına bağlamıyoruz.
+# - En az 148 resmî API tablosu keşfedilmeli.
+# - En az 356 gerçek feeItem bulunmalı.
+# - İzin verilmeyen hiçbir tablo feeItems=[] dönmemeli.
+# - Her feeItem en az bir çıktı satırına dönüşmeli.
+# - Kritik Halkbank/MKK kalemleri sonuçta bulunmalı.
+#
+# Böylece gerçek eksik veri hâlâ durdurulur; yalnızca MKK tablolarının
+# boş/dolu durumundaki meşru değişim false-positive hata üretmez.
 MIN_API_TABLE_COUNT = 148
-# 25.08.2026'da beş MKK tablosu resmî API'de mevcut tutulup feeItems=[]
-# yayımlanmaya başladı. Kalan tablolarda 356 gerçek ücret satırı vardır;
-# boş beş hizmet ayrı durum satırı olarak korunur.
 MIN_API_ITEM_COUNT = 356
-MIN_API_OUTPUT_ROW_COUNT = 361
+
 ALLOWED_EMPTY_API_TABLE_IDS = {
     "147",  # MKK Hesap Açma Ücreti
     "148",  # MKK Şifre Gönderim Ücreti
@@ -58,6 +69,7 @@ ALLOWED_EMPTY_API_TABLE_IDS = {
     "150",  # MKK Menkul Kıymet Transferi Ücretleri
     "152",  # MKK Saklama Ücretleri
 }
+
 API_MAX_ATTEMPTS = 4
 API_TIMEOUT_SECONDS = 35
 API_SUCCESS_DELAY_SECONDS = 0.20
@@ -69,8 +81,9 @@ MIN_COMMERCIAL_PDF_PAGE_COUNT = 4
 MIN_COMMERCIAL_PDF_NUMBERED_ROWS = 190
 MIN_COMMERCIAL_PDF_OUTPUT_ROWS = 116
 
-# 361 API çıktı satırı + 135 doğrulanmış ticari PDF hizmeti.
-MIN_FINAL_ROW_COUNT = MIN_API_OUTPUT_ROW_COUNT + 135
+# Final güvenlik tabanı artık boş MKK placeholder sayısına bağlı değildir.
+# 356 gerçek API ücret satırı + 135 doğrulanmış ticari PDF hizmeti.
+MIN_FINAL_ROW_COUNT = MIN_API_ITEM_COUNT + 135
 
 REQUIRED_API_TERMS = (
     "mkk hesap bakim ucretleri",
@@ -2023,11 +2036,14 @@ def _validate_official_api_inventory(
             f"bulunan={fee_item_count} | beklenen_en_az={MIN_API_ITEM_COUNT}"
         )
 
-    if len(api_rows) < MIN_API_OUTPUT_ROW_COUNT:
+    # Her gerçek feeItem bir UcretSatiri üretmelidir. Boş kalmasına izin
+    # verilen MKK tabloları ayrıca placeholder satırı ekleyebildiği için
+    # api_rows sayısını 361 gibi sabit bir toplamla karşılaştırmıyoruz.
+    # Dinamik kontrol, parser'ın gerçek bir feeItem'ı kaybetmesini yine yakalar.
+    if len(api_rows) < fee_item_count:
         raise ScraperError(
-            "Halkbank resmî API çıktı satırları eksik: "
-            f"bulunan={len(api_rows)} | "
-            f"beklenen_en_az={MIN_API_OUTPUT_ROW_COUNT}"
+            "Halkbank resmî API çıktı satırları gerçek feeItem sayısının altında: "
+            f"çıktı={len(api_rows)} | fee_item={fee_item_count}"
         )
 
     searchable = "\n".join(
